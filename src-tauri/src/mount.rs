@@ -1,8 +1,174 @@
 //! User-triggered mounts go through the OS service; no sudo or password capture.
-use crate::{
-    model::{Os, Volume},
-    platform,
+use crate::{model::Volume, platform};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
 };
+
+#[derive(Default)]
+pub struct Manager {
+    mounts: Mutex<Vec<Mounted>>,
+    closing: AtomicBool,
+}
+
+#[derive(Debug)]
+struct Mounted {
+    volume: Volume,
+    point: String,
+    uuid: String,
+    fingerprint: Option<String>,
+    #[cfg(target_os = "linux")]
+    connection: zbus::blocking::Connection,
+}
+
+impl Manager {
+    pub fn mount(&self, id: &str) -> Result<String, String> {
+        let mut mounts = self.mounts.lock().unwrap_or_else(|e| e.into_inner());
+        if self.closing.load(Ordering::SeqCst) {
+            return Err("Raesir is closing".into());
+        }
+        let (volumes, _) = platform::volumes();
+        let volume = validate_volume(&volumes, id)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mounted = mount_with_connection(volume, &system_connection()?)?;
+            let point = mounted.point.clone();
+            mounts.push(mounted);
+            Ok(point)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (volume, &mut mounts);
+            Err(
+                "Mounting currently supports Linux; use the OS filesystem driver on Windows."
+                    .into(),
+            )
+        }
+    }
+    pub fn begin_closing(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+    }
+    pub fn resume(&self) {
+        self.closing.store(false, Ordering::SeqCst);
+    }
+    pub fn shutdown(&self) -> Result<(), String> {
+        self.begin_closing();
+        let mut mounts = self.mounts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut errors = Vec::new();
+        for i in (0..mounts.len()).rev() {
+            match mounts[i].unmount() {
+                Ok(()) => {
+                    mounts.remove(i);
+                }
+                Err(e) => errors.push(e),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Could not unmount Raesir's partitions: {}. Close any games/files using them and retry closing Raesir.",
+                errors.join("; ")
+            ))
+        }
+    }
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fingerprint(point: &str) -> Option<String> {
+    let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    for line in info.lines() {
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        let actual = fields
+            .get(4)?
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\");
+        if actual == point || actual == format!("/run/host{point}") {
+            return Some(format!("{}:{}:{}", fields[0], fields[2], fields[3]));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn object(volume: &Volume) -> Result<String, String> {
+    let basename = volume
+        .device
+        .strip_prefix("/dev/")
+        .ok_or("Invalid block device")?;
+    let escaped: String = basename
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("_{b:02x}")
+            }
+        })
+        .collect();
+    Ok(format!("/org/freedesktop/UDisks2/block_devices/{escaped}"))
+}
+
+impl Mounted {
+    #[cfg(target_os = "linux")]
+    fn unmount(&self) -> Result<(), String> {
+        use std::collections::HashMap;
+        use zbus::{blocking::Proxy, zvariant::Value};
+        let object = object(&self.volume)?;
+        let service = Proxy::new(
+            &self.connection,
+            "org.freedesktop.UDisks2",
+            object.as_str(),
+            "org.freedesktop.UDisks2.Filesystem",
+        )
+        .map_err(|e| e.to_string())?;
+        let points: Vec<Vec<u8>> = service
+            .get_property("MountPoints")
+            .map_err(|e| e.to_string())?;
+        // Someone may have unmounted it manually. Never unmount a replacement.
+        if !points
+            .iter()
+            .any(|p| p.strip_suffix(&[0]).unwrap_or(p) == self.point.as_bytes())
+        {
+            return Ok(());
+        }
+        if let (Some(before), Some(now)) = (&self.fingerprint, fingerprint(&self.point))
+            && before != &now
+        {
+            return Ok(());
+        }
+        let block = Proxy::new(
+            &self.connection,
+            "org.freedesktop.UDisks2",
+            object.as_str(),
+            "org.freedesktop.UDisks2.Block",
+        )
+        .map_err(|e| e.to_string())?;
+        let uuid: String = block.get_property("IdUUID").map_err(|e| e.to_string())?;
+        let device: Vec<u8> = block.get_property("Device").map_err(|e| e.to_string())?;
+        if uuid != self.uuid
+            || device.strip_suffix(&[0]).unwrap_or(&device) != self.volume.device.as_bytes()
+        {
+            return Ok(());
+        }
+        // No force/lazy unmount. Busy filesystems keep the app open for retry.
+        let result: Result<(), _> = service.call("Unmount", &(HashMap::<&str, Value<'_>>::new(),));
+        result.map_err(|e| format!("{}: {e}", self.point))
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn unmount(&self) -> Result<(), String> {
+        let _ = (&self.volume, &self.point, &self.uuid, &self.fingerprint);
+        Ok(())
+    }
+}
 
 pub fn mount_options(filesystem: &str) -> Option<&'static str> {
     match filesystem.to_ascii_lowercase().as_str() {
@@ -33,62 +199,30 @@ pub fn validate_volume<'a>(volumes: &'a [Volume], id: &str) -> Result<&'a Volume
     Ok(volume)
 }
 
-pub fn mount_read_only(id: &str) -> Result<String, String> {
-    if Os::host() != Os::Linux {
-        return Err("Mounting through the system authorization dialog currently supports Linux. On Windows, expose the volume with its filesystem driver first.".into());
-    }
-    let (volumes, _) = platform::volumes();
-    let volume = validate_volume(&volumes, id)?;
-    #[cfg(target_os = "linux")]
-    {
-        system_mount(volume)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = volume;
-        Err("Linux mount service is unavailable".into())
-    }
-}
-
 #[cfg(target_os = "linux")]
-fn system_mount(volume: &Volume) -> Result<String, String> {
+fn system_connection() -> Result<zbus::blocking::Connection, String> {
     use zbus::blocking::{Connection, connection::Builder};
-    let connection = Connection::system().or_else(|error| {
+    Connection::system().or_else(|error| {
         // Toolbx exposes the host system socket here. This is used only after
         // the explicit mount click; authorization is still enforced by Polkit.
         if std::env::var_os("RAESIR_DISABLE_HOST_BRIDGE").is_some()
             || std::env::var_os("DBUS_SYSTEM_BUS_ADDRESS").is_some()
             || !std::path::Path::new("/run/host/run/dbus/system_bus_socket").exists() { return Err(error); }
         Builder::address("unix:path=/run/host/run/dbus/system_bus_socket")?.build()
-    }).map_err(|_| "Cannot reach UDisks on the system bus. Run Raesir in the desktop host session or expose its system bus to this container.")?;
-    mount_with_connection(volume, &connection)
+    }).map_err(|_| "Cannot reach UDisks on the system bus. Run Raesir in the desktop host session or expose its system bus to this container.".into())
 }
 
 #[cfg(target_os = "linux")]
 fn mount_with_connection(
     volume: &Volume,
     connection: &zbus::blocking::Connection,
-) -> Result<String, String> {
+) -> Result<Mounted, String> {
     use std::collections::HashMap;
     use zbus::{
         blocking::Proxy,
         zvariant::{OwnedValue, Value},
     };
-    let basename = volume
-        .device
-        .strip_prefix("/dev/")
-        .ok_or("Invalid block device")?;
-    let escaped: String = basename
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() {
-                (b as char).to_string()
-            } else {
-                format!("_{b:02x}")
-            }
-        })
-        .collect();
-    let object = format!("/org/freedesktop/UDisks2/block_devices/{escaped}");
+    let object = object(volume)?;
     let block = Proxy::new(
         connection,
         "org.freedesktop.UDisks2",
@@ -103,6 +237,11 @@ fn mount_with_connection(
         return Err("The selected device changed; rescan first.".into());
     }
     let filesystem: String = block.get_property("IdType").map_err(|e| e.to_string())?;
+    let uuid: String = block.get_property("IdUUID").map_err(|e| e.to_string())?;
+    if !uuid.is_empty() && !volume.id.is_empty() && volume.id != volume.device && volume.id != uuid
+    {
+        return Err("The selected partition identity changed; rescan first.".into());
+    }
     if !filesystem.eq_ignore_ascii_case(&volume.filesystem) {
         return Err("The filesystem changed; rescan first.".into());
     }
@@ -121,6 +260,12 @@ fn mount_with_connection(
         "org.freedesktop.UDisks2.Filesystem",
     )
     .map_err(|e| e.to_string())?;
+    let points: Vec<Vec<u8>> = service
+        .get_property("MountPoints")
+        .map_err(|e| e.to_string())?;
+    if !points.is_empty() {
+        return Err("This partition was mounted elsewhere. Rescan to read it.".into());
+    }
     let mut options = HashMap::new();
     options.insert(
         "options",
@@ -128,7 +273,14 @@ fn mount_with_connection(
     );
     // Omitting auth.no_user_interaction allows the desktop's Polkit agent to
     // ask for approval/password. Raesir never receives that password.
-    service.call("Mount", &(options,)).map_err(|e| format!("Mount was cancelled or failed: {e}. Check UDisks, the filesystem driver and your desktop authorization agent. No writable fallback was attempted."))
+    let point: String = service.call("Mount", &(options,)).map_err(|e| format!("Mount was cancelled or failed: {e}. Check UDisks, the filesystem driver and your desktop authorization agent. No writable fallback was attempted."))?;
+    Ok(Mounted {
+        volume: volume.clone(),
+        fingerprint: fingerprint(&point),
+        point,
+        uuid,
+        connection: connection.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -191,6 +343,9 @@ mod tests {
             .unwrap();
         let fstab = Arc::new(AtomicBool::new(false));
         let calls = Arc::new(AtomicUsize::new(0));
+        let mounted = Arc::new(AtomicBool::new(false));
+        let busy = Arc::new(AtomicBool::new(false));
+        let unmounts = Arc::new(AtomicUsize::new(0));
         struct Block {
             fstab: Arc<AtomicBool>,
         }
@@ -204,6 +359,10 @@ mod tests {
             fn id_type(&self) -> String {
                 "ntfs".into()
             }
+            #[zbus(property, name = "IdUUID")]
+            fn id_uuid(&self) -> String {
+                "fixture-uuid".into()
+            }
             #[zbus(property)]
             fn configuration(&self) -> Vec<(String, HashMap<String, OwnedValue>)> {
                 if self.fstab.load(Ordering::SeqCst) {
@@ -215,9 +374,20 @@ mod tests {
         }
         struct Filesystem {
             calls: Arc<AtomicUsize>,
+            mounted: Arc<AtomicBool>,
+            busy: Arc<AtomicBool>,
+            unmounts: Arc<AtomicUsize>,
         }
         #[zbus::interface(name = "org.freedesktop.UDisks2.Filesystem")]
         impl Filesystem {
+            #[zbus(property)]
+            fn mount_points(&self) -> Vec<Vec<u8>> {
+                if self.mounted.load(Ordering::SeqCst) {
+                    vec![b"/fixture/mounted-readonly\0".to_vec()]
+                } else {
+                    vec![]
+                }
+            }
             fn mount(&self, options: HashMap<String, OwnedValue>) -> zbus::fdo::Result<String> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let value = options
@@ -228,7 +398,17 @@ mod tests {
                         "unexpected mount arguments".into(),
                     ));
                 }
+                self.mounted.store(true, Ordering::SeqCst);
                 Ok("/fixture/mounted-readonly".into())
+            }
+            fn unmount(&self, options: HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+                assert!(options.is_empty()); // Never force/lazy unmount.
+                self.unmounts.fetch_add(1, Ordering::SeqCst);
+                if self.busy.load(Ordering::SeqCst) {
+                    return Err(zbus::fdo::Error::Failed("volume busy".into()));
+                }
+                self.mounted.store(false, Ordering::SeqCst);
+                Ok(())
             }
         }
         let path = "/org/freedesktop/UDisks2/block_devices/raesir_5ffixture";
@@ -247,6 +427,9 @@ mod tests {
                 path,
                 Filesystem {
                     calls: calls.clone(),
+                    mounted: mounted.clone(),
+                    busy: busy.clone(),
+                    unmounts: unmounts.clone(),
                 },
             )
             .unwrap()
@@ -258,10 +441,30 @@ mod tests {
             filesystem: "ntfs".into(),
             ..Volume::default()
         };
-        assert_eq!(
-            mount_with_connection(&volume, &connection).unwrap(),
-            "/fixture/mounted-readonly"
+        let lease = mount_with_connection(&volume, &connection).unwrap();
+        assert_eq!(lease.point, "/fixture/mounted-readonly");
+        // Already-mounted partitions are never adopted by Raesir.
+        assert!(
+            mount_with_connection(&volume, &connection)
+                .unwrap_err()
+                .contains("mounted elsewhere")
         );
+        let manager = Manager::default();
+        manager.mounts.lock().unwrap().push(lease);
+        busy.store(true, Ordering::SeqCst);
+        assert!(manager.shutdown().unwrap_err().contains("busy"));
+        assert_eq!(manager.mounts.lock().unwrap().len(), 1);
+        busy.store(false, Ordering::SeqCst);
+        manager.shutdown().unwrap();
+        assert_eq!(unmounts.load(Ordering::SeqCst), 2);
+        assert!(!mounted.load(Ordering::SeqCst));
+        manager.shutdown().unwrap();
+        assert_eq!(unmounts.load(Ordering::SeqCst), 2);
+        // A pre-existing mount has no lease and survives app cleanup.
+        mounted.store(true, Ordering::SeqCst);
+        Manager::default().shutdown().unwrap();
+        assert!(mounted.load(Ordering::SeqCst));
+        mounted.store(false, Ordering::SeqCst);
         fstab.store(true, Ordering::SeqCst);
         assert!(
             mount_with_connection(&volume, &connection)

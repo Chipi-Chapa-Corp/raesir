@@ -1,17 +1,16 @@
 # Raesir
 
-Minimal Tauri 2 + Rust + Svelte 5 Steam inventory prototype. The UI is a bullet list of titles and their ownership/installation states.
+Minimal Tauri 2 + Rust + Svelte 5 Steam and Epic library prototype.
 
 ## Run
 
-Install Node.js, Rust, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). On Fedora the desktop build needs `gtk3-devel`, `webkit2gtk4.1-devel`, and `librsvg2-devel`.
+Install Node.js, Rust and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+On Fedora the desktop build needs `gtk3-devel`, `webkit2gtk4.1-devel`, and `librsvg2-devel`.
 
 ```sh
 npm ci
 npm run tauri dev
 ```
-
-Build a standalone development binary without creating installers:
 
 ```sh
 npm run tauri build -- --debug --no-bundle
@@ -19,75 +18,57 @@ npm run tauri build -- --debug --no-bundle
 
 The Linux binary is `src-tauri/target/debug/raesir`.
 
-## What works
+## Interface
 
-- Finds native and Flatpak Steam roots on Linux; uses the Steam registry path and standard locations on Windows.
-- Reads modern and older `libraryfolders.vdf` layouts, and `appmanifest_*.acf` files across libraries.
-- Lists installed, incomplete, missing-folder, owned-only, and previously seen/unavailable states. Shared Steam runtimes are filtered out.
-- Merges installations by Steam AppID, retaining each path and managing OS. Installation OS describes the Steam installation, not whether the payload is a Windows executable used through Proton.
-- Enumerates partitions with `lsblk` on Linux and PowerShell's Storage module on Windows, including other partitions on the same physical disk.
-- Inspects readable mounts for Windows/Linux OS markers and known Steam locations, including Linux home and common Btrfs subvolume layouts.
-- Accepts additional Steam folders, library folders, or mounted OS roots, with an optional OS hint. Explicit path mappings translate paths such as `D:` to `/mnt/games`, or `/home` to `L:\home`.
-- Remembers previous installations when a library is inaccessible. A successful scan of an empty library can establish removal; a failed or corrupt scan cannot.
-- Reports unavailable partitions and actionable filesystem-tool warnings. On Windows a readable Btrfs volume can be supplied through WinBtrfs. Unmounted Linux GPT partitions are reported even without filesystem identification; raw superblock probing can identify Btrfs/ext4 when existing permissions allow it.
+The app scans known Steam/Epic locations automatically and displays one bullet list of titles, stores, and installation states. There are no manual folder, mapping, account-key, partition-details, or metadata controls. Old saved manual folder settings are not restored.
 
-Storage discovery never changes partitions. The separate **Mount read-only** action only runs after an explicit click. An NTFS/Linux partition is only a candidate until its OS or Steam files can be read. Extra folders and path mappings are remembered in the app's local webview storage.
+Search combines with five filters: **Installed**, **Not installed**, **On a different OS**, **Steam**, **Epic**. Installed means a ready installation on either OS. Not installed excludes games installed on another OS. On a different OS is an additional constraint, so selecting it always narrows results. Installed/not installed form one facet (both checked or both unchecked means either status); Steam/Epic form another. Search, status, OS location and store combine with AND. Unavailable historical foreign installations remain visible under On a different OS.
 
-## Ownership
+Unreadable mount candidates appear as OS banners with **Mount**. An unmounted filesystem cannot prove which OS is installed, so unverified candidates say Possible Windows/Linux installation detected. After mounting, readable OS markers establish the OS and known libraries are scanned automatically. No raw paths or manifest IDs are displayed in the game list.
 
-Installed manifests do **not** establish account ownership. Offline scans explicitly show **Ownership unknown**.
+## Steam
 
-Expand **Steam library & ownership → Use a Steam Web API key instead** to query Valve's `GetOwnedGames` endpoint with a SteamID64 and Steam Web API key. Game details must be visible to that API. The key is used only for that request, sent to `api.steampowered.com`, and never saved. Titles returned by Steam are cached for the one selected account. Ownership reflects that last successful lookup, including played free games returned by the API. An inaccessible/private library does not replace the previous owned list with an empty list.
+Native and Flatpak installations are detected on Linux; registry/default locations are checked on Windows. Manifests and libraryfolders identify installations, not ownership. Steam AppIDs remain separate from Epic IDs.
 
-Results are stored in Tauri's application data directory (`dev.raesir.launcher`): `inventory.json` and `owned.json`. **Forget owned list** removes the account-library cache while preserving installation discovery. `RAESIR_DATA_DIR` overrides the directory for isolated tests.
+On Linux x86_64, startup and Rescan automatically query ownership through Steam's logged-in client. If Steam is already running, Raesir borrows its session without taking over shutdown. Otherwise Raesir starts Steam minimized using its existing login and stops only that managed session on exit. Finish login/Steam Guard in Steam and rescan if needed.
 
-## Managed Steam session (experimental)
+The client-auth bridge is experimental. A disposable subprocess loads the installed `steamclient.so` and checks cached game/demo/mod IDs using versioned client interfaces. No passwords, cookies or refresh tokens are copied. Cached metadata bounds the list; shared/temporary licenses can be included. A failed lookup keeps the last successful Raesir snapshot. Windows client-auth lookup and cross-sandbox client communication remain unsupported/unverified.
 
-On Linux x86_64, **Read running Steam library** queries an already-running Steam session without starting another client or taking ownership of its lifetime. If Steam is not running, **Start Steam & read library** starts the selected detected native/Flatpak client with `-silent`. Steam reuses its own saved login. Finish any Steam login/Guard prompt normally, then retry the lookup. Raesir never reads or copies passwords, cookies or refresh tokens.
+Normal close waits for managed Steam cleanup. Forced app termination or a system crash can bypass cleanup. Existing external Steam sessions are left running.
 
-A disposable subprocess loads the selected client's `linux64/steamclient.so`, connects to its global user using versioned interfaces, and checks game/demo/mod IDs from `appcache/appinfo.vdf` against `ISteamApps::BIsSubscribedApp`. Cached metadata alone is never used as ownership proof. The helper has a timeout and crashes cannot take down the Tauri UI.
+## Epic
 
-This is a client-version/runtime-dependent experiment, not a supported general-purpose Valve launcher API. It can only return games present in the client's metadata cache. Shared/temporary licenses may be included, so its results say **In Steam library**, while the Web API results retain **Owned**. These methods replace the one cached account list, rather than combining accounts.
+Scanning reads official launcher `.item` manifests and `LauncherInstalled.dat`, Legendary installed/asset/metadata records, and Heroic library caches. Native and Flatpak Heroic profiles, legacy Legendary profiles, common Wine/Lutris/Bottles prefixes, and detected Steam Proton prefixes are checked. Mounted Windows/Linux roots and common home/Btrfs layouts are checked automatically. Discovery is bounded to known locations.
 
-An already-running Steam client is borrowed for the lookup and remains running when Raesir closes, including after a failed lookup. **Stop managed Steam** is disabled for borrowed sessions. The selected installation still supplies the IPC library and cached catalog; select the installation corresponding to your running client.
+Heroic external-client installation markers are retained without inventing payload paths. Equal titles across stores remain separate; equal Epic AppNames merge their installations across OSes. Standalone DLC and Unreal/Marketplace content are filtered when metadata identifies them. Missing or corrupt sources preserve previous installations as unavailable; a valid empty source can confirm removal.
 
-For Steam started by Raesir, native/Flatpak bootstrap and Steam/helper process identities are tracked; normal app close waits for graceful `-shutdown`, then terminates only recorded owned processes if needed. If Steam still cannot be stopped, Raesir stays open and reports the error. **Stop managed Steam** also works after a failed login/import. Existing unrelated Steam processes are never shut down. Forced termination of Raesir or a system crash can bypass normal exit cleanup.
+**Refresh Epic** queries every detected local Legendary/Heroic profile using the installed [Legendary CLI](https://github.com/derrod/legendary). Sign in using Heroic or `legendary auth` first. Legendary must be on PATH, or set `RAESIR_LEGENDARY_BINARY` to its executable. Raesir invokes `list --json --third-party --force-refresh`; Legendary handles its login refresh and cache writes. Foreign profiles are read-only. The CLI lookup has a timeout and is cancelled on normal exit. No Epic/Heroic client is started or stopped.
 
-The bridge currently supports Linux x86_64 only. Windows still has the Web API option. Run the app in a runtime able to launch and communicate with the installed Steam client; Steam inside another sandbox/container can be incompatible. No arbitrary AppID, injected Steam plugin, copied auth token or web-debugging port is used.
+Library state reflects cached account results, possibly from multiple profiles; installed files alone do not prove ownership. Raesir does not decode official legacy/Early Preview account caches or invoke `legendary auth --import`, which can log the official launcher out. With only the official launcher, installation records are available; Heroic/Legendary supplies uninstalled account titles.
 
-## Mounting with OS authorization
+Formats are checked against upstream [Legendary models](https://github.com/derrod/legendary/blob/master/legendary/models/game.py), [Epic manifest models](https://github.com/derrod/legendary/blob/master/legendary/models/egl.py), [Heroic profile locations](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/blob/main/src/backend/storeManagers/legendary/constants.ts), and [Playnite's Epic reader](https://github.com/JosefNemec/PlayniteExtensions/blob/master/source/Libraries/EpicLibrary/EpicLauncher.cs).
 
-For unmounted NTFS/ext4/Btrfs volumes on Linux, expand **Storage & scan warnings** and click **Mount read-only**. The backend re-enumerates the selected volume and checks the UDisks device/filesystem before calling `org.freedesktop.UDisks2.Filesystem.Mount`. Your desktop's Polkit agent may ask for approval/an administrator password; Raesir never receives that password. There is no sudo prompt or writable fallback.
+## Mount lifecycle
 
-NTFS requests `ro`, ext4 `ro,noload`, and Btrfs `ro,nologreplay`. UDisks must allow those options. `/etc/fstab` devices are refused because UDisks can ignore caller options for them; mount/configure those read-only through the OS first. Encrypted devices still require unlocking using OS tools. Successful mounts trigger a scan and remain mounted until you unmount them using your OS tools.
+On Linux, Mount asks UDisks to mount a selected unmounted partition read-only. The OS Polkit agent handles approval/password entry; Raesir never receives the password. NTFS requests `ro`, ext4 `ro,noload`, Btrfs `ro,nologreplay`. There is no writable fallback. Fstab devices are refused because UDisks may ignore caller options. Encrypted storage still needs unlocking through the OS.
 
-UDisks and a desktop authorization agent are required. On Toolbx, the explicit mount action can use the exposed host system-bus socket at `/run/host/run/dbus/system_bus_socket` if the ordinary system bus is unavailable. Existing explicit bus configuration is respected. `RAESIR_DISABLE_HOST_BRIDGE=1` disables that fallback for isolated diagnostics. Host mounts exposed under `/run/host/run/media`, `/run/host/mnt`, `/run/host/media` or `/run/host/var/mnt` are scanned too.
+Only successful mounts created by Raesir are tracked. Already-mounted partitions are never adopted. Normal app exit first stops its managed Steam client, then unmounts its own partitions in reverse order. Mount point, device, UUID and available kernel mount identity are rechecked to leave removed/replaced mounts alone. No force/lazy unmount is used. If a filesystem is busy or authorization fails, Raesir stays open, reports the problem, and retries cleanup on the next close. Pre-existing mounts remain mounted. Forced termination/system crashes bypass normal cleanup.
 
-## Current boundaries
+UDisks and a desktop authorization agent are required. In Toolbx the explicit mount action can use `/run/host/run/dbus/system_bus_socket` when the ordinary system bus is absent; explicit bus configuration is respected. Host mounts exposed under `/run/host/run/media`, `/run/host/mnt`, `/run/host/media` or `/run/host/var/mnt` are scanned.
 
-This increment discovers games and optionally starts a managed Steam client; game launching is still outside its scope.
+On Windows, Linux filesystems need existing OS support such as WinBtrfs or an ext4 reader. Raesir does not install drivers or mount Windows volumes. Mounted readable paths are scanned automatically. WSL cannot attach the disk currently running Windows. Windows storage/runtime behavior still requires hardware validation.
 
-Other-OS scanning currently requires readable filesystem paths. It does not bundle WinBtrfs, an ext4 reader, LUKS support, or an elevated storage helper. Missing/unavailable support is reported instead of treating the partition as empty. On Windows, an unmounted Linux partition may need administrator read access before its exact filesystem can be identified. WSL `--mount` cannot attach the disk running Windows, even for a different partition.
+## Data and verification
 
-Automatic directory discovery is bounded to known locations. Custom Steam roots, unusual mount layouts, separate home partitions and unresolved foreign library paths can be added manually. Drive-letter mapping is not guessed when several mounted volumes match. Linux/Windows data files are not automatically shared across boots; scans can read the other installation directly when its partition is accessible.
-
-The Windows scanner is cross-checked for compilation; Windows runtime/storage behavior still needs validation on Windows hardware. Linux filesystem discovery and the Tauri UI are exercised locally. Steam IPC is tested against a compiled native ABI fixture, process cleanup against test child processes, and mount requests against a fake UDisks service on a dedicated private D-Bus. Live Steam login/auth and real partition mounting/Polkit prompts have not been exercised, to avoid taking over running user clients or mounting user partitions during agent-owned diagnostics.
-
-## Verification
+Inventory/account snapshots are saved atomically in Tauri's app-data directory: `inventory.json`, `owned.json`, `epic-owned.json`. `RAESIR_DATA_DIR` overrides this for diagnostics. Data files are not automatically shared across boots. This prototype reads libraries; launching games remains outside this increment.
 
 ```sh
 npm run check
-npm run build
+npm test
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-Read-only JSON diagnostics without a GUI, writes, or network requests:
+Readers use fixture manifests/caches, Steam IPC a compiled ABI fixture, Legendary a fake CLI, and mount/unmount lifecycle a fake UDisks service on a private D-Bus. Live account authentication and real mounts/Polkit prompts have not been exercised during agent diagnostics. Windows core code is cross-checked for compilation.
 
-```sh
-cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin raesir-scan
-# Additional accessible OS roots / Steam folders:
-cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin raesir-scan -- /mnt/windows
-```
-
-Agent-owned GUI tests must use the private display/D-Bus helper described in the user's `isolated-gui` skill. Do not launch diagnostics on the user's desktop. Use fresh application-data and XDG directories, set `RAESIR_DISABLE_HOST_BRIDGE=1`, and do not request real mounts or start the user's Steam during GUI tests.
+Agent-owned GUI checks must use the user's isolated-gui private display and D-Bus helper, fresh application/XDG data, `RAESIR_DISABLE_HOST_BRIDGE=1`, and `RAESIR_DISABLE_STEAM_IPC=1`. Do not start user clients or request real mounts in diagnostics.

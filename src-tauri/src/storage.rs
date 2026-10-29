@@ -1,4 +1,4 @@
-use crate::{model::*, steam};
+use crate::{inventory, model::*, steam};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fs, path::Path};
 
@@ -42,7 +42,9 @@ pub fn scan_and_save(dir: &Path, options: &ScanOptions) -> Report {
     let mut warnings = Vec::new();
     let owned = load::<OwnedLibrary>(&dir.join("owned.json"), &mut warnings).unwrap_or_default();
     let previous = load::<Report>(&dir.join("inventory.json"), &mut warnings);
-    let mut report = steam::scan(options, &owned, previous.as_ref());
+    let online = load::<Vec<EpicOnlineLibrary>>(&dir.join("epic-owned.json"), &mut warnings)
+        .unwrap_or_default();
+    let mut report = inventory::scan(options, &owned, &online, previous.as_ref());
     report.warnings.extend(warnings);
     if let Err(e) = write_json(&dir.join("inventory.json"), &report) {
         report.warnings.push(e);

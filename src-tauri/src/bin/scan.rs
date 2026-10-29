@@ -1,7 +1,7 @@
 //! Read-only scanner diagnostics, without opening a desktop or accessing the API.
 use raesir_lib::{
+    inventory,
     model::{Os, OwnedLibrary, ScanOptions, Source},
-    steam,
 };
 
 fn main() {
@@ -18,6 +18,6 @@ fn main() {
             os: Os::Unknown,
         });
     }
-    let report = steam::scan(&options, &OwnedLibrary::default(), None);
+    let report = inventory::scan(&options, &OwnedLibrary::default(), &[], None);
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 }

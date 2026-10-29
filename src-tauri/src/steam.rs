@@ -143,8 +143,8 @@ pub fn scan(options: &ScanOptions, owned: &OwnedLibrary, previous: Option<&Repor
             mounts.push(p.clone());
         }
         let discovered = platform::sources_at(&p, source.os);
-        if discovered.is_empty() {
-            warnings.push(format!("No readable Steam library found at {} or its known Steam locations. Check the mount, permissions, or add the Steam library folder directly.", p.display()));
+        if discovered.is_empty() && crate::epic::sources_at(&p, source.os).is_empty() {
+            warnings.push(format!("No readable Steam or Epic library found at {} or its known locations. Check the mount, permissions, or add the client metadata folder directly.", p.display()));
         }
         sources.extend(discovered);
     }
@@ -339,6 +339,7 @@ pub fn scan_sources(
         warnings,
         owned_account: (!owned.steamid.is_empty()).then(|| owned.steamid.clone()),
         owned_source: owned.source.clone(),
+        epic: EpicReport::default(),
     }
 }
 

@@ -47,7 +47,7 @@ pub struct Installation {
     pub library: String,
     pub path: String,
     pub os: Os,
-    // installed, incomplete, files_missing, unavailable
+    // installed, incomplete, files_missing, unavailable, external
     pub state: String,
     pub last_seen: u64,
 }
@@ -80,6 +80,49 @@ pub struct Report {
     pub owned_account: Option<String>,
     #[serde(default)]
     pub owned_source: String,
+    #[serde(default)]
+    pub epic: EpicReport,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EpicReport {
+    pub games: Vec<EpicGame>,
+    pub sources: Vec<EpicSource>,
+    pub legendary_available: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EpicSource {
+    pub path: String,
+    // legendary, heroic_cache, heroic_external, egl_manifests, egl_dat, legendary_export
+    pub kind: String,
+    pub os: Os,
+    pub local: bool,
+    /// A Wine drive_c or mounted Windows root for translating C: paths.
+    #[serde(default)]
+    pub drive_c: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EpicGame {
+    /// Epic's opaque AppName; never merge on title or with Steam AppIDs.
+    pub app_name: String,
+    pub title: String,
+    pub library_sources: Vec<String>,
+    pub installations: Vec<Installation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EpicOnlineLibrary {
+    pub profile: String,
+    pub checked_at: u64,
+    pub games: Vec<EpicTitle>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EpicTitle {
+    pub app_name: String,
+    pub title: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

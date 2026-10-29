@@ -288,6 +288,9 @@ impl Manager {
         }
     }
     pub fn read_library(&self, root: &str) -> Result<OwnedLibrary, String> {
+        if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
+            return Err("Steam IPC is disabled for isolated diagnostics".into());
+        }
         if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             return Err("Client-auth lookup currently supports Linux x86_64; use the Web API on this platform.".into());
         }
