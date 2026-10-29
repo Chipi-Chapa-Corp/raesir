@@ -1,7 +1,7 @@
 [package]
 name = "raesir"
 version = "0.1.0"
-description = "A minimal Steam and Epic library inspector"
+description = "A unified game library for Windows and Linux"
 edition = "2024"
 default-run = "raesir"
 
@@ -31,13 +31,19 @@ name = "raesir-scan"
 path = "src/bin/scan.rs"
 
 [dependencies]
-tauri = { version = "2", features = [], optional = true }
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tempfile = "3"
 libloading = "0.8"
 steam-vdf-parser = "0.1.2"
+roxmltree = "0.21"
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde_yaml_ng = "0.10"
+prost = "0.14"
+shlex = "1"
+tokio = { version = "1", features = ["sync"] }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

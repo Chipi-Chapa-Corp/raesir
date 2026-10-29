@@ -238,6 +238,7 @@ pub fn scan(
     report: &Report,
     online: &[EpicOnlineLibrary],
     previous: Option<&EpicReport>,
+    prefixes: &[crate::discovery::Location],
 ) -> (EpicReport, Vec<String>) {
     let mut sources = local_sources();
     let mut mounts: Vec<_> = report
@@ -267,26 +268,16 @@ pub fn scan(
             wine_at(&prefix, library.os, &mut sources);
         }
     }
+    for prefix in prefixes {
+        let start = sources.len();
+        wine_at(&prefix.path, Os::Linux, &mut sources);
+        for source in &mut sources[start..] {
+            source.local = prefix.local;
+        }
+    }
     let mut seen = BTreeSet::new();
     sources.retain(|s| seen.insert((s.path.clone(), s.kind.clone())));
-    let (mut epic, mut warnings) =
-        scan_sources(&sources, &mounts, &options.mappings, online, previous);
-    let mut preview_roots = mounts.clone();
-    if let Some(home) = platform::home() {
-        preview_roots.push(home);
-    }
-    preview_roots.extend(options.sources.iter().map(|s| PathBuf::from(&s.path)));
-    let preview_present = env::var_os("LOCALAPPDATA")
-        .is_some_and(|p| PathBuf::from(p).join("com.epicgames.eglv2").is_dir())
-        || preview_roots.iter().any(|root| {
-            root.join("AppData/Local/com.epicgames.eglv2").is_dir()
-                || children(&root.join("Users"))
-                    .iter()
-                    .any(|u| u.join("AppData/Local/com.epicgames.eglv2").is_dir())
-        });
-    if preview_present {
-        warnings.push("Epic Early Preview was detected. Raesir reads compatible official install manifests, but does not decode the preview account cache. Use Heroic/Legendary or its JSON export for uninstalled library titles.".into());
-    }
+    let (mut epic, warnings) = scan_sources(&sources, &mounts, &options.mappings, online, previous);
     epic.legendary_available = epic_online::binary().is_some();
     (epic, warnings)
 }
@@ -313,7 +304,7 @@ fn text<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.get(field)?.as_str().filter(|s| !s.trim().is_empty())
 }
 
-fn is_game(value: &Value) -> bool {
+pub(crate) fn is_game(value: &Value) -> bool {
     let meta = value.get("metadata").unwrap_or(value);
     if value.get("is_dlc").and_then(Value::as_bool) == Some(true)
         || value.pointer("/install/is_dlc").and_then(Value::as_bool) == Some(true)
@@ -335,10 +326,27 @@ fn is_game(value: &Value) -> bool {
         .get("categories")
         .and_then(Value::as_array)
         .is_some_and(|categories| {
-            categories
+            categories.iter().filter_map(|c| text(c, "path")).any(|c| {
+                [
+                    "assets",
+                    "asset-format",
+                    "plugins",
+                    "projects",
+                    "mods",
+                    "addons",
+                    "dlc",
+                    "currency",
+                    "virtualcurrency",
+                    "consumables",
+                    "soundtrack",
+                    "digitalextras",
+                ]
                 .iter()
-                .filter_map(|c| text(c, "path"))
-                .any(|c| ["assets", "asset-format", "plugins", "projects", "mods"].contains(&c))
+                .any(|kind| {
+                    c.eq_ignore_ascii_case(kind)
+                        || c.to_ascii_lowercase().starts_with(&format!("{kind}/"))
+                })
+            })
         });
     !category_excluded
 }
@@ -848,6 +856,23 @@ mod tests {
     }
     fn run(sources: &[EpicSource], previous: Option<&EpicReport>) -> (EpicReport, Vec<String>) {
         scan_sources(sources, &[], &[], &[], previous)
+    }
+    #[test]
+    fn currency_and_extras_are_filtered_by_category_not_game_title() {
+        for category in [
+            "addons",
+            "addons/currency",
+            "currency",
+            "soundtrack",
+            "digitalextras",
+        ] {
+            assert!(!is_game(
+                &json!({"metadata":{"categories":[{"path":category}]}})
+            ));
+        }
+        assert!(is_game(
+            &json!({"app_title":"Coin","metadata":{"categories":[{"path":"games/edition"}]}})
+        ));
     }
     #[test]
     fn official_manifests_and_fallback_index_keep_install_state_without_claiming_ownership() {

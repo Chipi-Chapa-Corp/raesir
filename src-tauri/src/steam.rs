@@ -340,6 +340,9 @@ pub fn scan_sources(
         owned_account: (!owned.steamid.is_empty()).then(|| owned.steamid.clone()),
         owned_source: owned.source.clone(),
         epic: EpicReport::default(),
+        ea: EaReport::default(),
+        catalog: vec![],
+        scanned_at: 0,
     }
 }
 

@@ -18,6 +18,52 @@ fn load<T: DeserializeOwned>(path: &Path, warnings: &mut Vec<String>) -> Option<
     }
 }
 
+pub fn cached(dir: &Path) -> Option<Report> {
+    let mut report = load::<Report>(&dir.join("inventory.json"), &mut vec![])?;
+    if report.catalog.is_empty() {
+        report.catalog = crate::catalog::from_report(&report);
+    }
+    report.catalog.retain(crate::catalog::visible);
+    crate::catalog::hydrate_os(&mut report);
+    Some(report)
+}
+
+pub fn apply_owned(dir: &Path, owned: &OwnedLibrary, mut report: Report) -> Report {
+    for game in &mut report.games {
+        game.owned = owned.games.iter().any(|g| g.appid == game.appid);
+    }
+    for game in &owned.games {
+        if !report.games.iter().any(|g| g.appid == game.appid) {
+            report.games.push(Game {
+                appid: game.appid,
+                title: game.name.clone(),
+                owned: true,
+                installations: vec![],
+            });
+        }
+    }
+    report.owned_account = Some(owned.steamid.clone());
+    report.owned_source = owned.source.clone();
+    for game in &mut report.catalog {
+        if game.store == "steam" {
+            game.in_library = owned.games.iter().any(|g| g.appid.to_string() == game.id);
+        }
+    }
+    for game in crate::catalog::from_report(&report)
+        .into_iter()
+        .filter(|g| g.store == "steam")
+    {
+        crate::catalog::merge(&mut report.catalog, game);
+    }
+    report
+        .catalog
+        .sort_by_cached_key(|g| (g.title.to_lowercase(), g.key.clone()));
+    if let Err(error) = write_json(&dir.join("inventory.json"), &report) {
+        report.warnings.push(error);
+    }
+    report
+}
+
 pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;

@@ -82,6 +82,71 @@ pub struct Report {
     pub owned_source: String,
     #[serde(default)]
     pub epic: EpicReport,
+    #[serde(default)]
+    pub ea: EaReport,
+    #[serde(default)]
+    pub catalog: Vec<LibraryGame>,
+    #[serde(default)]
+    pub scanned_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LibraryGame {
+    pub key: String,
+    pub store: String,
+    pub id: String,
+    pub title: String,
+    pub in_library: bool,
+    pub installations: Vec<Installation>,
+    pub client: String,
+    #[serde(default)]
+    pub client_os: Vec<Os>,
+    pub cover: Option<String>,
+    pub launch: Option<GameAction>,
+    pub store_page: Option<GameAction>,
+    pub uninstall: Option<GameAction>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_game: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameAction {
+    pub client: String,
+    pub target: ActionTarget,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActionTarget {
+    Url {
+        url: String,
+    },
+    Command {
+        program: String,
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EaReport {
+    pub games: Vec<EaGame>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EaGame {
+    pub id: String,
+    pub aliases: Vec<String>,
+    pub title: String,
+    pub library_sources: Vec<String>,
+    pub installations: Vec<Installation>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

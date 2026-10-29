@@ -1,0 +1,26 @@
+[package]
+name = "raesir-native"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+profile = ["gpui/profiler"]
+benchmark = ["profile"]
+
+[dependencies]
+gpui = { package = "gpui-ce", version = "=0.3.0", default-features = false }
+gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", default-features = false, features = ["wayland", "x11"] }
+gpui_ce_elements = "=0.3.0"
+serde_json = "1"
+raesir_lib = { package = "raesir", path = "../src-tauri", default-features = false }
+dirs = "7"
+image_codec = { package = "image", version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+
+[[bin]]
+name = "raesir"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"

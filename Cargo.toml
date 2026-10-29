@@ -1,0 +1,9 @@
+[workspace]
+members = ["native"]
+default-members = ["native"]
+exclude = ["src-tauri", "gpui-mock"]
+resolver = "3"
+
+[profile.dev]
+debug = 0
+incremental = false
