@@ -19,7 +19,8 @@ mod header;
 mod icons;
 mod library;
 mod views;
-use header::{Header, HeaderState, button, icon, pill};
+use header::{Header, HeaderState, button, pill};
+use icons::icon;
 
 mod smooth_scroll;
 use smooth_scroll::SmoothWheel;
@@ -27,19 +28,6 @@ use smooth_scroll::SmoothWheel;
 mod benchmark;
 
 const STORES: [&str; 5] = ["steam", "epic", "ea", "ubisoft", "xbox"];
-fn palette(i: usize) -> (u32, u32) {
-    const COLORS: [(u32, u32); 8] = [
-        (0x008b94, 0x113244),
-        (0x2f8d59, 0x143f4a),
-        (0x93612b, 0x652f48),
-        (0x2e6eb8, 0x283348),
-        (0xb13e53, 0x4f2344),
-        (0x687e27, 0x213c4c),
-        (0x3977a4, 0x553c76),
-        (0xba5e28, 0x364a48),
-    ];
-    COLORS[i % COLORS.len()]
-}
 
 struct Launcher {
     backend: Arc<backend::Backend>,
@@ -59,7 +47,6 @@ struct Launcher {
     artwork_attempted: HashSet<String>,
     games: Vec<Game>,
     available: u8,
-    icons: icons::Icons,
     search: Entity<EditableTextState>,
     _search_subscription: Subscription,
     header: Entity<Header>,
@@ -96,7 +83,6 @@ impl Launcher {
         eprintln!("GPU: {:?}", window.gpu_specs());
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let icons = icons::load(cx);
         let search = cx.new(|cx| EditableTextState::new(StringStorage::default(), cx));
         let search_subscription = cx.subscribe(&search, |this, search, _: &TextChanged, cx| {
             this.query = search.read(cx).as_str().to_owned();
@@ -104,7 +90,7 @@ impl Launcher {
         });
         let header_state = HeaderState {
             store: None,
-            status: 0,
+            status: 1,
             os: 0,
             query: String::new(),
             menu: false,
@@ -118,7 +104,6 @@ impl Launcher {
             let search_focus = search.focus_handle(cx);
             Header {
                 state: header_state.clone(),
-                icons: icons.clone(),
                 owner,
                 search: search.clone(),
                 _focus_subscriptions: [
@@ -150,7 +135,6 @@ impl Launcher {
             artwork_attempted: HashSet::new(),
             games: vec![],
             available: 0,
-            icons,
             search,
             _search_subscription: search_subscription,
             header,
@@ -159,7 +143,7 @@ impl Launcher {
             rows: ListState::new(31, ListAlignment::Top, px(300.)),
             columns: 8,
             store: None,
-            status: 0,
+            status: 1,
             os: 0,
             query: String::new(),
             focus,
@@ -276,7 +260,9 @@ impl Launcher {
                 this.update(cx, |this, cx| {
                     if this.hovered == Some(i) {
                         this.backdrop.update(cx, |backdrop, cx| {
-                            if backdrop.retarget(i) {
+                            if let Some(colors) = this.games[i].colors
+                                && backdrop.retarget(colors)
+                            {
                                 cx.notify();
                             }
                         });
@@ -292,6 +278,7 @@ impl Launcher {
 
     fn card(&self, i: usize, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let g = &self.games[i];
+        let colors = g.colors.unwrap_or(backdrop::DEFAULT_COLORS);
         let installed = g.installed(self.os, self.host);
         let installed_here = installed == 1;
         let playable = installed_here && g.source.launch.is_some();
@@ -325,8 +312,8 @@ impl Launcher {
                     .overflow_hidden()
                     .bg(linear_gradient(
                         130.,
-                        linear_color_stop(rgb(palette(i).0), 0.),
-                        linear_color_stop(rgb(palette(i).1), 1.),
+                        linear_color_stop(rgb(colors[0]), 0.),
+                        linear_color_stop(rgb(colors[1]), 1.),
                     ))
                     .when_some(g.poster.clone(), |d, poster| {
                         d.child(
@@ -367,28 +354,27 @@ impl Launcher {
                             .items_center()
                             .justify_center()
                             .bg(rgba(0x102522db))
-                            .child(icon(&self.icons, STORES[g.store])),
+                            .child(icon(STORES[g.store])),
                     )
                     .when(
                         !installed_here && self.os != 1 && g.other_os(self.host).is_some(),
                         |d| {
                             d.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    img(self.icons[if g.other_os(self.host) == Some(Os::Linux) {
-                                        "linux"
-                                    } else {
-                                        "windows"
-                                    }]
-                                    .clone())
-                                    .size(rems(1.8)),
-                                ),
-                        )
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        icon(if g.other_os(self.host) == Some(Os::Linux) {
+                                            "linux"
+                                        } else {
+                                            "windows"
+                                        })
+                                        .size(rems(1.8)),
+                                    ),
+                            )
                         },
                     )
                     .when(g.poster.is_none(), |d| {
@@ -418,7 +404,6 @@ impl Launcher {
                     })
                     .child(
                         button(
-                            &self.icons,
                             ("action", i),
                             if playable { "play" } else { "external" },
                             false,
@@ -609,7 +594,7 @@ impl Render for Launcher {
                                 .rounded(rems(1.8))
                                 .p(rems(2.5))
                                 .gap(rems(1.))
-                                .child(img(self.icons["empty-search"].clone()).size(rems(2.)))
+                                .child(icon("empty-search").size(rems(2.)))
                                 .child(if self.load_error.is_some() {
                                     "Could not load library"
                                 } else if self.games.is_empty() {

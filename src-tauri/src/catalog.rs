@@ -84,9 +84,7 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
             add_os(&mut item.client_os, report.host_os);
         }
         item.client = "Steam".into();
-        item.cover = Some(format!(
-            "https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg"
-        ));
+        item.cover = Some(steam_cover(&id, &report.libraries));
         item.store_page = Some(url(
             "Steam",
             format!("https://store.steampowered.com/app/{id}/"),
@@ -234,6 +232,37 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
     result
 }
 
+fn steam_cover(id: &str, libraries: &[Source]) -> String {
+    for source in libraries {
+        let library = Path::new(&source.path);
+        let root = if library.file_name().is_some_and(|n| n == "steamapps") {
+            library.parent().unwrap_or(library)
+        } else {
+            library
+        };
+        let cache = root.join("appcache/librarycache");
+        for path in [
+            cache.join(format!("{id}_library_600x900.jpg")),
+            cache.join(id).join("library_600x900.jpg"),
+        ] {
+            if path.is_file() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(cache.join(id)) {
+            let mut paths: Vec<_> = entries
+                .flatten()
+                .map(|e| e.path().join("library_600x900.jpg"))
+                .collect();
+            paths.sort();
+            if let Some(path) = paths.into_iter().find(|p| p.is_file()) {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg")
+}
+
 pub fn merge(games: &mut Vec<LibraryGame>, incoming: LibraryGame) {
     if let Some(existing) = games.iter_mut().find(|g| g.key == incoming.key) {
         for os in incoming.client_os {
@@ -372,6 +401,27 @@ pub fn install(source: &str, path: String, os: Os, complete: bool) -> Installati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_cover_reads_hashed_and_legacy_library_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let libraries = vec![Source {
+            path: dir.path().join("steamapps").to_string_lossy().into_owned(),
+            os: Os::Linux,
+        }];
+        let cache = dir.path().join("appcache/librarycache");
+        let portrait = cache.join("3527290/asset-hash/library_600x900.jpg");
+        std::fs::create_dir_all(portrait.parent().unwrap()).unwrap();
+        std::fs::write(&portrait, b"portrait").unwrap();
+        assert_eq!(
+            steam_cover("3527290", &libraries),
+            portrait.to_string_lossy()
+        );
+        let legacy = cache.join("3527290_library_600x900.jpg");
+        std::fs::write(&legacy, b"portrait").unwrap();
+        assert_eq!(steam_cover("3527290", &libraries), legacy.to_string_lossy());
+        assert!(steam_cover("42", &libraries).starts_with("https://"));
+    }
 
     #[test]
     fn cached_uninstalled_libraries_keep_their_client_os_and_merge_across_systems() {

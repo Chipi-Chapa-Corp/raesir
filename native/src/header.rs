@@ -1,4 +1,4 @@
-use crate::icons::Icons;
+use crate::icons::icon;
 use crate::{Launcher, STORES};
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{EditableTextState, text_input};
@@ -18,7 +18,6 @@ pub struct HeaderState {
 
 pub struct Header {
     pub state: HeaderState,
-    pub icons: Icons,
     pub owner: WeakEntity<Launcher>,
     pub search: Entity<EditableTextState>,
     pub _focus_subscriptions: [Subscription; 2],
@@ -39,24 +38,9 @@ pub fn pill() -> Div {
         })
 }
 
-pub fn icon(icons: &Icons, name: &'static str) -> impl IntoElement + use<> {
-    img(icons[name].clone())
-        .size(rems(
-            if matches!(
-                name,
-                "steam" | "epic" | "ea" | "ubisoft" | "xbox" | "windows" | "linux"
-            ) {
-                1.55
-            } else {
-                1.25
-            },
-        ))
-        .object_fit(ObjectFit::Contain)
-}
-
 fn sync_icon(syncing: bool) -> AnyElement {
     let icon = svg()
-        .path("icons/sync.svg")
+        .path("sync")
         .size(rems(1.25))
         .text_color(rgb(0xbccfc7));
     if syncing {
@@ -75,13 +59,34 @@ fn sync_icon(syncing: bool) -> AnyElement {
     }
 }
 
-pub fn button(
-    icons: &Icons,
+pub fn button(id: impl Into<ElementId>, name: &'static str, selected: bool) -> Stateful<Div> {
+    button_shell(id, selected).child(icon(name))
+}
+
+struct FilterTooltip(&'static str);
+
+impl Render for FilterTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        pill()
+            .px(rems(0.85))
+            .py(rems(0.45))
+            .bg(rgba(0x102522f0))
+            .text_size(rems(1.))
+            .whitespace_nowrap()
+            .shadow_sm()
+            .child(self.0)
+    }
+}
+
+fn filter_button(
     id: impl Into<ElementId>,
     name: &'static str,
     selected: bool,
+    label: &'static str,
 ) -> Stateful<Div> {
-    button_shell(id, selected).child(icon(icons, name))
+    button(id, name, selected)
+        .tooltip_show_delay(millis(400))
+        .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
 }
 
 fn button_shell(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
@@ -135,11 +140,16 @@ impl Render for Header {
             .child(
                 pill()
                     .child(
-                        button(&self.icons, "all-stores", "all", self.state.store.is_none())
-                            .on_click(self.listener(|this, _, _, cx| {
-                                this.store = None;
-                                this.filter(cx);
-                            })),
+                        filter_button(
+                            "all-stores",
+                            "all",
+                            self.state.store.is_none(),
+                            "All platforms",
+                        )
+                        .on_click(self.listener(|this, _, _, cx| {
+                            this.store = None;
+                            this.filter(cx);
+                        })),
                     )
                     .children(
                         STORES
@@ -147,11 +157,18 @@ impl Render for Header {
                             .enumerate()
                             .filter(|(i, _)| self.state.available & (1 << i) != 0)
                             .map(|(i, name)| {
-                                button(&self.icons, ("store", i), name, self.state.store == Some(i))
-                                    .on_click(self.listener(move |this, _, _, cx| {
+                                filter_button(
+                                    ("store", i),
+                                    name,
+                                    self.state.store == Some(i),
+                                    ["Steam", "Epic Games", "EA", "Ubisoft Connect", "Xbox"][i],
+                                )
+                                .on_click(self.listener(
+                                    move |this, _, _, cx| {
                                         this.store = Some(i);
                                         this.filter(cx);
-                                    }))
+                                    },
+                                ))
                             }),
                     ),
             )
@@ -170,7 +187,7 @@ impl Render for Header {
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         window.focus(&search_focus, cx);
                     })
-                    .child(icon(&self.icons, "search"))
+                    .child(icon("search"))
                     .child(
                         text_input("search-games")
                             .state(self.search.downgrade())
@@ -194,31 +211,41 @@ impl Render for Header {
                     .flex()
                     .gap(rems(0.6))
                     .child(
-                        pill().children(["all", "installed", "cloud"].into_iter().enumerate().map(
-                            |(i, icon)| {
-                                button(
-                                    &self.icons,
-                                    ("status", i),
-                                    icon,
-                                    self.state.status == i as u8,
-                                )
-                                .on_click(self.listener(
-                                    move |this, _, _, cx| {
-                                        this.status = i as u8;
-                                        this.filter(cx);
-                                    },
-                                ))
-                            },
-                        )),
+                        pill().children(
+                            ["all", "installed", "not-installed"]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, icon)| {
+                                    filter_button(
+                                        ("status", i),
+                                        icon,
+                                        self.state.status == i as u8,
+                                        ["All games", "Installed", "Not installed"][i],
+                                    )
+                                    .on_click(self.listener(
+                                        move |this, _, _, cx| {
+                                            this.status = i as u8;
+                                            this.filter(cx);
+                                        },
+                                    ))
+                                }),
+                        ),
                     )
                     .child(
                         pill().children(["all", "this", "other"].into_iter().enumerate().map(
                             |(i, icon)| {
-                                button(&self.icons, ("os", i), icon, self.state.os == i as u8)
-                                    .on_click(self.listener(move |this, _, _, cx| {
+                                filter_button(
+                                    ("os", i),
+                                    icon,
+                                    self.state.os == i as u8,
+                                    ["All operating systems", "This OS", "Other OS"][i],
+                                )
+                                .on_click(self.listener(
+                                    move |this, _, _, cx| {
                                         this.os = i as u8;
                                         this.filter(cx);
-                                    }))
+                                    },
+                                ))
                             },
                         )),
                     )
@@ -229,26 +256,24 @@ impl Render for Header {
                                     .child(sync_icon(self.state.syncing))
                                     .on_click(self.listener(|this, _, _, cx| this.sync(cx))),
                             )
-                            .child(
-                                button(&self.icons, "menu", "menu", self.state.menu).on_click(
-                                    self.listener(|this, _, _, cx| {
-                                        this.menu = !this.menu;
-                                        cx.notify();
-                                    }),
-                                ),
-                            ),
+                            .child(button("menu", "menu", self.state.menu).on_click(
+                                self.listener(|this, _, _, cx| {
+                                    this.menu = !this.menu;
+                                    cx.notify();
+                                }),
+                            )),
                     )
                     .child(
                         pill()
                             .child(
-                                button(&self.icons, "min", "minimize", false)
+                                button("min", "minimize", false)
                                     .on_click(|_, window, _| window.minimize_window()),
                             )
                             .child(
-                                button(&self.icons, "max", "maximize", false)
+                                button("max", "maximize", false)
                                     .on_click(|_, window, _| window.zoom_window()),
                             )
-                            .child(button(&self.icons, "close", "close", false).on_click(
+                            .child(button("close", "close", false).on_click(
                                 self.listener(|this, _, window, cx| this.close(window, cx)),
                             )),
                     ),

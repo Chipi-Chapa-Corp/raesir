@@ -46,6 +46,7 @@ impl Launcher {
                 if let Some(previous) = old.get(&game.source.key) {
                     if previous.source.cover == game.source.cover {
                         game.poster = previous.poster.clone();
+                        game.colors = previous.colors;
                     }
                     if game.title == game.source.id && previous.title != previous.source.id {
                         game.title = previous.title.clone();

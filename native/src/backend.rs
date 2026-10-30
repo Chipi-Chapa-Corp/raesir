@@ -311,7 +311,7 @@ mod tests {
             .unwrap();
         let mut game = raesir_lib::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
         game.cover = Some(path.to_string_lossy().into_owned());
-        let (image, _) = crate::artwork::load(&backend, &game).unwrap();
+        let (image, _, _) = crate::artwork::load(&backend, &game).unwrap();
         assert_eq!(image.frame_count(), 1);
         assert!(!image.as_bytes(0).unwrap().is_empty());
         assert_eq!(

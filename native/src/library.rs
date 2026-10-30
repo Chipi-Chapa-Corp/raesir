@@ -8,6 +8,7 @@ pub struct Game {
     pub store: usize,
     pub source: LibraryGame,
     pub poster: Option<Arc<RenderImage>>,
+    pub colors: Option<[u32; 2]>,
 }
 
 impl Game {
@@ -19,6 +20,7 @@ impl Game {
             store,
             source,
             poster: None,
+            colors: None,
         })
     }
 

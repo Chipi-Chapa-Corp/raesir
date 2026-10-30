@@ -37,6 +37,12 @@ pub fn cached(game: &LibraryGame, root: &Path) -> Option<Artwork> {
     })
 }
 pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
+    if let Some(path) = game.cover.as_ref().filter(|p| Path::new(p).is_file()) {
+        return Ok(Artwork {
+            path: path.clone(),
+            title: None,
+        });
+    }
     if let Some(value) = cached(game, root) {
         return Ok(value);
     }
@@ -206,4 +212,25 @@ fn save(root: &Path, key: &str, bytes: &[u8], title: Option<String>) -> Result<A
         path: path.to_string_lossy().into(),
         title,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_cover_takes_priority_over_download_and_missing_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("library_600x900.jpg");
+        fs::write(&local, b"local portrait").unwrap();
+        let mut game = catalog::entry("steam", "3527290", "PEAK", vec![], "steam");
+        game.cover = Some(local.to_string_lossy().into_owned());
+        let key = stem(&game);
+        fs::write(dir.path().join(format!("{key}.missing")), []).unwrap();
+        fs::write(dir.path().join(format!("{key}.img")), b"old header").unwrap();
+        assert_eq!(
+            fetch(&game, dir.path()).unwrap().path,
+            local.to_string_lossy()
+        );
+    }
 }

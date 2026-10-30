@@ -72,7 +72,7 @@ impl Launcher {
                     .px(rems(1.))
                     .py(rems(0.4))
                     .gap(rems(0.8))
-                    .child(img(self.icons[os].clone()).size(rems(1.55)))
+                    .child(crate::icons::icon(os).size(rems(1.55)))
                     .child(div().flex_1().text_size(rems(1.)).child(format!(
                         "{}{} detected",
                         if volume.os == Os::Unknown {

@@ -8,25 +8,26 @@ pub struct Backdrop {
     revision: usize,
 }
 
-fn colors(index: usize) -> [Hsla; 2] {
-    let (a, b) = crate::palette(index);
+pub const DEFAULT_COLORS: [u32; 2] = [0x008b94, 0x113244];
+
+fn colors([a, b]: [u32; 2]) -> [Hsla; 2] {
     [rgb_to_hsla(rgb(a)), rgb_to_hsla(rgb(b))]
 }
 
 impl Default for Backdrop {
     fn default() -> Self {
         Self {
-            from: colors(0),
-            target: colors(0),
-            displayed: Rc::new(Cell::new(colors(0))),
+            from: colors(DEFAULT_COLORS),
+            target: colors(DEFAULT_COLORS),
+            displayed: Rc::new(Cell::new(colors(DEFAULT_COLORS))),
             revision: 0,
         }
     }
 }
 
 impl Backdrop {
-    pub fn retarget(&mut self, index: usize) -> bool {
-        let target = colors(index);
+    pub fn retarget(&mut self, palette: [u32; 2]) -> bool {
+        let target = colors(palette);
         if target == self.target {
             return false;
         }
