@@ -127,6 +127,7 @@ struct Playback {
     frame: Option<Arc<RenderImage>>,
     error: Option<String>,
     position: f64,
+    seek_target: Option<f64>,
     duration: f64,
     volume: f64,
     paused: bool,
@@ -253,12 +254,11 @@ impl Player {
         if let Some(drag) = self.drag.take() {
             match drag.slider {
                 Slider::Seek => {
-                    let duration = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .duration;
-                    self.command(&["seek", &format!("{}", drag.ratio * duration), "absolute"]);
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let target = drag.ratio * state.duration;
+                    state.seek_target = Some(target);
+                    drop(state);
+                    self.command(&["seek", &target.to_string(), "absolute+exact"]);
                 }
                 Slider::Volume => {
                     self.command(&["set", "volume", &format!("{}", drag.ratio * 100.)]);
@@ -443,15 +443,22 @@ fn run(
                 loaded?;
                 let mut size = [960i32, 540];
                 let mut stride = size[0] as usize * 4;
+                let mut seeking = None;
                 while !stop.load(Ordering::Relaxed) {
                     let _ = rx.recv_timeout(Duration::from_millis(40));
-                    for args in commands.try_iter() {
-                        send(args)?;
-                    }
                     loop {
                         let event = &*(api.event)(handle, 0.);
                         if event.kind == 0 {
                             break;
+                        }
+                        if event.kind == 21
+                            && let Some(target) = seeking.take()
+                        {
+                            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                            if state.seek_target == Some(target) {
+                                state.position = target;
+                                state.seek_target = None;
+                            }
                         }
                         if event.kind == 22 && !event.data.is_null() {
                             let property = &*(event.data as *const Property);
@@ -487,6 +494,12 @@ fn run(
                                 );
                             }
                         }
+                    }
+                    for args in commands.try_iter() {
+                        if args.first().is_some_and(|s| s == "seek") {
+                            seeking = args.get(1).and_then(|s| s.parse::<f64>().ok());
+                        }
+                        send(args)?;
                     }
                     if (api.update)(context) & 1 == 0 {
                         continue;
@@ -565,7 +578,7 @@ impl Render for Player {
             .drag
             .filter(|d| d.slider == Slider::Seek)
             .map(|d| d.ratio * duration)
-            .unwrap_or(state.position);
+            .unwrap_or(state.seek_target.unwrap_or(state.position));
         let volume = self
             .drag
             .filter(|d| d.slider == Slider::Volume)

@@ -8,6 +8,7 @@ use crate::{
     model::*,
 };
 use std::{collections::BTreeSet, path::Path};
+pub(crate) use ubisoft::cached_cover as ubisoft_cover;
 
 pub struct Scan<'a> {
     pub report: &'a Report,

@@ -21,20 +21,33 @@ impl Launcher {
             .flex()
             .flex_col()
             .items_center()
-            .gap(rems(0.7))
+            .rounded(rems(0.8))
+            .overflow_hidden()
+            .bg(rgba(0x101010a6))
             .child(
                 div()
                     .w_full()
                     .h(px(width * 1.5))
-                    .rounded(rems(0.8))
+                    .flex_none()
+                    .rounded_t(rems(0.8))
                     .bg(rgba(0xffffff1a)),
             )
             .child(
                 div()
-                    .w(relative(0.7))
-                    .h(rems(1.1))
-                    .rounded_full()
-                    .bg(rgba(0xffffff1a)),
+                    .w_full()
+                    .h(rems(crate::CARD_TITLE_HEIGHT))
+                    .mt(px(-width * 1.5 * crate::CARD_TITLE_OVERLAP))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(relative(0.7))
+                            .h(rems(1.1))
+                            .rounded_full()
+                            .bg(rgba(0xffffff1a)),
+                    ),
             )
     }
 

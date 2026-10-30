@@ -46,6 +46,7 @@ impl Launcher {
                 if let Some(previous) = old.get(&game.source.key) {
                     if previous.source.cover == game.source.cover {
                         game.poster = previous.poster.clone();
+                        game.card_poster = previous.card_poster.clone();
                         game.background = previous.background.clone();
                         game.background_checked = previous.background_checked;
                     }
@@ -278,10 +279,10 @@ impl Launcher {
     }
 
     pub fn save_zoom(&self, cx: &mut Context<Self>) {
+        self.backend.set_zoom(self.zoom);
         let backend = self.backend.clone();
-        let zoom = self.zoom;
         cx.background_executor()
-            .spawn(async move { backend.save_zoom(zoom) })
+            .spawn(async move { backend.save_ui() })
             .detach();
     }
 }

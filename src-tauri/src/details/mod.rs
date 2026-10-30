@@ -12,12 +12,20 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 mod providers;
+pub(crate) use providers::{ea_cover, epic_cover};
+pub mod rich;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Details {
     pub key: String,
     pub title: String,
+    #[serde(default)]
+    pub store_url: Option<String>,
     pub description: String,
+    #[serde(default)]
+    pub description_html: Option<String>,
+    #[serde(skip)]
+    pub description_blocks: Vec<rich::Block>,
     pub developers: Vec<String>,
     pub publishers: Vec<String>,
     pub genres: Vec<String>,
@@ -104,6 +112,10 @@ impl Review {
 }
 
 impl Details {
+    fn set_description(&mut self, source: String) {
+        self.description = clean(&source);
+        self.description_html = Some(source);
+    }
     pub fn score(&self) -> Option<f64> {
         self.scores.iter().find_map(|s| {
             let (left, right) = s.rsplit_once('/')?;
@@ -113,6 +125,19 @@ impl Details {
         })
     }
     fn normalize(&mut self) {
+        let base = match self.key.split(':').next().unwrap_or_default() {
+            "epic" => "https://store.epicgames.com/",
+            "ea" => "https://store.ea.com/",
+            "ubisoft" => "https://store.ubisoft.com/",
+            "xbox" => "https://www.microsoft.com/",
+            _ => "https://store.steampowered.com/",
+        };
+        self.description_blocks = rich::parse(
+            self.description_html
+                .as_deref()
+                .unwrap_or(&self.description),
+            base,
+        );
         self.released = display_date(&self.released);
         for review in &mut self.reviews {
             review.text = review_text(&review.text);
@@ -262,6 +287,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
                         || details.requirements.is_empty();
                     if details.description.is_empty() {
                         details.description = other.description;
+                        details.description_html = other.description_html;
                     }
                     if details.developers.is_empty() {
                         details.developers = other.developers;
@@ -479,14 +505,6 @@ fn store_url(game: &LibraryGame) -> Option<&str> {
             None
         }
     })
-}
-fn html_text(document: &Html, css: &str) -> String {
-    document
-        .select(&selector(css))
-        .map(|n| clean(&n.inner_html()))
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 fn embedded_json(s: &str, marker: &str) -> Option<Value> {
     let value = s

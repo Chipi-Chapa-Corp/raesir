@@ -22,6 +22,15 @@ fn stem(game: &LibraryGame) -> String {
     if game.store == "xbox" {
         "portrait-v2".hash(&mut hash);
     }
+    if game.store == "epic" {
+        "epic-portrait-v1".hash(&mut hash);
+    }
+    if game.store == "ubisoft" {
+        "localized-portrait-v1".hash(&mut hash);
+    }
+    if game.store == "ea" {
+        "ea-portrait-v1".hash(&mut hash);
+    }
     format!("{:016x}", hash.finish())
 }
 pub fn cached(game: &LibraryGame, root: &Path) -> Option<Artwork> {
@@ -54,7 +63,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
     }
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let key = stem(game);
-    let missing = root.join(format!("{key}.missing"));
+    let missing = root.join(format!("{key}.lookup-v2.missing"));
     if fs::metadata(&missing)
         .and_then(|m| m.modified())
         .ok()
@@ -75,6 +84,12 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
     let http = HTTP.as_ref().map_err(Clone::clone)?;
     let mut title = None;
     let mut candidates = game.cover.iter().cloned().collect::<Vec<_>>();
+    if game.store == "ubisoft"
+        && let Some(url) = crate::adapters::ubisoft_cover(game)
+        && !candidates.contains(&url)
+    {
+        candidates.insert(0, url);
+    }
     if game.store == "xbox"
         && game.id.len() == 12
         && let Ok(value) = json(
@@ -119,6 +134,38 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
             return save(root, &key, &bytes, title.clone());
         }
     }
+    let provider_cover = match game.store.as_str() {
+        "epic" => crate::details::epic_cover(http, game).ok(),
+        "ea" => crate::details::ea_cover(http, game).ok(),
+        _ => None,
+    };
+    if let Some(url) = provider_cover
+        && let Ok(bytes) = image(http, &url)
+    {
+        return save(root, &key, &bytes, None);
+    }
+    if game.store == "steam"
+        && let Some(url) = steam_portrait(http, &game.id)
+        && let Ok(bytes) = image(http, &url)
+    {
+        return save(root, &key, &bytes, None);
+    }
+    if game.store == "steam"
+        && let Ok(data) = json(
+            http,
+            &format!(
+                "https://store.steampowered.com/api/appdetails?appids={}",
+                catalog::encode(&game.id)
+            ),
+        )
+        && let Some(url) = data
+            .get(&game.id)
+            .and_then(|v| v.pointer("/data/header_image"))
+            .and_then(Value::as_str)
+        && let Ok(bytes) = image(http, url)
+    {
+        return save(root, &key, &bytes, None);
+    }
     // Exact title matches only: never give a card another edition's artwork.
     if game.store != "steam"
         && let Ok(data) = json(
@@ -149,6 +196,30 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
     let _ = fs::write(missing, []);
     Err("No matching cover artwork found".into())
 }
+fn steam_portrait(http: &reqwest::blocking::Client, id: &str) -> Option<String> {
+    let appid = id.parse::<u32>().ok()?;
+    let input = serde_json::json!({"ids":[{"appid":appid}],"context":{"language":"english","country_code":"US"},"data_request":{"include_assets":true}});
+    let data = json(
+        http,
+        &format!(
+            "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json={}",
+            catalog::encode(&input.to_string())
+        ),
+    )
+    .ok()?;
+    let assets = data.pointer("/response/store_items/0/assets")?;
+    let file = assets
+        .get("library_capsule_2x")
+        .or_else(|| assets.get("library_capsule"))?
+        .as_str()?;
+    let path = assets
+        .get("asset_url_format")?
+        .as_str()?
+        .replace("${FILENAME}", file);
+    path.starts_with(&format!("steam/apps/{appid}/"))
+        .then(|| format!("https://shared.akamai.steamstatic.com/store_item_assets/{path}"))
+}
+
 fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
@@ -197,7 +268,9 @@ fn image(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String>
         || !(bytes.starts_with(b"\xff\xd8\xff")
             || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
             || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
-            || bytes.starts_with(b"GIF8"))
+            || bytes.starts_with(b"GIF8")
+            || bytes.get(4..12) == Some(b"ftypavif")
+            || bytes.get(4..12) == Some(b"ftypavis"))
     {
         return Err("Invalid cover image".into());
     }

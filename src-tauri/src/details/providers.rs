@@ -18,6 +18,7 @@ pub(super) fn steam(
         return Err("This Steam edition has no public store page".into());
     }
     parse_steam(data, out);
+    out.store_url = Some(format!("https://store.steampowered.com/app/{id}/"));
     out.sources.push("Steam".into());
     if with_reviews {
         let input = json!({"appid":id.parse::<u64>().unwrap_or(0),"filter":1,"languages":["english"],"review_type":0,"purchase_type":0,"num_per_page":12});
@@ -37,9 +38,9 @@ pub(super) fn steam(
     Ok(())
 }
 fn parse_steam(data: &Value, out: &mut Details) {
-    out.description = clean(&text(data, "detailed_description"));
+    out.set_description(text(data, "detailed_description"));
     if out.description.is_empty() {
-        out.description = clean(&text(data, "short_description"));
+        out.set_description(text(data, "short_description"));
     }
     out.developers = strings(data, "developers");
     out.publishers = strings(data, "publishers");
@@ -235,9 +236,9 @@ pub(super) fn xbox(client: &Client, game: &LibraryGame, out: &mut Details) -> Re
 }
 fn parse_xbox(product: &Value, out: &mut Details) {
     if let Some(local) = array(product, "LocalizedProperties").first() {
-        out.description = clean(&text(local, "ProductDescription"));
+        out.set_description(text(local, "ProductDescription"));
         if out.description.is_empty() {
-            out.description = clean(&text(local, "ShortDescription"));
+            out.set_description(text(local, "ShortDescription"));
         }
         out.developers = vec![text(local, "DeveloperName")];
         out.publishers = vec![text(local, "PublisherName")];
@@ -390,7 +391,7 @@ fn parse_xbox_reviews(value: &Value, out: &mut Details) {
         .collect();
 }
 
-pub(super) fn epic(client: &Client, game: &LibraryGame, out: &mut Details) -> Result<(), String> {
+fn epic_product(client: &Client, game: &LibraryGame) -> Result<(Value, String, String), String> {
     let page = store_url(game)
         .and_then(|u| u.split("/p/").nth(1))
         .map(|s| s.split('?').next().unwrap_or(s).to_owned());
@@ -434,6 +435,27 @@ pub(super) fn epic(client: &Client, game: &LibraryGame, out: &mut Details) -> Re
         .find(|p| text(p, "type") == "productHome")
         .map(|p| &p["data"])
         .ok_or("Epic returned no product information")?;
+    Ok((
+        data.clone(),
+        namespace,
+        format!("https://store.epicgames.com/p/{slug}"),
+    ))
+}
+
+fn epic_portrait(data: &Value) -> Option<String> {
+    let url = text(&data["about"]["image"], "src");
+    safe_url(&url).then_some(url)
+}
+
+pub(crate) fn epic_cover(client: &Client, game: &LibraryGame) -> Result<String, String> {
+    let (data, _, _) = epic_product(client, game)?;
+    epic_portrait(&data).ok_or("Epic returned no portrait artwork".into())
+}
+
+pub(super) fn epic(client: &Client, game: &LibraryGame, out: &mut Details) -> Result<(), String> {
+    let (data, namespace, url) = epic_product(client, game)?;
+    out.store_url = Some(url);
+    let data = &data;
     parse_epic(data, out);
     for item in array(&data["carousel"], "items").iter().take(8) {
         let video = &item["video"];
@@ -496,7 +518,13 @@ pub(super) fn epic(client: &Client, game: &LibraryGame, out: &mut Details) -> Re
 fn parse_epic(data: &Value, out: &mut Details) {
     let about = &data["about"];
     let meta = &data["meta"];
-    out.description = clean(&text(about, "description"));
+    let markdown = text(about, "description");
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(
+        &mut html,
+        pulldown_cmark::Parser::new_ext(&markdown, pulldown_cmark::Options::ENABLE_STRIKETHROUGH),
+    );
+    out.set_description(html);
     out.developers = vec![text(about, "developerAttribution")];
     out.publishers = vec![text(about, "publisherAttribution")];
     out.released = text(meta, "releaseDate");
@@ -518,7 +546,8 @@ fn parse_epic(data: &Value, out: &mut Details) {
                 .iter()
                 .filter_map(|f| {
                     let value = text(f, key);
-                    (!value.is_empty()).then(|| format!("{}: {value}", text(f, "title")))
+                    (!value.trim().is_empty())
+                        .then(|| format!("{}: {}", text(f, "title").trim(), value.trim()))
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -532,7 +561,7 @@ fn parse_epic(data: &Value, out: &mut Details) {
     out.age_rating = text(&data["requirements"]["rating"], "rating");
 }
 
-pub(super) fn ea(client: &Client, game: &LibraryGame, out: &mut Details) -> Result<(), String> {
+fn ea_product(client: &Client, game: &LibraryGame) -> Result<Value, String> {
     let body = json!({"query":game.title,"context":{"address_country":"US","language":"en-US","currency":"USD"},"pagination":{"limit":20}});
     let bytes = response(
         client
@@ -552,7 +581,32 @@ pub(super) fn ea(client: &Client, game: &LibraryGame, out: &mut Details) -> Resu
                     .any(|v| text(v, "id") == game.id)
         })
         .ok_or("This EA edition is not in the public catalog for this market")?;
-    out.description = text(&product["description"], "plain");
+    Ok(product.clone())
+}
+
+pub(crate) fn ea_cover(client: &Client, game: &LibraryGame) -> Result<String, String> {
+    let product = ea_product(client, game)?;
+    let images = array(&product, "media")
+        .iter()
+        .filter(|v| text(v, "type") == "image")
+        .map(|v| text(v, "url"))
+        .filter(|url| safe_url(url))
+        .collect::<Vec<_>>();
+    images
+        .iter()
+        .find(|url| url.contains("9x16") || url.contains("pack-front"))
+        .or_else(|| images.first())
+        .cloned()
+        .ok_or("EA returned no artwork".into())
+}
+
+pub(super) fn ea(client: &Client, game: &LibraryGame, out: &mut Details) -> Result<(), String> {
+    let product = ea_product(client, game)?;
+    let product = &product;
+    out.set_description(text(&product["description"], "html"));
+    if out.description.is_empty() {
+        out.set_description(text(&product["description"], "plain"));
+    }
     out.released = text(&product["metadata"], "release_date");
     for m in array(product, "media") {
         let url = text(m, "url");
@@ -566,6 +620,10 @@ pub(super) fn ea(client: &Client, game: &LibraryGame, out: &mut Details) -> Resu
         }
     }
     let id = text(product, "id");
+    out.store_url = Some(format!(
+        "https://store.ea.com/commerce/app/products/{}",
+        crate::catalog::encode(&id)
+    ));
     let html = get_html(
         client,
         &format!(
@@ -597,8 +655,8 @@ fn parse_ea_html(html: &str, out: &mut Details) {
         });
     }
     parse_schema(&document, out);
-    if out.description.is_empty() {
-        out.description = html_text(&document, ".pdp-about");
+    if let Some(about) = document.select(&selector(".pdp-about")).next() {
+        out.set_description(about.inner_html());
     }
     collect_html_media(&document, "https://store.ea.com", out);
 }
@@ -670,6 +728,7 @@ pub(super) fn ubisoft(
         return Err("Invalid Ubisoft store page".into());
     }
     let html = get_html(client, &url)?;
+    out.store_url = Some(url);
     parse_ubisoft(&html, out)?;
     out.sources.push("Ubisoft Store".into());
     Ok(())
@@ -677,7 +736,7 @@ pub(super) fn ubisoft(
 fn parse_ubisoft(html: &str, out: &mut Details) -> Result<(), String> {
     let model = embedded_json(html, "window.extendedProductModel")
         .ok_or("Ubisoft returned no product information")?;
-    out.description = clean(&text(&model["summary"], "productDescription"));
+    out.set_description(text(&model["summary"], "productDescription"));
     out.released = text(&model["details"], "releaseDateString");
     out.age_rating = text(&model["rating"], "ageRating").to_uppercase();
     for item in array(&model["media"], "media_slider_PD") {
@@ -742,12 +801,13 @@ fn parse_schema(document: &Html, out: &mut Details) {
         }
     }
     if out.description.is_empty() {
-        out.description = document
+        let description = document
             .select(&selector("meta[name='description']"))
             .next()
             .and_then(|n| n.value().attr("content"))
             .unwrap_or_default()
             .to_owned();
+        out.set_description(description);
     }
 }
 fn schema_node(v: &Value, out: &mut Details) {
@@ -768,7 +828,7 @@ fn schema_node(v: &Value, out: &mut Details) {
         return;
     }
     if out.description.is_empty() {
-        out.description = clean(&text(v, "description"));
+        out.set_description(text(v, "description"));
     }
     if out.developers.is_empty() {
         let name = text(&v["author"], "name");
@@ -830,6 +890,7 @@ mod tests {
         let data = json!({"detailed_description":"<p>A game</p>","developers":["Studio"],"publishers":["Publisher"],"ratings":{"esrb":{"rating":"T"}},"movies":[{"name":"Trailer","hls_h264":"https://cdn.example/trailer.m3u8"}],"screenshots":[{"path_full":"https://cdn.example/shot.jpg"}],"pc_requirements":{"minimum":"<b>OS:</b> Windows 10<br>RAM: 8GB"},"linux_requirements":{"minimum":"<b>Minimum:</b>"}});
         let mut out = Details::default();
         parse_steam(&data, &mut out);
+        assert_eq!(out.description_html.as_deref(), Some("<p>A game</p>"));
         assert_eq!(out.developers, vec!["Studio"]);
         assert_eq!(out.media.len(), 2);
         assert!(out.media[0].video);
@@ -852,24 +913,63 @@ mod tests {
     fn epic_metadata_preserves_platform_requirements() {
         let mut out = Details::default();
         parse_epic(
-            &json!({"about":{"description":"A game","developerAttribution":"Studio"},"requirements":{"systems":[{"systemType":"Windows","details":[{"title":"Memory","minimum":"4GB","recommended":"8GB"}]}]},"carousel":{"items":[{"image":{"src":"https://cdn.example/a.jpg"}}]}}),
+            &json!({"about":{"description":"# Game\n\nA **bold** game.\n\n![Art](https://cdn.example/art.jpg)","developerAttribution":"Studio"},"requirements":{"systems":[{"systemType":"Windows","details":[{"title":"Memory","minimum":"4GB","recommended":"8GB"}]}]},"carousel":{"items":[{"image":{"src":"https://cdn.example/a.jpg"}}]}}),
             &mut out,
         );
         assert_eq!(out.requirements[0].recommended, "Memory: 8GB");
         assert_eq!(out.media.len(), 1);
+        let html = out.description_html.as_deref().unwrap();
+        assert!(html.contains("<h1>Game</h1>"));
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<img src=\"https://cdn.example/art.jpg\""));
+    }
+    #[test]
+    fn epic_portrait_and_requirement_groups_keep_their_roles() {
+        let data = json!({
+            "about": {"image": {"src": "https://cdn.example/portrait.jpg"}},
+            "carousel": {"items": [{"image": {"src": "https://cdn.example/screenshot.jpg"}}]},
+            "requirements": {"systems": [
+                {"systemType": "Windows", "details": [{"title": "GPU ", "minimum": " Integrated ", "recommended": "Dedicated"}]},
+                {"systemType": "Windows - Epic Quality Presets", "details": [{"title": "GPU", "recommended": "RTX 3070"}]},
+                {"systemType": "Windows - UEFN", "details": [{"title": "Memory", "minimum": "16 GB", "recommended": "32 GB"}]}
+            ]}
+        });
+        assert_eq!(
+            epic_portrait(&data).as_deref(),
+            Some("https://cdn.example/portrait.jpg")
+        );
+        assert!(epic_portrait(&json!({"carousel":data["carousel"]})).is_none());
+        assert!(epic_portrait(&json!({"about":{"image":{"src":"javascript:bad()"}}})).is_none());
+        let mut out = Details::default();
+        parse_epic(&data, &mut out);
+        assert_eq!(out.requirements.len(), 3);
+        assert_eq!(out.requirements[0].minimum, "GPU: Integrated");
+        assert_eq!(
+            out.requirements[1].platform,
+            "Windows - Epic Quality Presets"
+        );
+        assert!(out.requirements[1].minimum.is_empty());
+        assert_eq!(out.requirements[2].platform, "Windows - UEFN");
     }
     #[test]
     fn ea_and_ubisoft_parse_public_html_without_executing_scripts() {
         let mut ea = Details::default();
         parse_ea_html(
-            "<div class='pdp-sysreq-group'><div class='pdp-sysreq-platform'>Windows</div><div class='pdp-sysreq-col'><h4>Minimum</h4><dl><dt>RAM</dt><dd>8 GB</dd></dl></div><div class='pdp-sysreq-col'>16 GB</div></div>",
+            "<p class='pdp-about'>An <strong>adventure</strong>.</p><div class='pdp-sysreq-group'><div class='pdp-sysreq-platform'>Windows</div><div class='pdp-sysreq-col'><h4>Minimum</h4><dl><dt>RAM</dt><dd>8 GB</dd></dl></div><div class='pdp-sysreq-col'>16 GB</div></div>",
             &mut ea,
         );
         assert_eq!(ea.requirements.len(), 1);
         assert_eq!(ea.requirements[0].recommended, "16 GB");
+        assert!(
+            ea.description_html
+                .as_deref()
+                .unwrap()
+                .contains("<strong>adventure</strong>")
+        );
         let mut ubi = Details::default();
         parse_ubisoft(r#"<script>window.extendedProductModel = {"summary":{"productDescription":"<p>Adventure</p>"},"rating":{"ageRating":"esrb-t"},"media":{"media_slider_PD":[{"url":"/screen.jpg"}]}};</script><dl><dt>Developer:</dt><dd>Studio</dd></dl><div data-videoid="trailer-id"></div>"#,&mut ubi).unwrap();
         assert_eq!(ubi.description, "Adventure");
+        assert_eq!(ubi.description_html.as_deref(), Some("<p>Adventure</p>"));
         assert_eq!(ubi.developers, vec!["Studio"]);
         assert!(ubi.media.iter().any(|m| m.video));
         assert!(
@@ -882,12 +982,14 @@ mod tests {
     fn microsoft_uses_pc_sku_requirements_and_labels_customer_reviews() {
         let mut out = Details::default();
         parse_xbox(
-            &json!({"LocalizedProperties":[{"DeveloperName":"Studio","ProductDescription":"Description","CMSVideos":[{"HLS":"https://cdn.example/video.m3u8"}]}],"DisplaySkuAvailabilities":[{"Sku":{"Properties":{"HardwareProperties":{"MinimumProcessor":"CPU","MinimumHardware":["m08","unknown-code"],"RecommendedGraphics":"GPU"}}}}]}),
+            &json!({"LocalizedProperties":[{"DeveloperName":"Studio","ProductDescription":"Description\r\n\r\nFeatures","CMSVideos":[{"HLS":"https://cdn.example/video.m3u8"}]}],"DisplaySkuAvailabilities":[{"Sku":{"Properties":{"HardwareProperties":{"MinimumProcessor":"CPU","MinimumHardware":["m08","unknown-code"],"RecommendedGraphics":"GPU"}}}}]}),
             &mut out,
         );
         assert!(out.requirements[0].minimum.contains("Memory: 8 GB"));
         assert!(!out.requirements[0].minimum.contains("unknown-code"));
         assert_eq!(out.requirements[0].recommended, "Graphics: GPU");
+        out.normalize();
+        assert_eq!(out.description_blocks.len(), 2);
         parse_xbox_reviews(
             &json!({"totalReviews":1,"reviews":[{"userName":"Player","reviewText":"Good","rating":4,"deviceFamily":"Windows.Xbox"}]}),
             &mut out,

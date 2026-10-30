@@ -24,11 +24,11 @@ pub struct Backdrop {
 
 impl Default for Backdrop {
     fn default() -> Self {
-        let image = render_image(image_codec::RgbaImage::from_pixel(
-            SIZE.0,
-            SIZE.1,
-            image_codec::Rgba([12, 29, 26, 255]),
-        ));
+        let image = render_image(
+            image_codec::load_from_memory(include_bytes!("../../static/default-background.png"))
+                .expect("bundled default background")
+                .into_rgba8(),
+        );
         Self {
             from: image.clone(),
             target: image,
@@ -245,6 +245,15 @@ fn blend(a: &RenderImage, b: &RenderImage, progress: f32) -> Arc<RenderImage> {
 #[cfg(test)]
 mod tests {
     use super::{Details, SIZE, color_mesh, media_source};
+    #[test]
+    fn default_background_is_bundled_and_matches_mesh_dimensions() {
+        let backdrop = super::Backdrop::default();
+        assert_eq!(
+            backdrop.target.as_bytes(0).unwrap().len(),
+            (SIZE.0 * SIZE.1 * 4) as usize
+        );
+        assert_eq!(backdrop.from.id, backdrop.target.id);
+    }
     #[test]
     fn mesh_removes_fine_detail_and_has_bounded_size() {
         let image = image_codec::RgbImage::from_fn(1024, 576, |x, y| {

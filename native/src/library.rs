@@ -8,6 +8,7 @@ pub struct Game {
     pub store: usize,
     pub source: LibraryGame,
     pub poster: Option<Arc<RenderImage>>,
+    pub card_poster: Option<Arc<RenderImage>>,
     pub background: Option<Arc<RenderImage>>,
     pub background_checked: bool,
 }
@@ -21,6 +22,7 @@ impl Game {
             store,
             source,
             poster: None,
+            card_poster: None,
             background: None,
             background_checked: false,
         })

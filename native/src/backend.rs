@@ -2,7 +2,7 @@ use raesir_lib::{actions, artwork, client_control, epic_online, model::*, mount,
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -14,6 +14,8 @@ pub struct Backend {
     report: RwLock<Option<Arc<Report>>>,
     operation: Mutex<()>,
     cleanup: Mutex<()>,
+    ui: OnceLock<Mutex<serde_json::Map<String, serde_json::Value>>>,
+    ui_save: Mutex<()>,
     closing: AtomicBool,
     closed: AtomicBool,
     steam: client_control::Manager,
@@ -42,6 +44,8 @@ impl Backend {
             report: RwLock::new(None),
             operation: Mutex::new(()),
             cleanup: Mutex::new(()),
+            ui: OnceLock::new(),
+            ui_save: Mutex::new(()),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             steam: Default::default(),
@@ -213,32 +217,77 @@ impl Backend {
 
     pub fn detail_media(&self, url: &str) -> Result<String, String> {
         self.ready()?;
+        let mut game = raesir_lib::catalog::entry("media", url, "", vec![], "media");
+        game.cover = Some(url.into());
         if self.fixture.is_some() {
+            if let Some(art) = artwork::cached(&game, &self.cache.join("artwork")) {
+                return Ok(art.path);
+            }
             return Path::new(url)
                 .is_file()
                 .then(|| url.to_owned())
                 .ok_or("No local diagnostic image".into());
         }
-        let mut game = raesir_lib::catalog::entry("media", url, "", vec![], "media");
-        game.cover = Some(url.into());
         artwork::fetch(&game, &self.cache.join("artwork")).map(|art| art.path)
     }
 
+    fn ui(&self) -> &Mutex<serde_json::Map<String, serde_json::Value>> {
+        self.ui.get_or_init(|| {
+            Mutex::new(
+                std::fs::read(self.data.join("native-ui.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            )
+        })
+    }
+
     pub fn zoom(&self) -> f32 {
-        std::fs::read(self.data.join("native-ui.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v.get("zoom").and_then(|v| v.as_f64()))
+        self.ui()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("zoom")
+            .and_then(|v| v.as_f64())
             .filter(|v| v.is_finite())
             .map(|v| (v as f32).clamp(12., 22.))
             .unwrap_or(16.)
     }
 
-    pub fn save_zoom(&self, zoom: f32) {
-        let _ = storage::write_json(
-            &self.data.join("native-ui.json"),
-            &serde_json::json!({"zoom": zoom}),
+    pub fn set_zoom(&self, zoom: f32) {
+        self.ui()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("zoom".into(), serde_json::json!(zoom));
+    }
+
+    pub fn filters(&self) -> (u8, u8, Option<usize>) {
+        let ui = self.ui().lock().unwrap_or_else(|e| e.into_inner());
+        let filters = &ui.get("filters").cloned().unwrap_or_default();
+        let selection = |key: &str, default| {
+            filters[key]
+                .as_u64()
+                .filter(|v| *v <= 2)
+                .map(|v| v as u8)
+                .unwrap_or(default)
+        };
+        let store = filters["store"]
+            .as_str()
+            .and_then(|name| crate::STORES.iter().position(|store| *store == name));
+        (selection("status", 1), selection("os", 0), store)
+    }
+
+    pub fn set_filters(&self, status: u8, os: u8, store: Option<usize>) {
+        self.ui().lock().unwrap_or_else(|e| e.into_inner()).insert(
+            "filters".into(),
+            serde_json::json!({"status": status, "os": os, "store": store.and_then(|i| crate::STORES.get(i))}),
         );
+    }
+
+    pub fn save_ui(&self) {
+        let _save = self.ui_save.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(ui) = self.ui.get() else { return };
+        let snapshot = ui.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let _ = storage::write_json(&self.data.join("native-ui.json"), &snapshot);
     }
 
     pub fn begin_closing(&self) {
@@ -253,6 +302,7 @@ impl Backend {
             return Ok(());
         }
         self.begin_closing();
+        self.save_ui();
         self.epic.shutdown();
         let steam = self.steam.stop();
         let mounts = self.mounts.shutdown();
@@ -320,12 +370,40 @@ mod tests {
     fn text_zoom_round_trips_and_invalid_settings_keep_a_readable_default() {
         let dir = tempfile::tempdir().unwrap();
         let backend = fixture(dir.path());
-        backend.save_zoom(19.);
-        assert_eq!(backend.zoom(), 19.);
-        backend.save_zoom(999.);
-        assert_eq!(backend.zoom(), 22.);
+        backend.set_zoom(19.);
+        backend.save_ui();
+        assert_eq!(fixture(dir.path()).zoom(), 19.);
+        backend.set_zoom(999.);
+        backend.save_ui();
+        assert_eq!(fixture(dir.path()).zoom(), 22.);
         std::fs::write(backend.data.join("native-ui.json"), b"bad json").unwrap();
-        assert_eq!(backend.zoom(), 16.);
+        assert_eq!(fixture(dir.path()).zoom(), 16.);
+    }
+
+    #[test]
+    fn filters_restore_by_store_name_and_share_settings_with_zoom() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = fixture(dir.path());
+        assert_eq!(backend.filters(), (1, 0, None));
+        backend.set_zoom(19.);
+        backend.set_filters(2, 1, Some(3));
+        backend.save_ui();
+        let restored = fixture(dir.path());
+        assert_eq!(restored.filters(), (2, 1, Some(3)));
+        assert_eq!(restored.zoom(), 19.);
+        restored.set_zoom(20.);
+        restored.save_ui();
+        assert_eq!(fixture(dir.path()).filters(), (2, 1, Some(3)));
+        restored.set_filters(0, 2, None);
+        restored.save_ui();
+        assert_eq!(fixture(dir.path()).filters(), (0, 2, None));
+        assert_eq!(fixture(dir.path()).zoom(), 20.);
+        std::fs::write(
+            backend.data.join("native-ui.json"),
+            br#"{"filters":{"status":99,"os":-1,"store":"unknown"}}"#,
+        )
+        .unwrap();
+        assert_eq!(fixture(dir.path()).filters(), (1, 0, None));
     }
 
     #[test]
@@ -338,7 +416,7 @@ mod tests {
             .unwrap();
         let mut game = raesir_lib::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
         game.cover = Some(path.to_string_lossy().into_owned());
-        let (image, _, _) = crate::artwork::load(&backend, &game).unwrap();
+        let (image, _, _, _) = crate::artwork::load(&backend, &game).unwrap();
         assert_eq!(image.frame_count(), 1);
         assert!(!image.as_bytes(0).unwrap().is_empty());
         assert_eq!(

@@ -10,15 +10,19 @@ pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String>
         .iter()
         .find(|g| g.key == key)
         .ok_or("Game is no longer in the library")?;
+    let library = (kind == "library")
+        .then(|| library_action(game))
+        .transpose()?;
     let action = match kind {
         "launch" => &game.launch,
         "store" => &game.store_page,
         "uninstall" => &game.uninstall,
+        "library" => &library,
         _ => return Err("Unknown game action".into()),
     }
     .as_ref()
     .ok_or("This client does not expose that action here")?;
-    if kind != "store" && !crate::catalog::local(&game.installations) {
+    if ["launch", "uninstall"].contains(&kind) && !crate::catalog::local(&game.installations) {
         return Err("This game is not installed on this OS".into());
     }
     dispatch(&action.target)?;
@@ -26,6 +30,46 @@ pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String>
         .note
         .clone()
         .unwrap_or_else(|| format!("Sent to {}", action.client)))
+}
+
+fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
+    if !game.client_os.contains(&Os::host()) {
+        return Err("This game's client library is on another OS".into());
+    }
+    let id = crate::catalog::encode(&game.id);
+    let address = match game.store.as_str() {
+        "steam" => format!("steam://nav/games/details/{id}"),
+        "ubisoft" => format!("uplay://open/game/{id}"),
+        "ea" => "origin2://library/open".into(),
+        "epic" => "com.epicgames.launcher://store/library".into(),
+        "xbox" => "ms-xbox://".into(),
+        _ => return Err("This client does not expose its library".into()),
+    };
+    if let Some(mut action) = game.launch.clone()
+        && let ActionTarget::Command { args, .. } = &mut action.target
+        && let Some(arg) = args.iter_mut().find(|s| {
+            ["origin2://", "uplay://", "com.epicgames.launcher://"]
+                .iter()
+                .any(|prefix| s.starts_with(prefix))
+        })
+    {
+        *arg = address;
+        return Ok(action);
+    }
+    if cfg!(windows) || game.store == "steam" {
+        return Ok(crate::catalog::url(&game.client, address));
+    }
+    let desktop = match game.client.as_str() {
+        "Heroic" => "heroic",
+        "Lutris" => "lutris",
+        "Bottles" => "bottles",
+        "Ferestre" => "ferestre",
+        "Xodus Nexus" | "Nexus" => "nexus",
+        _ => return Err("No client library navigation is available on this OS".into()),
+    };
+    let (program, args) = crate::discovery::desktop_command(desktop)
+        .ok_or("The client could not be found on this OS")?;
+    Ok(crate::catalog::command(&game.client, program, args))
 }
 
 fn dispatch(target: &ActionTarget) -> Result<(), String> {
@@ -228,6 +272,29 @@ pub fn support(project: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn library_navigation_never_launches_a_game_and_keeps_its_runtime() {
+        let mut game = crate::catalog::entry("steam", "42", "Game", vec![], "fixture");
+        game.client_os.push(Os::host());
+        assert!(
+            matches!(library_action(&game).unwrap().target, ActionTarget::Url { url } if url == "steam://nav/games/details/42")
+        );
+        game.store = "ubisoft".into();
+        game.launch = Some(crate::catalog::command(
+            "Proton",
+            "proton".into(),
+            vec![
+                "run".into(),
+                "UbisoftConnect.exe".into(),
+                "uplay://launch/42".into(),
+            ],
+        ));
+        assert!(
+            matches!(library_action(&game).unwrap().target, ActionTarget::Command { args, .. } if args == ["run", "UbisoftConnect.exe", "uplay://open/game/42"])
+        );
+        game.client_os.clear();
+        assert!(library_action(&game).unwrap_err().contains("another OS"));
+    }
     #[test]
     fn untrusted_schemes_and_newlines_never_reach_a_shell() {
         for url in [

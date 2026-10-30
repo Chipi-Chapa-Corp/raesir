@@ -136,15 +136,7 @@ pub fn scan(scan: &mut Scan<'_>) {
                 catalog::add_os(&mut game.client_os, profile.os);
                 game.is_game = Some(true);
                 game.in_library = true;
-                game.cover = text(root, "thumb_image").map(|s| {
-                    if s.starts_with("https://") {
-                        s.into()
-                    } else {
-                        format!(
-                            "https://ubistatic3-a.akamaihd.net/orbit/uplay_launcher_3_0/assets/{s}"
-                        )
-                    }
-                });
+                game.cover = cover_url(&data);
                 game.store_page = Some(catalog::url(
                     "Ubisoft Connect",
                     format!(
@@ -157,6 +149,38 @@ pub fn scan(scan: &mut Scan<'_>) {
             Ok(())
         });
     }
+}
+
+fn cover_url(data: &serde_json::Value) -> Option<String> {
+    let value = text(&data["root"], "thumb_image")?;
+    let value = data
+        .pointer("/localizations/default")
+        .and_then(|v| v.get(value))
+        .and_then(|v| v.as_str())
+        .unwrap_or(value);
+    if value.starts_with("https://") {
+        Some(value.into())
+    } else if value.ends_with(".jpg") || value.ends_with(".png") || value.ends_with(".webp") {
+        Some(format!(
+            "https://ubistatic3-a.akamaihd.net/orbit/uplay_launcher_3_0/assets/{value}"
+        ))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn cached_cover(game: &LibraryGame) -> Option<String> {
+    let bytes = fs::read(&game.source).ok()?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return None;
+    }
+    let cache = Cache::decode(bytes.as_slice()).ok()?;
+    let product = cache
+        .games
+        .into_iter()
+        .find(|p| p.id.to_string() == game.id)?;
+    let data = serde_yaml_ng::from_str(&product.yaml).ok()?;
+    cover_url(&data)
 }
 
 fn playable(root: &serde_json::Value) -> bool {
@@ -272,6 +296,18 @@ $out=@(foreach($key in @('HKLM:\SOFTWARE\Ubisoft\Launcher\Installs','HKLM:\SOFTW
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn portraits_resolve_localization_keys_and_reject_unresolved_keys() {
+        let mut data = serde_json::json!({"root":{"thumb_image":"l2"},"localizations":{"default":{"l2":"portrait.jpg"},"ru-RU":{"l2":"russian.jpg"}}});
+        assert!(cover_url(&data).unwrap().ends_with("/portrait.jpg"));
+        data["root"]["thumb_image"] = "unknown-key".into();
+        assert!(cover_url(&data).is_none());
+        data["root"]["thumb_image"] = "https://cdn.example/portrait.png".into();
+        assert_eq!(
+            cover_url(&data).unwrap(),
+            "https://cdn.example/portrait.png"
+        );
+    }
     #[test]
     fn cached_configuration_localizes_titles_and_filters_dlc() {
         let dir = tempfile::tempdir().unwrap();

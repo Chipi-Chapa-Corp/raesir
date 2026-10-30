@@ -29,13 +29,14 @@ pub fn request(this: &mut Launcher, index: usize, cx: &mut Context<Launcher>) {
             .await;
         this.update(cx, |this, cx| {
             this.artwork_pending.remove(&key);
-            if let Ok((poster, title, background)) = result
+            if let Ok((poster, title, background, card_poster)) = result
                 && let Some(game) = this
                     .games
                     .iter_mut()
                     .find(|g| g.source.key == key && g.source.cover == cover)
             {
                 game.poster = Some(poster.clone());
+                game.card_poster = Some(card_poster);
                 if let Some(page) = &this.details {
                     page.update(cx, |page, cx| {
                         page.update_cover(&key, poster, background.clone(), cx)
@@ -65,7 +66,15 @@ pub fn request(this: &mut Launcher, index: usize, cx: &mut Context<Launcher>) {
 pub(crate) fn load(
     backend: &Backend,
     game: &LibraryGame,
-) -> Result<(Arc<RenderImage>, Option<String>, Arc<RenderImage>), String> {
+) -> Result<
+    (
+        Arc<RenderImage>,
+        Option<String>,
+        Arc<RenderImage>,
+        Arc<RenderImage>,
+    ),
+    String,
+> {
     let art = backend.artwork(game)?;
     let mut hash = DefaultHasher::new();
     art.path.hash(&mut hash);
@@ -107,6 +116,7 @@ pub(crate) fn load(
     };
     let background =
         crate::backdrop::from_cover(&image, std::path::Path::new(&art.path), &backend.cache);
+    let card = card_poster(&image.to_rgba8());
     let mut pixels = image.to_rgba8();
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -115,5 +125,31 @@ pub(crate) fn load(
         Arc::new(RenderImage::new(vec![image_codec::Frame::new(pixels)])),
         art.title,
         background,
+        card,
     ))
+}
+
+fn card_poster(source: &image_codec::RgbaImage) -> Arc<RenderImage> {
+    let mut image = source.clone();
+    let start = image.height() * 3 / 4;
+    let strip =
+        image_codec::imageops::crop_imm(source, 0, start, image.width(), image.height() - start)
+            .to_image();
+    let blurred = image_codec::imageops::fast_blur(&strip, image.width() as f32 / 48.);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        if y >= start {
+            let t = (y - start) as f32 / (source.height() - start - 1).max(1) as f32;
+            let blur = t * t * (3. - 2. * t);
+            let fade = ((t - 0.35) / 0.65).clamp(0., 1.);
+            let alpha = 1. - fade * fade * (3. - 2. * fade);
+            for channel in 0..3 {
+                pixel[channel] = (pixel[channel] as f32 * (1. - blur)
+                    + blurred.get_pixel(x, y - start)[channel] as f32 * blur)
+                    .round() as u8;
+            }
+            pixel[3] = (pixel[3] as f32 * alpha).round() as u8;
+        }
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image_codec::Frame::new(image)]))
 }

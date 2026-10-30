@@ -30,6 +30,8 @@ use smooth_scroll::SmoothWheel;
 mod benchmark;
 
 const STORES: [&str; 5] = ["steam", "epic", "ea", "ubisoft", "xbox"];
+const CARD_TITLE_HEIGHT: f32 = 4.;
+const CARD_TITLE_OVERLAP: f32 = 0.08;
 
 struct Launcher {
     backend: Arc<backend::Backend>,
@@ -60,6 +62,7 @@ struct Launcher {
     store: Option<usize>,
     status: u8,
     os: u8,
+    saved_filters: (u8, u8, Option<usize>),
     query: String,
     focus: FocusHandle,
     backdrop: Entity<backdrop::Backdrop>,
@@ -83,6 +86,7 @@ impl Launcher {
         #[cfg(feature = "benchmark")]
         benchmark::start(window, cx);
         let zoom = backend.zoom();
+        let (status, os, store) = backend.filters();
         window.set_rem_size(px(zoom));
         eprintln!("GPU: {:?}", window.gpu_specs());
         let focus = cx.focus_handle();
@@ -93,9 +97,9 @@ impl Launcher {
             this.filter(cx);
         });
         let header_state = HeaderState {
-            store: None,
-            status: 1,
-            os: 0,
+            store,
+            status,
+            os,
             query: String::new(),
             menu: false,
             syncing: false,
@@ -147,9 +151,10 @@ impl Launcher {
             visible: vec![],
             rows: ListState::new(31, ListAlignment::Top, px(300.)),
             columns: 8,
-            store: None,
-            status: 1,
-            os: 0,
+            store,
+            status,
+            os,
+            saved_filters: (status, os, store),
             query: String::new(),
             focus,
             backdrop: cx.new(|_| backdrop::Backdrop::default()),
@@ -170,6 +175,15 @@ impl Launcher {
     }
 
     fn filter(&mut self, cx: &mut Context<Self>) {
+        let filters = (self.status, self.os, self.store);
+        if filters != self.saved_filters {
+            self.saved_filters = filters;
+            self.backend.set_filters(self.status, self.os, self.store);
+            let backend = self.backend.clone();
+            cx.background_executor()
+                .spawn(async move { backend.save_ui() })
+                .detach();
+        }
         let query = self.query.to_lowercase();
         self.visible = self
             .games
@@ -338,7 +352,9 @@ impl Launcher {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(rems(0.5))
+            .rounded(rems(0.8))
+            .overflow_hidden()
+            .bg(rgba(0x101010a6))
             .on_hover(cx.listener(move |this, entered, _, cx| this.hover(i, *entered, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -353,36 +369,42 @@ impl Launcher {
                     .relative()
                     .w_full()
                     .h(px(width * 1.5))
-                    .rounded(rems(0.8))
+                    .flex_none()
+                    .rounded_t(rems(0.8))
                     .overflow_hidden()
-                    .bg(rgba(0x101010b3))
-                    .when_some(g.poster.clone(), |d, poster| {
+                    .when(g.poster.is_none(), |d| d.bg(rgba(0x101010b3)))
+                    .when_some(g.card_poster.clone(), |d, poster| {
                         d.child(
                             img(poster)
                                 .size_full()
-                                .rounded(rems(0.8))
+                                .rounded_t(rems(0.8))
                                 .object_fit(ObjectFit::Cover)
                                 .grayscale(!installed_here),
                         )
                     })
+                    .child(div().absolute().inset_0().rounded_t(rems(0.8)).when(
+                        !installed_here,
+                        |d| {
+                            d.bg(linear_gradient(
+                                180.,
+                                linear_color_stop(rgba(0x020b0755), 0.75),
+                                linear_color_stop(rgba(0x020b0700), 1.),
+                            ))
+                        },
+                    ))
                     .child(
                         div()
                             .absolute()
                             .inset_0()
-                            .rounded(rems(0.8))
-                            .bg(if installed_here {
-                                rgba(0x00000000)
-                            } else {
-                                rgba(0x020b0755)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(rems(0.8))
+                            .rounded_t(rems(0.8))
                             .bg(rgba(0xffffff00))
-                            .group_hover("game-card", |s| s.bg(rgba(0xffffff16))),
+                            .group_hover("game-card", |s| {
+                                s.bg(linear_gradient(
+                                    180.,
+                                    linear_color_stop(rgba(0xffffff16), 0.75),
+                                    linear_color_stop(rgba(0xffffff00), 1.),
+                                ))
+                            }),
                     )
                     .child(
                         div()
@@ -457,7 +479,7 @@ impl Launcher {
                         d.child(
                             div()
                                 .absolute()
-                                .bottom(rems(1.1))
+                                .bottom(px(self.zoom * 1.1 + width * 1.5 * CARD_TITLE_OVERLAP))
                                 .left(rems(0.8))
                                 .size(rems(0.3))
                                 .rounded_full()
@@ -468,7 +490,7 @@ impl Launcher {
                         d.child(
                             button(("action", i), "play", false)
                                 .absolute()
-                                .bottom(rems(0.55))
+                                .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
                                 .right(rems(0.55))
                                 .bg(rgba(0xdcece4f2))
                                 .hover(|s| s.bg(rgba(0xf0f8f3ff)))
@@ -481,18 +503,31 @@ impl Launcher {
             )
             .child(
                 div()
-                    .h(rems(3.1))
+                    .h(rems(CARD_TITLE_HEIGHT))
+                    .mt(px(-width * 1.5 * CARD_TITLE_OVERLAP))
                     .w_full()
-                    .overflow_hidden()
-                    .text_center()
-                    .line_height(rems(1.45))
-                    .text_size(rems(1.125))
-                    .text_color(if installed_here {
-                        rgb(0xe0eae4)
-                    } else {
-                        rgb(0xa9b5b0)
-                    })
-                    .child(title),
+                    .flex_none()
+                    .px(rems(0.65))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_center()
+                            .whitespace_normal()
+                            .max_h(rems(2.9))
+                            .overflow_hidden()
+                            .line_height(rems(1.45))
+                            .text_size(rems(1.125))
+                            .text_color(if installed_here {
+                                rgb(0xe0eae4)
+                            } else {
+                                rgb(0xa9b5b0)
+                            })
+                            .child(title),
+                    ),
             )
     }
 }
@@ -523,7 +558,9 @@ impl Render for Launcher {
             .floor()
             .max(2.) as usize;
         let width = (viewport - self.zoom * (3. + 1.25 * (columns - 1) as f32)) / columns as f32;
-        let row_height = (width * 1.5 + self.zoom * 4.75).ceil();
+        let row_height = (width * 1.5 * (1. - CARD_TITLE_OVERLAP)
+            + self.zoom * (CARD_TITLE_HEIGHT + 1.15))
+            .ceil();
         if self.details.is_none()
             && (columns != self.columns || (row_height - self.row_height).abs() > 0.01)
         {

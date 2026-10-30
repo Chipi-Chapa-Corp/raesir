@@ -59,6 +59,7 @@ pub fn assets() -> AssetRegistry {
         asset!("empty-search", "adwaita/loupe-symbolic.svg"),
         asset!("play", "adwaita/media-playback-start-symbolic.svg"),
         asset!("external", "adwaita/adw-external-link-symbolic.svg"),
+        asset!("store", "adwaita/org.gnome.Software-symbolic.svg"),
         asset!("steam", "steam.svg"),
         asset!("epic", "epicgames.svg"),
         asset!("ea", "ea.svg"),

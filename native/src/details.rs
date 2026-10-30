@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+mod description;
 use unicode_segmentation::UnicodeSegmentation;
 
 const REVIEW_FILTERS: [[&str; 3]; 2] = [
@@ -542,9 +543,12 @@ impl DetailsPage {
                     async move { backend.cached_details(&game) }
                 })
                 .await;
-            let fresh = cached
-                .as_ref()
-                .is_some_and(|v| raesir_lib::details::now().saturating_sub(v.updated) < 21600);
+            let fresh = cached.as_ref().is_some_and(|v| {
+                raesir_lib::details::now().saturating_sub(v.updated) < 21600
+                    && (v.description.is_empty() || v.description_html.is_some())
+                    && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft")
+                        || v.store_url.is_some())
+            });
             this.update(cx, |this, cx| {
                 if let Some(data) = cached {
                     this.load_background(&data, cx);
@@ -650,6 +654,9 @@ impl DetailsPage {
                         .map_err(|e| e.to_string())?
                         .thumbnail(1920, 1080);
                     let mut pixels = image.into_rgba8();
+                    if pixels.pixels().all(|p| p[3] == 0) {
+                        return Err("Empty media placeholder".into());
+                    }
                     for p in pixels.chunks_exact_mut(4) {
                         p.swap(0, 2);
                     }
@@ -974,8 +981,10 @@ impl Render for DetailsPage {
         let owner_close = self.owner.clone();
         let action_owner = self.owner.clone();
         let store_owner = self.owner.clone();
+        let library_owner = self.owner.clone();
         let key = self.game.key.clone();
         let store_key = key.clone();
+        let library_key = key.clone();
         let back = pill()
             .id("details-back")
             .gap(rems(0.4))
@@ -1068,20 +1077,48 @@ impl Render for DetailsPage {
                     .child(self.game.title.clone()),
             );
         let platform = bubble()
-            .id("details-store")
+            .id("details-client")
             .cursor_pointer()
             .hover(|s| s.bg(rgba(0x303030b3)))
             .child(icon(store_icon(&self.game.store)))
             .child(self.game.client.clone());
-        title = title.child(if self.game.store_page.is_some() {
-            platform.on_click(move |_, _, cx| {
-                store_owner
-                    .update(cx, |this, cx| this.action(store_key.clone(), "store", cx))
-                    .ok();
-            })
-        } else {
-            platform
-        });
+        let client_label = format!("Open in {} library", self.game.client);
+        title = title.child(
+            if self.game.client_os.contains(&raesir_lib::model::Os::host()) {
+                platform
+                    .tooltip(move |_, cx| cx.new(|_| DetailTooltip(client_label.clone())).into())
+                    .on_click(move |_, _, cx| {
+                        library_owner
+                            .update(cx, |this, cx| {
+                                this.action(library_key.clone(), "library", cx)
+                            })
+                            .ok();
+                    })
+            } else {
+                platform.opacity(0.6).cursor_default().tooltip(|_, cx| {
+                    cx.new(|_| DetailTooltip("Client library is on another OS".into()))
+                        .into()
+                })
+            },
+        );
+        let store_url = info.as_ref().and_then(|v| v.store_url.clone());
+        if self.game.store_page.is_some() || store_url.is_some() {
+            title = title.child(
+                action_button("details-store", "store", "Open store page")
+                    .size(rems(3.3))
+                    .on_click(move |_, _, cx| {
+                        if let Some(url) = &store_url {
+                            if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
+                                cx.open_url(url);
+                            }
+                        } else {
+                            store_owner
+                                .update(cx, |this, cx| this.action(store_key.clone(), "store", cx))
+                                .ok();
+                        }
+                    }),
+            );
+        }
         title = title.when(self.game.launch.is_some(), |d| {
             d.child(
                 action_button("details-launch", "play", "Launch")
@@ -1145,7 +1182,7 @@ impl Render for DetailsPage {
                         .min_w_0()
                         .p(rems(1.15))
                         .gap(rems(0.5))
-                        .children(facts.into_iter().map(muted)),
+                        .children(facts.into_iter().map(paragraph)),
                 );
             }
             if let Some(rating) = rating {
@@ -1195,86 +1232,93 @@ impl Render for DetailsPage {
             } else {
                 data.description.clone()
             };
+            let about = if self.about_expanded {
+                self.description_content(data, cx).into_any_element()
+            } else {
+                paragraph(description)
+                    .line_clamp(3)
+                    .max_h(rems(5.25))
+                    .overflow_hidden()
+                    .into_any_element()
+            };
             body = body.child(
-                panel()
-                    .child(heading("About"))
-                    .child(paragraph(description).when(!self.about_expanded, |d| {
-                        d.line_clamp(3).max_h(rems(5.25)).overflow_hidden()
+                panel().child(heading("About")).child(about).child(
+                    text_button(
+                        "about-more",
+                        if self.about_expanded { "Less" } else { "More" },
+                    )
+                    .self_start()
+                    .child(icon(if self.about_expanded {
+                        "collapse"
+                    } else {
+                        "expand"
                     }))
-                    .child(
-                        text_button(
-                            "about-more",
-                            if self.about_expanded { "Less" } else { "More" },
-                        )
-                        .self_start()
-                        .child(icon(if self.about_expanded {
-                            "collapse"
-                        } else {
-                            "expand"
-                        }))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.about_expanded = !this.about_expanded;
-                            cx.notify();
-                        })),
-                    ),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.about_expanded = !this.about_expanded;
+                        cx.notify();
+                    })),
+                ),
             );
             body = body.child(self.gallery(data, window, cx));
-            body = body.child(
-                panel()
-                    .child(heading("System requirements"))
-                    .when(data.requirements.is_empty(), |d| {
-                        d.child(muted("No system requirements supplied for this edition."))
-                    })
-                    .children(data.requirements.iter().map(|r| {
-                        div().flex().flex_col().gap(rems(0.75)).child(
-                            div()
-                                .flex()
-                                .gap(rems(1.5))
-                                .child(
+            body =
+                body.child(
+                    panel()
+                        .child(heading("System requirements"))
+                        .when(data.requirements.is_empty(), |d| {
+                            d.child(muted("No system requirements supplied for this edition."))
+                        })
+                        .children(
+                            data.requirements
+                                .iter()
+                                .filter(|r| !r.minimum.is_empty() || !r.recommended.is_empty())
+                                .map(|r| {
                                     div()
-                                        .flex_1()
-                                        .min_w_0()
                                         .flex()
                                         .flex_col()
-                                        .gap(rems(0.5))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(rems(0.5))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(system_icon(&r.platform))
-                                                .child("Minimum"),
+                                        .gap(rems(0.75))
+                                        .when_some(
+                                            r.platform
+                                                .split_once(" - ")
+                                                .map(|(_, label)| label.trim().to_owned()),
+                                            |d, label| {
+                                                d.child(
+                                                    div()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(label),
+                                                )
+                                            },
                                         )
-                                        .child(paragraph(if r.minimum.is_empty() {
-                                            "Not supplied".into()
-                                        } else {
-                                            r.minimum.clone()
-                                        })),
-                                )
-                                .when(!r.recommended.is_empty(), |d| {
-                                    d.child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(rems(0.5))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(rems(0.5))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(system_icon(&r.platform))
-                                                    .child("Recommended"),
-                                            )
-                                            .child(paragraph(r.recommended.clone())),
-                                    )
+                                        .child(
+                                            div().flex().gap(rems(1.5)).children(
+                                                [
+                                                    ("Minimum", &r.minimum),
+                                                    ("Recommended", &r.recommended),
+                                                ]
+                                                .into_iter()
+                                                .filter(|(_, text)| !text.is_empty())
+                                                .map(|(label, text)| {
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(rems(0.5))
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap(rems(0.5))
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .child(system_icon(&r.platform))
+                                                                .child(label),
+                                                        )
+                                                        .child(paragraph(text.clone()))
+                                                }),
+                                            ),
+                                        )
                                 }),
-                        )
-                    })),
-            );
+                        ),
+                );
             let since = raesir_lib::details::review_cutoff([0, 30, 365][self.review_date as usize]);
             let recommendation = match self.review_rating {
                 1 => Some(true),

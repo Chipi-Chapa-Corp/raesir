@@ -18,7 +18,7 @@ dirs = "7"
 libloading = "0.8"
 futures = "0.3"
 unicode-segmentation = "1"
-image_codec = { package = "image", version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image_codec = { package = "image", version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif-native"] }
 
 
 [[bin]]
