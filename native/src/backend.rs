@@ -197,6 +197,33 @@ impl Backend {
         artwork::fetch(game, &self.cache.join("artwork"))
     }
 
+    pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_lib::details::Details> {
+        raesir_lib::details::cached(game, &self.cache.join("details"))
+    }
+
+    pub fn details(&self, game: &LibraryGame) -> Result<raesir_lib::details::Details, String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return self
+                .cached_details(game)
+                .ok_or("No details in this diagnostic profile".into());
+        }
+        raesir_lib::details::fetch(game, &self.cache.join("details"))
+    }
+
+    pub fn detail_media(&self, url: &str) -> Result<String, String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return Path::new(url)
+                .is_file()
+                .then(|| url.to_owned())
+                .ok_or("No local diagnostic image".into());
+        }
+        let mut game = raesir_lib::catalog::entry("media", url, "", vec![], "media");
+        game.cover = Some(url.into());
+        artwork::fetch(&game, &self.cache.join("artwork")).map(|art| art.path)
+    }
+
     pub fn zoom(&self) -> f32 {
         std::fs::read(self.data.join("native-ui.json"))
             .ok()

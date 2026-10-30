@@ -19,6 +19,9 @@ fn stem(game: &LibraryGame) -> String {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     game.key.hash(&mut hash);
     game.cover.hash(&mut hash);
+    if game.store == "xbox" {
+        "portrait-v2".hash(&mut hash);
+    }
     format!("{:016x}", hash.finish())
 }
 pub fn cached(game: &LibraryGame, root: &Path) -> Option<Artwork> {
@@ -95,11 +98,14 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
                 .and_then(|v| v.get("Uri"))
                 .and_then(|v| v.as_str())
         {
-            candidates.push(if image.starts_with("//") {
-                format!("https:{image}")
-            } else {
-                image.into()
-            });
+            candidates.insert(
+                0,
+                if image.starts_with("//") {
+                    format!("https:{image}")
+                } else {
+                    image.into()
+                },
+            );
         }
     }
     if game.store == "steam" && game.id.bytes().all(|b| b.is_ascii_digit()) {

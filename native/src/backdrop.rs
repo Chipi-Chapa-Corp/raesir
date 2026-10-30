@@ -1,72 +1,280 @@
+use crate::backend::Backend;
 use gpui::{prelude::*, *};
-use std::{cell::Cell, rc::Rc};
+use raesir_lib::{details::Details, model::LibraryGame};
+use std::{
+    cell::Cell,
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+};
+
+const SIZE: (u32, u32) = (128, 72);
 
 pub struct Backdrop {
-    from: [Hsla; 2],
-    target: [Hsla; 2],
-    displayed: Rc<Cell<[Hsla; 2]>>,
+    from: Arc<RenderImage>,
+    target: Arc<RenderImage>,
+    displayed: Rc<Cell<f32>>,
     revision: usize,
-}
-
-pub const DEFAULT_COLORS: [u32; 2] = [0x008b94, 0x113244];
-
-fn colors([a, b]: [u32; 2]) -> [Hsla; 2] {
-    [rgb_to_hsla(rgb(a)), rgb_to_hsla(rgb(b))]
+    retired: Vec<Arc<RenderImage>>,
+    fade: Option<Task<()>>,
+    cleanup_registered: bool,
 }
 
 impl Default for Backdrop {
     fn default() -> Self {
+        let image = render_image(image_codec::RgbaImage::from_pixel(
+            SIZE.0,
+            SIZE.1,
+            image_codec::Rgba([12, 29, 26, 255]),
+        ));
         Self {
-            from: colors(DEFAULT_COLORS),
-            target: colors(DEFAULT_COLORS),
-            displayed: Rc::new(Cell::new(colors(DEFAULT_COLORS))),
+            from: image.clone(),
+            target: image,
+            displayed: Rc::new(Cell::new(1.)),
             revision: 0,
+            retired: Vec::new(),
+            fade: None,
+            cleanup_registered: false,
         }
     }
 }
 
 impl Backdrop {
-    pub fn retarget(&mut self, palette: [u32; 2]) -> bool {
-        let target = colors(palette);
-        if target == self.target {
-            return false;
+    pub fn retarget(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
+        if image.id == self.target.id {
+            return;
         }
-        self.from = self.displayed.get();
-        self.target = target;
+        let progress = self.displayed.get();
+        let from = if progress >= 1. {
+            self.target.clone()
+        } else {
+            blend(&self.from, &self.target, progress)
+        };
+        self.retired
+            .extend([self.from.clone(), self.target.clone()]);
+        self.from = from;
+        self.target = image;
+        self.displayed.set(0.);
         self.revision += 1;
-        true
+        self.fade = Some(cx.spawn(async |this, cx| {
+            cx.background_executor().timer(millis(500)).await;
+            this.update(cx, |this, cx| {
+                this.retired
+                    .push(std::mem::replace(&mut this.from, this.target.clone()));
+                this.displayed.set(1.);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 }
 
 impl Render for Backdrop {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let [a, b] = self.from;
-        let [c, d] = self.target;
-        let background = div().absolute().inset_0().size_full();
-        if self.from == self.target {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.cleanup_registered {
+            cx.on_release_in(window, |this, window, _| {
+                for image in this
+                    .retired
+                    .drain(..)
+                    .chain([this.from.clone(), this.target.clone()])
+                {
+                    let _ = window.drop_image(image);
+                }
+            })
+            .detach();
+            self.cleanup_registered = true;
+        }
+        for image in self.retired.drain(..) {
+            if image.id != self.from.id && image.id != self.target.id {
+                let _ = window.drop_image(image);
+            }
+        }
+        let background = div().absolute().inset_0().bg(rgb(0x0c1d1a));
+        let texture = |image| {
+            img(image)
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+        };
+        if self.from.id == self.target.id {
             return background
-                .bg(linear_gradient(
-                    130.,
-                    linear_color_stop(a, 0.),
-                    linear_color_stop(b, 1.),
-                ))
+                .child(texture(self.target.clone()))
                 .into_any_element();
         }
         let displayed = self.displayed.clone();
         background
-            .with_animation(
-                ("gradient", self.revision),
+            .child(texture(self.from.clone()))
+            .child(texture(self.target.clone()).with_animation(
+                ("backdrop", self.revision),
                 Animation::new(millis(500)).with_easing(ease_in_out),
-                move |element, progress| {
-                    let [a, b] = [a.lerp(&c, progress), b.lerp(&d, progress)];
-                    displayed.set([a, b]);
-                    element.bg(linear_gradient(
-                        130.,
-                        linear_color_stop(a, 0.),
-                        linear_color_stop(b, 1.),
-                    ))
+                move |image, progress| {
+                    displayed.set(progress);
+                    image.opacity(progress)
                 },
-            )
+            ))
             .into_any_element()
+    }
+}
+
+pub fn media_source(details: &Details) -> Option<&str> {
+    details.media.iter().find_map(|media| {
+        let url = if media.video {
+            &media.preview
+        } else {
+            &media.url
+        };
+        (!url.is_empty()).then_some(url.as_str())
+    })
+}
+
+pub fn load(backend: &Backend, game: &LibraryGame) -> Result<Arc<RenderImage>, String> {
+    let details = backend
+        .cached_details(game)
+        .map(Ok)
+        .unwrap_or_else(|| backend.details(game))?;
+    from_media(backend, media_source(&details).ok_or("No game media")?)
+}
+
+pub fn from_media(backend: &Backend, source: &str) -> Result<Arc<RenderImage>, String> {
+    let path = backend.detail_media(source)?;
+    let cache = cache_path(Path::new(&path), &backend.cache);
+    if let Ok(image) = image_codec::open(&cache) {
+        return Ok(render_image(image.into_rgba8()));
+    }
+    let image = image_codec::ImageReader::open(path)
+        .map_err(|e| e.to_string())?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())?;
+    Ok(prepare(&image, &cache))
+}
+
+pub fn from_cover(
+    image: &image_codec::DynamicImage,
+    path: &Path,
+    cache: &Path,
+) -> Arc<RenderImage> {
+    let path = cache_path(path, cache);
+    if let Ok(image) = image_codec::open(&path) {
+        return render_image(image.into_rgba8());
+    }
+    prepare(image, &path)
+}
+
+fn cache_path(source: &Path, cache: &Path) -> PathBuf {
+    let mut hash = DefaultHasher::new();
+    ("mesh-v1", source).hash(&mut hash);
+    fs::metadata(source)
+        .and_then(|m| m.modified())
+        .ok()
+        .hash(&mut hash);
+    cache
+        .join("backdrops")
+        .join(format!("{:016x}.png", hash.finish()))
+}
+
+fn prepare(image: &image_codec::DynamicImage, path: &Path) -> Arc<RenderImage> {
+    let image = color_mesh(image);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_ok()
+    {
+        let temp = path.with_extension(format!(
+            "{}.tmp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        if image
+            .save_with_format(&temp, image_codec::ImageFormat::Png)
+            .is_ok()
+        {
+            let _ = fs::rename(&temp, path);
+        }
+        let _ = fs::remove_file(temp);
+    }
+    render_image(image)
+}
+
+fn color_mesh(image: &image_codec::DynamicImage) -> image_codec::RgbaImage {
+    let image = image
+        .resize_to_fill(SIZE.0, SIZE.1, image_codec::imageops::FilterType::Triangle)
+        .into_rgb8();
+    let mut image = image_codec::imageops::fast_blur(&image, 18.);
+    for pixel in image.pixels_mut() {
+        let [r, g, b] = pixel.0.map(u32::from);
+        let mut color = rgb_to_hsla(rgb((r << 16) | (g << 8) | b));
+        color.saturation = (color.saturation * 1.2).min(0.92);
+        color.lightness = color.lightness.clamp(0.16, 0.52);
+        let color = hsla_to_rgba(color);
+        pixel.0 = [color.red, color.green, color.blue].map(|v| (v * 255.).round() as u8);
+    }
+    image_codec::DynamicImage::ImageRgb8(image).into_rgba8()
+}
+
+fn render_image(mut image: image_codec::RgbaImage) -> Arc<RenderImage> {
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image_codec::Frame::new(image)]))
+}
+
+fn blend(a: &RenderImage, b: &RenderImage, progress: f32) -> Arc<RenderImage> {
+    let pixels = a
+        .as_bytes(0)
+        .unwrap()
+        .iter()
+        .zip(b.as_bytes(0).unwrap())
+        .map(|(&a, &b)| (a as f32 + (b as f32 - a as f32) * progress).round() as u8)
+        .collect();
+    Arc::new(RenderImage::new(vec![image_codec::Frame::new(
+        image_codec::RgbaImage::from_raw(SIZE.0, SIZE.1, pixels).unwrap(),
+    )]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Details, SIZE, color_mesh, media_source};
+    #[test]
+    fn mesh_removes_fine_detail_and_has_bounded_size() {
+        let image = image_codec::RgbImage::from_fn(1024, 576, |x, y| {
+            image_codec::Rgb(if (x + y) % 2 == 0 {
+                [255, 255, 255]
+            } else {
+                [0, 0, 0]
+            })
+        });
+        let mesh = color_mesh(&image.into());
+        assert_eq!(mesh.dimensions(), SIZE);
+        let values = mesh.pixels().map(|p| p[0]).collect::<Vec<_>>();
+        assert!(values.iter().max().unwrap() - values.iter().min().unwrap() < 3);
+        let tiny = color_mesh(&image_codec::DynamicImage::new_rgb8(1, 1));
+        assert_eq!(tiny.dimensions(), SIZE);
+    }
+    #[test]
+    fn background_uses_first_available_content_instead_of_cover() {
+        use raesir_lib::details::Media;
+        let mut details = Details {
+            media: vec![
+                Media {
+                    video: true,
+                    preview: "trailer-thumb".into(),
+                    ..Default::default()
+                },
+                Media {
+                    url: "screenshot".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(media_source(&details), Some("trailer-thumb"));
+        details.media[0].preview.clear();
+        assert_eq!(media_source(&details), Some("screenshot"));
     }
 }

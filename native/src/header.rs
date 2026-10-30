@@ -38,6 +38,22 @@ pub fn pill() -> Div {
         })
 }
 
+pub fn spinner(id: &'static str, size: f32) -> AnyElement {
+    icon("spinner")
+        .size(rems(size))
+        .text_color(rgb(0xf0f8f3))
+        .with_animation(
+            id,
+            Animation::new(millis(900)).repeat(),
+            |icon, progress| {
+                icon.with_transformation(Transformation::rotate(radians(
+                    progress * std::f32::consts::TAU,
+                )))
+            },
+        )
+        .into_any_element()
+}
+
 fn sync_icon(syncing: bool) -> AnyElement {
     let icon = svg()
         .path("sync")
@@ -63,6 +79,20 @@ pub fn button(id: impl Into<ElementId>, name: &'static str, selected: bool) -> S
     button_shell(id, selected).child(icon(name))
 }
 
+pub fn action_button(
+    id: impl Into<ElementId>,
+    name: &'static str,
+    label: &'static str,
+) -> Stateful<Div> {
+    button_shell(id, false)
+        .size(rems(2.6))
+        .bg(rgba(0x102522e8))
+        .hover(|s| s.bg(rgba(0x315246f2)))
+        .child(icon(name).text_color(rgb(0xf0f8f3)))
+        .tooltip_show_delay(millis(400))
+        .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
+}
+
 struct FilterTooltip(&'static str);
 
 impl Render for FilterTooltip {
@@ -71,7 +101,7 @@ impl Render for FilterTooltip {
             .px(rems(0.85))
             .py(rems(0.45))
             .bg(rgba(0x102522f0))
-            .text_size(rems(1.))
+            .text_size(rems(1.125))
             .whitespace_nowrap()
             .shadow_sm()
             .child(self.0)

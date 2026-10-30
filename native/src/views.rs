@@ -72,8 +72,8 @@ impl Launcher {
                     .px(rems(1.))
                     .py(rems(0.4))
                     .gap(rems(0.8))
-                    .child(crate::icons::icon(os).size(rems(1.55)))
-                    .child(div().flex_1().text_size(rems(1.)).child(format!(
+                    .child(crate::icons::system_icon(os).size(rems(1.55)))
+                    .child(div().flex_1().text_size(rems(1.125)).child(format!(
                         "{}{} detected",
                         if volume.os == Os::Unknown {
                             "Possible "
@@ -88,7 +88,7 @@ impl Launcher {
                         ))
                     })
                     .when(self.host != Os::Linux, |d| {
-                        d.child(div().text_size(rems(0.95)).child(volume.note.clone()))
+                        d.child(div().text_size(rems(1.125)).child(volume.note.clone()))
                     })
             }))
     }
@@ -115,15 +115,16 @@ impl Launcher {
             .child("Settings")
             .child(
                 div()
-                    .text_size(rems(1.))
+                    .text_size(rems(1.125))
                     .text_color(rgb(0xb2c7bc))
                     .child("Ctrl F to search · Ctrl + / − / 0 for text size"),
             )
-            .children(
-                warnings
-                    .into_iter()
-                    .map(|warning| div().text_size(rems(1.)).whitespace_normal().child(warning)),
-            )
+            .children(warnings.into_iter().map(|warning| {
+                div()
+                    .text_size(rems(1.125))
+                    .whitespace_normal()
+                    .child(warning)
+            }))
     }
 
     pub fn game_actions(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -223,7 +224,7 @@ impl Launcher {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("Uninstall {}?", game.title)),
                     )
-                    .child(div().text_size(rems(1.)).whitespace_normal().child(note))
+                    .child(div().text_size(rems(1.125)).whitespace_normal().child(note))
                     .child(
                         div()
                             .flex()

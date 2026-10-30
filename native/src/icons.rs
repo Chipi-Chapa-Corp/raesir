@@ -11,6 +11,40 @@ pub fn assets() -> AssetRegistry {
         };
     }
     [
+        asset!("tux", "tux.png"),
+        asset!("macos", "macos.svg"),
+        asset!("spinner", "lucide/loader-circle.svg"),
+        asset!("check", "adwaita/object-select-symbolic.svg"),
+        asset!("calendar", "adwaita/x-office-calendar-symbolic.svg"),
+        asset!("esrb-e", "ratings/esrb-e.svg"),
+        asset!("esrb-e10", "ratings/esrb-e10.svg"),
+        asset!("esrb-t", "ratings/esrb-t.svg"),
+        asset!("esrb-m", "ratings/esrb-m.svg"),
+        asset!("esrb-ao", "ratings/esrb-ao.svg"),
+        asset!("esrb-rp", "ratings/esrb-rp.svg"),
+        asset!("pegi-3", "ratings/pegi-3.jpg"),
+        asset!("pegi-7", "ratings/pegi-7.jpg"),
+        asset!("pegi-12", "ratings/pegi-12.jpg"),
+        asset!("pegi-16", "ratings/pegi-16.jpg"),
+        asset!("pegi-18", "ratings/pegi-18.jpg"),
+        asset!("star", "adwaita/starred-symbolic.svg"),
+        asset!("star-empty", "adwaita/non-starred-symbolic.svg"),
+        asset!("age", "adwaita/security-high-symbolic.svg"),
+        asset!("warning", "adwaita/dialog-warning-symbolic.svg"),
+        asset!("expand", "adwaita/go-down-symbolic.svg"),
+        asset!("collapse", "adwaita/go-up-symbolic.svg"),
+        asset!("more", "adwaita/list-add-symbolic.svg"),
+        asset!("thumb-up", "material/thumb_up.svg"),
+        asset!("thumb-down", "material/thumb_down.svg"),
+        asset!("next", "adwaita/go-next-symbolic.svg"),
+        asset!("pause", "adwaita/media-playback-pause-symbolic.svg"),
+        asset!("rewind", "adwaita/media-seek-backward-symbolic.svg"),
+        asset!("forward", "adwaita/media-seek-forward-symbolic.svg"),
+        asset!("volume", "adwaita/audio-volume-high-symbolic.svg"),
+        asset!("muted", "adwaita/audio-volume-muted-symbolic.svg"),
+        asset!("fullscreen", "adwaita/view-fullscreen-symbolic.svg"),
+        asset!("restore", "adwaita/view-restore-symbolic.svg"),
+        asset!("back", "adwaita/go-previous-symbolic.svg"),
         asset!("sync", "adwaita/arrows-circle-rotated-symbolic.svg"),
         asset!("all", "adwaita/view-grid-symbolic.svg"),
         asset!("installed", "adwaita/games-symbolic.svg"),
@@ -53,4 +87,43 @@ pub fn icon(name: &'static str) -> Svg {
         .size(rems(size))
         .flex_none()
         .text_color(rgb(color))
+}
+
+pub fn system_icon(platform: &str) -> Img {
+    let platform = platform.to_ascii_lowercase();
+    let name = if platform.contains("linux") {
+        "tux"
+    } else if platform.contains("mac") || platform.contains("darwin") || platform.contains("osx") {
+        "macos"
+    } else if platform.contains("xbox") {
+        "xbox"
+    } else {
+        "windows"
+    };
+    img(name)
+        .size(rems(1.55))
+        .flex_none()
+        .object_fit(ObjectFit::Contain)
+}
+
+pub fn rating_image(rating: &str) -> Option<&'static str> {
+    let code = rating
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    Some(match code.as_str() {
+        "ESRBE" | "ESRBEVERYONE" => "esrb-e",
+        "ESRBE10" | "ESRBE10PLUS" | "ESRBEVERYONE10" => "esrb-e10",
+        "ESRBT" | "ESRBTEEN" => "esrb-t",
+        "ESRBM" | "ESRBMATURE" | "ESRBMATURE17" => "esrb-m",
+        "ESRBAO" | "ESRBADULTSONLY18" => "esrb-ao",
+        "ESRBRP" | "ESRBRATINGPENDING" => "esrb-rp",
+        "PEGI3" => "pegi-3",
+        "PEGI7" => "pegi-7",
+        "PEGI12" => "pegi-12",
+        "PEGI16" => "pegi-16",
+        "PEGI18" => "pegi-18",
+        _ => return None,
+    })
 }

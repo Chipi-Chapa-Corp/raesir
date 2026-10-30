@@ -8,7 +8,8 @@ pub struct Game {
     pub store: usize,
     pub source: LibraryGame,
     pub poster: Option<Arc<RenderImage>>,
-    pub colors: Option<[u32; 2]>,
+    pub background: Option<Arc<RenderImage>>,
+    pub background_checked: bool,
 }
 
 impl Game {
@@ -20,7 +21,8 @@ impl Game {
             store,
             source,
             poster: None,
-            colors: None,
+            background: None,
+            background_checked: false,
         })
     }
 
@@ -53,6 +55,21 @@ impl Game {
             .iter()
             .find(|i| i.os != host && i.os != Os::Unknown && i.state != "files_missing")
             .map(|i| i.os)
+    }
+
+    pub fn duplicate_systems(&self, host: Os) -> Vec<Os> {
+        if self.installed(1, host) != 1 {
+            return Vec::new();
+        }
+        [Os::Linux, Os::Windows]
+            .into_iter()
+            .filter(|os| {
+                *os != host
+                    && self.source.installations.iter().any(|i| {
+                        i.os == *os && matches!(i.state.as_str(), "installed" | "external")
+                    })
+            })
+            .collect()
     }
 
     pub fn matches(
@@ -138,7 +155,43 @@ mod tests {
             assert_eq!(game.installed(1, host), 1);
             assert_eq!(game.installed(2, host), 2);
             assert_ne!(game.other_os(host), Some(host));
+            assert_eq!(
+                game.duplicate_systems(host),
+                vec![if host == Os::Linux {
+                    Os::Windows
+                } else {
+                    Os::Linux
+                }]
+            );
         }
+    }
+
+    #[test]
+    fn duplicate_badge_requires_installed_copies_on_both_known_systems() {
+        for installations in [
+            vec![(Os::Windows, "installed")],
+            vec![(Os::Linux, "installed"), (Os::Windows, "incomplete")],
+            vec![(Os::Linux, "installed"), (Os::Windows, "unavailable")],
+            vec![(Os::Linux, "installed"), (Os::Unknown, "installed")],
+            vec![(Os::Linux, "installed"), (Os::Linux, "installed")],
+        ] {
+            let game = game(vec![Os::Linux, Os::Windows], installations);
+            assert!(game.duplicate_systems(Os::Linux).is_empty());
+            assert!(game.duplicate_systems(Os::Unknown).is_empty());
+        }
+    }
+
+    #[test]
+    fn duplicate_systems_do_not_repeat_mount_aliases() {
+        let game = game(
+            vec![Os::Linux, Os::Windows],
+            vec![
+                (Os::Linux, "installed"),
+                (Os::Windows, "installed"),
+                (Os::Windows, "installed"),
+            ],
+        );
+        assert_eq!(game.duplicate_systems(Os::Linux), vec![Os::Windows]);
     }
 
     #[test]

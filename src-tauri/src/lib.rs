@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod artwork;
 pub mod catalog;
 pub mod client_control;
+pub mod details;
 pub mod discovery;
 pub mod ea;
 pub mod epic;

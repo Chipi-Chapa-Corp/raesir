@@ -46,7 +46,8 @@ impl Launcher {
                 if let Some(previous) = old.get(&game.source.key) {
                     if previous.source.cover == game.source.cover {
                         game.poster = previous.poster.clone();
-                        game.colors = previous.colors;
+                        game.background = previous.background.clone();
+                        game.background_checked = previous.background_checked;
                     }
                     if game.title == game.source.id && previous.title != previous.source.id {
                         game.title = previous.title.clone();
@@ -226,7 +227,12 @@ impl Launcher {
             let refresh = result.is_ok() && kind == "uninstall";
             this.update(cx, |this, cx| {
                 this.pending_action = None;
-                this.notice(result.unwrap_or_else(|e| e), cx);
+                match result {
+                    Err(error) => this.notice(error, cx),
+                    Ok(message) if !message.starts_with("Sent to ") => this.notice(message, cx),
+                    _ => {}
+                }
+                cx.notify();
             })
             .ok();
             if refresh {
@@ -244,6 +250,7 @@ impl Launcher {
             return;
         }
         self.closing = true;
+        self.details = None;
         self.backend.begin_closing();
         self.hover_task = None;
         self.wheel.reset(0.);

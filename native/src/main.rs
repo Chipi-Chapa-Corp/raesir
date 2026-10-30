@@ -15,12 +15,14 @@ mod artwork;
 mod backdrop;
 mod backend;
 mod controller;
+mod details;
 mod header;
 mod icons;
 mod library;
+mod video;
 mod views;
 use header::{Header, HeaderState, button, pill};
-use icons::icon;
+use icons::{icon, system_icon};
 
 mod smooth_scroll;
 use smooth_scroll::SmoothWheel;
@@ -42,6 +44,7 @@ struct Launcher {
     last_refresh: Instant,
     pending_action: Option<String>,
     game_menu: Option<(String, Point<Pixels>)>,
+    details: Option<Entity<details::DetailsPage>>,
     confirm: Option<String>,
     artwork_pending: HashSet<String>,
     artwork_attempted: HashSet<String>,
@@ -60,6 +63,7 @@ struct Launcher {
     query: String,
     focus: FocusHandle,
     backdrop: Entity<backdrop::Backdrop>,
+    background_pending: bool,
     hovered: Option<usize>,
     hover_task: Option<Task<()>>,
     notice: Option<String>,
@@ -130,6 +134,7 @@ impl Launcher {
             last_refresh: Instant::now(),
             pending_action: None,
             game_menu: None,
+            details: None,
             confirm: None,
             artwork_pending: HashSet::new(),
             artwork_attempted: HashSet::new(),
@@ -148,6 +153,7 @@ impl Launcher {
             query: String::new(),
             focus,
             backdrop: cx.new(|_| backdrop::Backdrop::default()),
+            background_pending: false,
             hovered: None,
             hover_task: None,
             notice: None,
@@ -193,7 +199,12 @@ impl Launcher {
     }
 
     fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu || self.game_menu.is_some() || self.confirm.is_some() || self.closing {
+        if self.details.is_some()
+            || self.menu
+            || self.game_menu.is_some()
+            || self.confirm.is_some()
+            || self.closing
+        {
             return;
         }
         let position = -f32::from(self.rows.scroll_px_offset_for_scrollbar().y) as f64;
@@ -259,13 +270,11 @@ impl Launcher {
                 cx.background_executor().timer(millis(180)).await;
                 this.update(cx, |this, cx| {
                     if this.hovered == Some(i) {
-                        this.backdrop.update(cx, |backdrop, cx| {
-                            if let Some(colors) = this.games[i].colors
-                                && backdrop.retarget(colors)
-                            {
-                                cx.notify();
-                            }
-                        });
+                        if let Some(image) = this.games[i].background.clone() {
+                            this.backdrop
+                                .update(cx, |backdrop, cx| backdrop.retarget(image, cx));
+                        }
+                        this.load_background(i, cx);
                     }
                 })
                 .ok();
@@ -276,19 +285,55 @@ impl Launcher {
         }
     }
 
+    fn load_background(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.background_pending || self.games[index].background_checked {
+            return;
+        }
+        self.background_pending = true;
+        let game = self.games[index].source.clone();
+        let key = game.key.clone();
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { backdrop::load(&backend, &game) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.background_pending = false;
+                if let Some(game) = this.games.iter_mut().find(|game| game.source.key == key) {
+                    game.background_checked = true;
+                    if let Ok(image) = result {
+                        game.background = Some(image);
+                    }
+                }
+                if let Some(index) = this.hovered {
+                    this.hover(index, true, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn card(&self, i: usize, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let g = &self.games[i];
-        let colors = g.colors.unwrap_or(backdrop::DEFAULT_COLORS);
         let installed = g.installed(self.os, self.host);
         let installed_here = installed == 1;
         let playable = installed_here && g.source.launch.is_some();
+        let duplicate_systems = g.duplicate_systems(self.host);
         let key = g.key.clone();
         let menu_key = key.clone();
+        let details_key = key.clone();
         let title = g.title.clone();
 
         div()
             .id(("card", i))
             .group("game-card")
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                window.focus(&this.focus, cx);
+                this.open_details(&details_key, cx);
+            }))
             .w(px(width))
             .flex_none()
             .flex()
@@ -310,11 +355,7 @@ impl Launcher {
                     .h(px(width * 1.5))
                     .rounded(rems(0.8))
                     .overflow_hidden()
-                    .bg(linear_gradient(
-                        130.,
-                        linear_color_stop(rgb(colors[0]), 0.),
-                        linear_color_stop(rgb(colors[1]), 1.),
-                    ))
+                    .bg(rgba(0x102522d9))
                     .when_some(g.poster.clone(), |d, poster| {
                         d.child(
                             img(poster)
@@ -356,6 +397,27 @@ impl Launcher {
                             .bg(rgba(0x102522db))
                             .child(icon(STORES[g.store])),
                     )
+                    .when(!duplicate_systems.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(rems(0.5))
+                                .right(rems(0.5))
+                                .h(rems(1.9))
+                                .px(rems(0.5))
+                                .gap(rems(0.4))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgb(0xbc303d))
+                                .child(icon("warning").size(rems(1.1)).text_color(rgb(0xffffff)))
+                                .children(duplicate_systems.into_iter().map(|os| {
+                                    system_icon(if os == Os::Linux { "linux" } else { "windows" })
+                                        .size(rems(1.3))
+                                })),
+                        )
+                    })
                     .when(
                         !installed_here && self.os != 1 && g.other_os(self.host).is_some(),
                         |d| {
@@ -367,7 +429,7 @@ impl Launcher {
                                     .items_center()
                                     .justify_center()
                                     .child(
-                                        icon(if g.other_os(self.host) == Some(Os::Linux) {
+                                        system_icon(if g.other_os(self.host) == Some(Os::Linux) {
                                             "linux"
                                         } else {
                                             "windows"
@@ -384,7 +446,7 @@ impl Launcher {
                                 .bottom(rems(2.8))
                                 .left(rems(0.85))
                                 .right(rems(0.75))
-                                .text_size(rems(1.2))
+                                .text_size(rems(1.125))
                                 .text_center()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xf2f8f3))
@@ -402,28 +464,20 @@ impl Launcher {
                                 .bg(rgb(0x9ff4bc)),
                         )
                     })
-                    .child(
-                        button(
-                            ("action", i),
-                            if playable { "play" } else { "external" },
-                            false,
+                    .when(playable, |d| {
+                        d.child(
+                            button(("action", i), "play", false)
+                                .absolute()
+                                .bottom(rems(0.55))
+                                .right(rems(0.55))
+                                .bg(rgba(0xdcece4f2))
+                                .hover(|s| s.bg(rgba(0xf0f8f3ff)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.action(key.to_string(), "launch", cx);
+                                })),
                         )
-                        .absolute()
-                        .bottom(rems(0.55))
-                        .right(rems(0.55))
-                        .bg(if playable {
-                            rgba(0xdcece4f2)
-                        } else {
-                            rgba(0x102522db)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.action(
-                                key.to_string(),
-                                if playable { "launch" } else { "store" },
-                                cx,
-                            );
-                        })),
-                    ),
+                    }),
             )
             .child(
                 div()
@@ -470,7 +524,9 @@ impl Render for Launcher {
             .max(2.) as usize;
         let width = (viewport - self.zoom * (3. + 1.25 * (columns - 1) as f32)) / columns as f32;
         let row_height = (width * 1.5 + self.zoom * 4.75).ceil();
-        if columns != self.columns || (row_height - self.row_height).abs() > 0.01 {
+        if self.details.is_none()
+            && (columns != self.columns || (row_height - self.row_height).abs() > 0.01)
+        {
             self.columns = columns;
             self.row_height = row_height;
             self.reset_rows();
@@ -531,6 +587,11 @@ impl Render for Launcher {
             .text_color(rgb(0xf0f8f3))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                if this.dismiss_details(window, cx) {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 this.search.update(cx, |search, cx| search.emplace("", cx));
                 this.menu = false;
                 this.game_menu = None;
@@ -553,6 +614,7 @@ impl Render for Launcher {
                 }
                 if key.modifiers.control {
                     if key.key == "f" {
+                        this.details = None;
                         window.focus(&this.search.focus_handle(cx), cx);
                         return;
                     }
@@ -569,6 +631,11 @@ impl Render for Launcher {
                     return;
                 }
                 if key.key == "escape" {
+                    if this.dismiss_details(window, cx) {
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
                     this.search.update(cx, |search, cx| search.emplace("", cx));
                     this.menu = false;
                     this.game_menu = None;
@@ -578,45 +645,51 @@ impl Render for Launcher {
                 }
             }))
             .child(self.backdrop.clone())
-            .child(scroll_input)
-            .child(rows)
-            .when(!self.starting && self.visible.is_empty(), |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            pill()
-                                .flex_col()
-                                .rounded(rems(1.8))
-                                .p(rems(2.5))
-                                .gap(rems(1.))
-                                .child(icon("empty-search").size(rems(2.)))
-                                .child(if self.load_error.is_some() {
-                                    "Could not load library"
-                                } else if self.games.is_empty() {
-                                    "No games found"
-                                } else {
-                                    "No matching games"
-                                })
-                                .child(
-                                    div().text_size(rems(1.05)).text_color(rgb(0xaabdb4)).child(
-                                        if self.load_error.is_some() {
-                                            "Refresh to try again."
-                                        } else if self.games.is_empty() {
-                                            "Refresh after signing in to a supported client."
-                                        } else {
-                                            "Try a different filter or search."
-                                        },
-                                    ),
-                                ),
-                        ),
-                )
+            .when(self.details.is_none(), |d| {
+                d.child(scroll_input).child(rows)
             })
-            .child(self.header.clone())
+            .when(
+                self.details.is_none() && !self.starting && self.visible.is_empty(),
+                |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                pill()
+                                    .flex_col()
+                                    .rounded(rems(1.8))
+                                    .p(rems(2.5))
+                                    .gap(rems(1.))
+                                    .child(icon("empty-search").size(rems(2.)))
+                                    .child(if self.load_error.is_some() {
+                                        "Could not load library"
+                                    } else if self.games.is_empty() {
+                                        "No games found"
+                                    } else {
+                                        "No matching games"
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(rems(1.125))
+                                            .text_color(rgb(0xaabdb4))
+                                            .child(if self.load_error.is_some() {
+                                                "Refresh to try again."
+                                            } else if self.games.is_empty() {
+                                                "Refresh after signing in to a supported client."
+                                            } else {
+                                                "Try a different filter or search."
+                                            }),
+                                    ),
+                            ),
+                    )
+                },
+            )
+            .when(self.details.is_none(), |d| d.child(self.header.clone()))
+            .when_some(self.details.clone(), |d, page| d.child(page))
             .child(
                 div()
                     .absolute()
