@@ -92,13 +92,17 @@ impl Render for Backdrop {
                 let _ = window.drop_image(image);
             }
         }
-        let background = div().absolute().inset_0().bg(rgb(0x0c1d1a));
+        let background = div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .bg(rgb(0x0c1d1a));
         let texture = |image| {
-            img(image)
+            // Keep atlas filtering at the image boundary outside the visible window.
+            div()
                 .absolute()
-                .inset_0()
-                .size_full()
-                .object_fit(ObjectFit::Cover)
+                .inset(relative(-0.02))
+                .child(img(image).size_full().object_fit(ObjectFit::Cover))
         };
         if self.from.id == self.target.id {
             return background
@@ -168,7 +172,7 @@ pub fn from_cover(
 
 fn cache_path(source: &Path, cache: &Path) -> PathBuf {
     let mut hash = DefaultHasher::new();
-    ("mesh-v1", source).hash(&mut hash);
+    ("mesh-v2", source).hash(&mut hash);
     fs::metadata(source)
         .and_then(|m| m.modified())
         .ok()
@@ -204,17 +208,18 @@ fn prepare(image: &image_codec::DynamicImage, path: &Path) -> Arc<RenderImage> {
 fn color_mesh(image: &image_codec::DynamicImage) -> image_codec::RgbaImage {
     let image = image
         .resize_to_fill(SIZE.0, SIZE.1, image_codec::imageops::FilterType::Triangle)
-        .into_rgb8();
+        .into_rgb32f();
     let mut image = image_codec::imageops::fast_blur(&image, 18.);
     for pixel in image.pixels_mut() {
-        let [r, g, b] = pixel.0.map(u32::from);
-        let mut color = rgb_to_hsla(rgb((r << 16) | (g << 8) | b));
-        color.saturation = (color.saturation * 1.2).min(0.92);
+        let [red, green, blue] = pixel.0;
+        let mut color = rgb_to_hsla(Rgba::new(red, green, blue, 1.));
+        // Lifting nearly black pixels must not amplify their barely visible hue noise.
+        color.saturation = (color.saturation * 1.2 * (color.lightness / 0.16).min(1.)).min(0.92);
         color.lightness = color.lightness.clamp(0.16, 0.52);
         let color = hsla_to_rgba(color);
-        pixel.0 = [color.red, color.green, color.blue].map(|v| (v * 255.).round() as u8);
+        pixel.0 = [color.red, color.green, color.blue];
     }
-    image_codec::DynamicImage::ImageRgb8(image).into_rgba8()
+    image_codec::DynamicImage::ImageRgb32F(image).into_rgba8()
 }
 
 fn render_image(mut image: image_codec::RgbaImage) -> Arc<RenderImage> {
@@ -255,6 +260,17 @@ mod tests {
         assert!(values.iter().max().unwrap() - values.iter().min().unwrap() < 3);
         let tiny = color_mesh(&image_codec::DynamicImage::new_rgb8(1, 1));
         assert_eq!(tiny.dimensions(), SIZE);
+    }
+    #[test]
+    fn shadow_lift_does_not_turn_near_black_noise_into_colored_ridges() {
+        let image = image_codec::RgbImage::from_fn(512, 288, |x, _| {
+            image_codec::Rgb(if x < 256 { [1, 0, 0] } else { [0, 0, 1] })
+        });
+        let mesh = color_mesh(&image.into());
+        for pixel in mesh.pixels() {
+            let channels = &pixel.0[..3];
+            assert!(channels.iter().max().unwrap() - channels.iter().min().unwrap() <= 2);
+        }
     }
     #[test]
     fn background_uses_first_available_content_instead_of_cover() {

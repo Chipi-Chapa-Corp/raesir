@@ -31,7 +31,7 @@ pub fn pill() -> Div {
         .gap(rems(0.15))
         .p(rems(0.25))
         .rounded_full()
-        .bg(rgba(0x102522c9))
+        .bg(rgba(0x101010a6))
         .text_color(rgb(0xf0f8f3))
         .when(std::env::var_os("RAESIR_MOCK_NO_BLUR").is_none(), |d| {
             d.backdrop_blur(px(14.))
@@ -86,8 +86,8 @@ pub fn action_button(
 ) -> Stateful<Div> {
     button_shell(id, false)
         .size(rems(2.6))
-        .bg(rgba(0x102522e8))
-        .hover(|s| s.bg(rgba(0x315246f2)))
+        .bg(rgba(0x101010b8))
+        .hover(|s| s.bg(rgba(0x303030b3)))
         .child(icon(name).text_color(rgb(0xf0f8f3)))
         .tooltip_show_delay(millis(400))
         .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
@@ -100,7 +100,7 @@ impl Render for FilterTooltip {
         pill()
             .px(rems(0.85))
             .py(rems(0.45))
-            .bg(rgba(0x102522f0))
+            .bg(rgba(0x101010e6))
             .text_size(rems(1.125))
             .whitespace_nowrap()
             .shadow_sm()
@@ -130,11 +130,11 @@ fn button_shell(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
         .rounded_full()
         .cursor_pointer()
         .bg(if selected {
-            rgba(0xa2c7ba29)
+            rgba(0xffffff24)
         } else {
             rgba(0x00000000)
         })
-        .hover(|s| s.bg(rgba(0xc0e1d52b)))
+        .hover(|s| s.bg(rgba(0xffffff29)))
         .transitions(|t| t.bg(millis(130)))
 }
 
@@ -213,7 +213,7 @@ impl Render for Header {
                     .h(rems(2.9))
                     .px(rems(0.8))
                     .gap(rems(0.65))
-                    .when(search_active, |d| d.bg(rgba(0x25473ee8)))
+                    .when(search_active, |d| d.bg(rgba(0x242424b3)))
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         window.focus(&search_focus, cx);
                     })
@@ -224,7 +224,7 @@ impl Render for Header {
                             .placeholder("Search games")
                             .placeholder_color(rgb(0xacbdb5))
                             .caret_color(rgb_to_hsla(rgb(0xf0f8f3)))
-                            .selection_color(rgb_to_hsla(rgba(0x79b7a966)))
+                            .selection_color(rgb_to_hsla(rgba(0xffffff40)))
                             .caret_blink_interval_500ms()
                             .flex_1()
                             .min_w_0()

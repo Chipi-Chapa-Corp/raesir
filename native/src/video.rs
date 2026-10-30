@@ -721,7 +721,7 @@ impl Render for Player {
                         .items_center()
                         .justify_center()
                         .p(rems(2.))
-                        .bg(rgba(0x071410c9))
+                        .bg(rgba(0x101010c9))
                         .rounded(rems(1.2))
                         .child(if let Some(error) = error {
                             pill()

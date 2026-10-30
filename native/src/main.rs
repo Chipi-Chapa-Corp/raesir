@@ -355,7 +355,7 @@ impl Launcher {
                     .h(px(width * 1.5))
                     .rounded(rems(0.8))
                     .overflow_hidden()
-                    .bg(rgba(0x102522d9))
+                    .bg(rgba(0x101010b3))
                     .when_some(g.poster.clone(), |d, poster| {
                         d.child(
                             img(poster)
@@ -394,7 +394,7 @@ impl Launcher {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(rgba(0x102522db))
+                            .bg(rgba(0x101010b3))
                             .child(icon(STORES[g.store])),
                     )
                     .when(!duplicate_systems.is_empty(), |d| {

@@ -4995,6 +4995,7 @@ dependencies = [
  "raesir",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]

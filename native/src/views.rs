@@ -27,14 +27,14 @@ impl Launcher {
                     .w_full()
                     .h(px(width * 1.5))
                     .rounded(rems(0.8))
-                    .bg(rgba(0xc5dfd51a)),
+                    .bg(rgba(0xffffff1a)),
             )
             .child(
                 div()
                     .w(relative(0.7))
                     .h(rems(1.1))
                     .rounded_full()
-                    .bg(rgba(0xc5dfd51a)),
+                    .bg(rgba(0xffffff1a)),
             )
     }
 

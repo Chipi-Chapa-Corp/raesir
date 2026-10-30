@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 const REVIEW_FILTERS: [[&str; 3]; 2] = [
     ["All dates", "Past 30 days", "Past year"],
@@ -65,8 +66,8 @@ fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stat
         .items_center()
         .gap(rems(0.5))
         .cursor_pointer()
-        .bg(rgba(0x102522e8))
-        .hover(|s| s.bg(rgba(0x315246f2)))
+        .bg(rgba(0x101010b8))
+        .hover(|s| s.bg(rgba(0x303030b3)))
         .child(label.into())
 }
 fn panel() -> Div {
@@ -76,7 +77,7 @@ fn panel() -> Div {
         .gap(rems(1.))
         .rounded(rems(1.4))
         .p(rems(1.5))
-        .bg(rgba(0x102522d9))
+        .bg(rgba(0x101010b3))
 }
 fn heading(label: &'static str) -> Div {
     div()
@@ -97,6 +98,22 @@ fn paragraph(text: impl Into<SharedString>) -> Div {
         .line_height(rems(1.75))
         .whitespace_normal()
         .child(text.into())
+}
+fn review_paragraph(text: String) -> Div {
+    let mut wrapped = String::with_capacity(text.len());
+    for word in text.split_inclusive(char::is_whitespace) {
+        if word.graphemes(true).count() > 40 {
+            for grapheme in word.graphemes(true) {
+                wrapped.push_str(grapheme);
+                if !grapheme.chars().all(char::is_whitespace) {
+                    wrapped.push('\u{200b}');
+                }
+            }
+        } else {
+            wrapped.push_str(word);
+        }
+    }
+    paragraph(wrapped).w_full().min_w_0()
 }
 fn bubble() -> Div {
     pill()
@@ -122,7 +139,7 @@ fn age_badge(rating: &str) -> Stateful<Div> {
         .w(rems(6.))
         .flex_none()
         .rounded(rems(1.2))
-        .bg(rgba(0x102522d9))
+        .bg(rgba(0x101010b3))
         .child(
             div()
                 .absolute()
@@ -178,14 +195,14 @@ fn skeleton_line(width: f32) -> Div {
         .h(rems(1.125))
         .my(rems(0.3125))
         .rounded(rems(0.35))
-        .bg(rgba(0xb4d8c820))
+        .bg(rgba(0xffffff20))
 }
 fn skeleton_block(width: f32, height: f32) -> Div {
     div()
         .w(rems(width))
         .h(rems(height))
         .rounded(rems(0.8))
-        .bg(rgba(0xb4d8c820))
+        .bg(rgba(0xffffff20))
 }
 fn skeleton_lines(widths: &[f32]) -> Div {
     div()
@@ -209,7 +226,7 @@ fn content_skeleton() -> Div {
                 .w_full()
                 .aspect_ratio(16. / 9.)
                 .rounded(rems(1.2))
-                .bg(rgba(0x102522d9)),
+                .bg(rgba(0x101010b3)),
         )
         .child(
             div()
@@ -419,7 +436,7 @@ impl DetailsPage {
             .p(rems(0.5))
             .rounded(rems(1.))
             .shadow_lg()
-            .bg(rgba(0x102522fa))
+            .bg(rgba(0x101010e6))
             .flex_col()
             .items_stretch()
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -460,7 +477,7 @@ impl DetailsPage {
                             .rounded(rems(0.6))
                             .justify_between()
                             .bg(if index == highlighted {
-                                rgba(0x315246f2)
+                                rgba(0x303030b3)
                             } else {
                                 rgba(0x00000000)
                             })
@@ -809,7 +826,7 @@ impl DetailsPage {
             .rounded(rems(1.2))
             .overflow_hidden()
             .shadow_md()
-            .bg(rgba(0x102522d9))
+            .bg(rgba(0x101010b3))
             .when_some(image, |d, image| {
                 let size = image.size(0);
                 d.child(
@@ -1009,7 +1026,7 @@ impl Render for DetailsPage {
                 .h(rems(18.))
                 .flex_none()
                 .rounded(rems(1.4))
-                .bg(rgba(0x102522d9))
+                .bg(rgba(0x101010b3))
                 .shadow_lg()
                 .when_some(self.poster.clone(), |d, poster| {
                     d.child(
@@ -1053,7 +1070,7 @@ impl Render for DetailsPage {
         let platform = bubble()
             .id("details-store")
             .cursor_pointer()
-            .hover(|s| s.bg(rgba(0x315246f2)))
+            .hover(|s| s.bg(rgba(0x303030b3)))
             .child(icon(store_icon(&self.game.store)))
             .child(self.game.client.clone());
         title = title.child(if self.game.store_page.is_some() {
@@ -1320,7 +1337,7 @@ impl Render for DetailsPage {
                                     },
                                 )),
                         )
-                        .child(paragraph(if r.title.is_empty() {
+                        .child(review_paragraph(if r.title.is_empty() {
                             r.text.clone()
                         } else {
                             format!("{}\n{}", r.title, r.text)
