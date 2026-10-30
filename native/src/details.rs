@@ -38,6 +38,7 @@ pub struct DetailsPage {
     images: HashMap<String, Arc<RenderImage>>,
     pending: HashSet<String>,
     failed: HashSet<String>,
+    animations: HashMap<usize, description::AnimationSlot>,
     selected: usize,
     reviews_visible: usize,
     player: Option<Entity<crate::video::Player>>,
@@ -342,6 +343,7 @@ impl Launcher {
             images: HashMap::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
+            animations: HashMap::new(),
             selected: 0,
             reviews_visible: 4,
             player: None,
@@ -581,6 +583,7 @@ impl DetailsPage {
                             this.player_events = None;
                             this.fullscreen = false;
                         }
+                        this.animations.clear();
                         this.data = Some(Arc::new(data));
                     }
                     Err(error) => this.error = Some(error),
@@ -1255,6 +1258,9 @@ impl Render for DetailsPage {
                     }))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.about_expanded = !this.about_expanded;
+                        if !this.about_expanded {
+                            this.animations.clear();
+                        }
                         cx.notify();
                     })),
                 ),

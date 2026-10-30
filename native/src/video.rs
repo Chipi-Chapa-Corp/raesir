@@ -135,6 +135,7 @@ struct Playback {
 }
 pub struct Player {
     url: String,
+    animation: bool,
     state: Arc<Mutex<Playback>>,
     commands: commands::Sender<Vec<String>>,
     stop: Arc<AtomicBool>,
@@ -149,6 +150,22 @@ pub struct Player {
 }
 impl Player {
     pub fn new(url: String, cache: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::create(url, cache, None, cx)
+    }
+    pub fn animation(
+        url: String,
+        cache: PathBuf,
+        dimensions: [u32; 2],
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::create(url, cache, Some(dimensions), cx)
+    }
+    fn create(
+        url: String,
+        cache: PathBuf,
+        animation: Option<[u32; 2]>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let state = Arc::new(Mutex::new(Playback {
             volume: 100.,
             ..Default::default()
@@ -170,6 +187,7 @@ impl Player {
             let result = run(
                 source,
                 cache,
+                animation,
                 &thread_state,
                 &thread_stop,
                 command_rx,
@@ -182,6 +200,7 @@ impl Player {
         });
         Self {
             url,
+            animation: animation.is_some(),
             state,
             commands: command_tx,
             stop,
@@ -356,6 +375,7 @@ unsafe extern "C" fn wake(data: *mut c_void) {
 fn run(
     url: String,
     cache: PathBuf,
+    animation: Option<[u32; 2]>,
     state: &Arc<Mutex<Playback>>,
     stop: &AtomicBool,
     commands: commands::Receiver<Vec<String>>,
@@ -386,6 +406,17 @@ fn run(
                     CString::new(name).unwrap().as_ptr(),
                     CString::new(value).unwrap().as_ptr(),
                 );
+            }
+            if animation.is_some() {
+                for (name, value) in [
+                    (c"audio", c"no"),
+                    (c"loop-file", c"inf"),
+                    (c"hwdec", c"no"),
+                    (c"vd-lavc-threads", c"2"),
+                    (c"vd", c"libvpx-vp9,libvpx,"),
+                ] {
+                    (api.option)(handle, name.as_ptr(), value.as_ptr());
+                }
             }
             if std::env::var_os("ISOLATED_GUI_SESSION").is_some() {
                 (api.option)(handle, c"audio".as_ptr(), c"no".as_ptr());
@@ -436,12 +467,14 @@ fn run(
                 (4, c"mute", 3),
                 (5, c"volume", 5),
             ] {
-                (api.observe)(handle, id, name.as_ptr(), format);
+                if animation.is_none() {
+                    (api.observe)(handle, id, name.as_ptr(), format);
+                }
             }
             let loaded = send(vec!["loadfile".into(), url]);
             let result = (|| {
                 loaded?;
-                let mut size = [960i32, 540];
+                let mut size = animation.map(animation_size).unwrap_or([960, 540]);
                 let mut stride = size[0] as usize * 4;
                 let mut seeking = None;
                 while !stop.load(Ordering::Relaxed) {
@@ -512,7 +545,12 @@ fn run(
                         },
                         Param {
                             kind: 18,
-                            data: c"bgr0".as_ptr() as *mut _,
+                            data: if animation.is_some() {
+                                c"bgra"
+                            } else {
+                                c"bgr0"
+                            }
+                            .as_ptr() as *mut _,
                         },
                         Param {
                             kind: 19,
@@ -534,7 +572,9 @@ fn run(
                         .into_iter()
                         .flat_map(|pixel| {
                             let mut bytes = pixel.to_ne_bytes();
-                            bytes[3] = 255;
+                            if animation.is_none() {
+                                bytes[3] = 255;
+                            }
                             bytes
                         })
                         .collect();
@@ -590,6 +630,31 @@ impl Render for Player {
                 let _ = window.drop_image(previous);
             }
             self.last_frame = frame.clone();
+        }
+        if self.animation {
+            return div()
+                .absolute()
+                .inset_0()
+                .when_some(frame, |d, frame| {
+                    d.child(img(frame).size_full().object_fit(ObjectFit::Contain))
+                })
+                .when_some(error.clone(), |d, error| {
+                    d.child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(pill().p(rems(1.)).child(error)),
+                    )
+                })
+                .when(self.last_frame.is_none() && error.is_none(), |d| {
+                    d.flex()
+                        .items_center()
+                        .justify_center()
+                        .child(spinner("animation-loading", 2.))
+                })
+                .into_any_element();
         }
         let owner = cx.weak_entity();
         let mouse_owner = owner.clone();
@@ -758,5 +823,28 @@ impl Render for Player {
                     .bottom(rems(0.75))
                     .child(controls),
             )
+            .into_any_element()
+    }
+}
+
+fn animation_size([width, height]: [u32; 2]) -> [i32; 2] {
+    let scale = (960. / width.max(1) as f64)
+        .min(540. / height.max(1) as f64)
+        .min(1.);
+    [
+        (width as f64 * scale).round().max(1.) as i32,
+        (height as f64 * scale).round().max(1.) as i32,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::animation_size;
+    #[test]
+    fn animations_preserve_aspect_ratio_with_bounded_frame_buffers() {
+        assert_eq!(animation_size([780, 316]), [780, 316]);
+        assert_eq!(animation_size([3840, 1080]), [960, 270]);
+        assert_eq!(animation_size([1200, 1800]), [360, 540]);
+        assert_eq!(animation_size([0, 0]), [1, 1]);
     }
 }

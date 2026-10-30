@@ -11,6 +11,7 @@ use std::{
     sync::LazyLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+pub mod media;
 mod providers;
 pub(crate) use providers::{ea_cover, epic_cover};
 pub mod rich;

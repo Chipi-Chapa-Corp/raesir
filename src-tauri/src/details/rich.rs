@@ -31,6 +31,11 @@ pub enum Block {
         alt: String,
         link: Option<String>,
     },
+    Video {
+        url: String,
+        poster: Option<String>,
+        dimensions: [u32; 2],
+    },
 }
 
 pub fn parse(source: &str, base: &str) -> Vec<Block> {
@@ -142,11 +147,56 @@ impl Parser<'_> {
             self.text("", &style, true);
             return;
         }
-        if matches!(tag, "img" | "video") {
+        if tag == "video" {
+            self.flush();
+            let url = element
+                .value()
+                .attr("src")
+                .and_then(|s| self.url(s))
+                .or_else(|| {
+                    let sources = element
+                        .children()
+                        .filter_map(ElementRef::wrap)
+                        .filter(|e| e.value().name() == "source")
+                        .filter_map(|e| self.url(e.value().attr("src")?))
+                        .collect::<Vec<_>>();
+                    sources
+                        .iter()
+                        .find(|s| s.split('?').next().is_some_and(|s| s.ends_with(".webm")))
+                        .or_else(|| sources.first())
+                        .cloned()
+                });
+            let poster = element.value().attr("poster").and_then(|s| self.url(s));
+            if let Some(url) = url {
+                let dimensions = ["width", "height"].map(|name| {
+                    element
+                        .value()
+                        .attr(name)
+                        .and_then(|s| s.parse::<u32>().ok())
+                });
+                let dimensions = match dimensions {
+                    [Some(w), Some(h)] if w > 0 && h > 0 => [w, h],
+                    _ => [960, 540],
+                };
+                self.blocks.push(Block::Video {
+                    url,
+                    poster,
+                    dimensions,
+                });
+            } else if let Some(url) = poster {
+                self.blocks.push(Block::Image {
+                    url,
+                    alt: String::new(),
+                    link: style.link.clone(),
+                });
+            }
+            return;
+        }
+        if tag == "img" {
             self.flush();
             if let Some(url) = element
                 .value()
-                .attr(if tag == "video" { "poster" } else { "src" })
+                .attr("src")
                 .or_else(|| element.value().attr("data-src"))
                 .and_then(|s| self.url(s))
             {
@@ -244,6 +294,20 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn description_videos_keep_webm_sources_posters_and_dimensions() {
+        let blocks = parse(
+            "<video poster='/poster.avif' width='780' height='316'><source src='/clip.mp4' type='video/mp4'><source src='/clip.webm' type='video/webm'></video><video src='javascript:bad()' poster='/fallback.jpg'></video>",
+            "https://cdn.example/",
+        );
+        assert!(
+            matches!(&blocks[0], Block::Video { url, poster, dimensions } if url == "https://cdn.example/clip.webm" && poster.as_deref() == Some("https://cdn.example/poster.avif") && dimensions == &[780,316])
+        );
+        assert!(
+            matches!(&blocks[1], Block::Image { url, .. } if url == "https://cdn.example/fallback.jpg")
+        );
+        assert_eq!(blocks.len(), 2);
+    }
     #[test]
     fn preserves_headings_lists_inline_styles_and_word_boundaries() {
         let blocks = parse(

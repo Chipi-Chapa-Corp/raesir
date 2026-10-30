@@ -231,6 +231,16 @@ impl Backend {
         artwork::fetch(&game, &self.cache.join("artwork")).map(|art| art.path)
     }
 
+    pub fn detail_animation(&self, url: &str) -> Result<String, String> {
+        self.ready()?;
+        raesir_lib::details::media::animation(
+            url,
+            &self.cache.join("animations"),
+            self.fixture.is_none(),
+        )
+        .map(|p| p.to_string_lossy().into_owned())
+    }
+
     fn ui(&self) -> &Mutex<serde_json::Map<String, serde_json::Value>> {
         self.ui.get_or_init(|| {
             Mutex::new(
