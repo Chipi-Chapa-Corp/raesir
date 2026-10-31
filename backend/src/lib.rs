@@ -17,6 +17,7 @@ pub mod platform;
 pub mod player_stats;
 pub mod runtime;
 pub mod steam;
+pub mod steam_control;
 pub mod steam_ipc;
 pub mod storage;
 mod vdf;

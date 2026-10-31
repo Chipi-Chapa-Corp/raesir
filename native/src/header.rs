@@ -12,6 +12,8 @@ pub struct HeaderState {
     pub menu: bool,
     pub syncing: bool,
     pub available: u8,
+    pub downloads: Option<String>,
+    pub downloads_open: bool,
     pub zoom: f32,
     pub viewport: f32,
 }
@@ -19,6 +21,7 @@ pub struct HeaderState {
 pub struct Header {
     pub state: HeaderState,
     pub owner: WeakEntity<Launcher>,
+    pub downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub search: Entity<EditableTextState>,
     pub _focus_subscriptions: [Subscription; 2],
 }
@@ -39,9 +42,13 @@ pub fn pill() -> Div {
 }
 
 pub fn spinner(id: &'static str, size: f32) -> AnyElement {
+    spinner_colored(id, size, 0xf0f8f3)
+}
+
+pub fn spinner_colored(id: &'static str, size: f32, color: u32) -> AnyElement {
     icon("spinner")
         .size(rems(size))
-        .text_color(rgb(0xf0f8f3))
+        .text_color(rgb(color))
         .with_animation(
             id,
             Animation::new(millis(900)).repeat(),
@@ -156,7 +163,23 @@ impl Header {
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = self.state.viewport;
-        let search_width = (viewport * 0.24).clamp(self.state.zoom * 14., self.state.zoom * 28.);
+        let zoom = self.state.zoom;
+        let left = (1.1 + 0.5 + (self.state.available.count_ones() + 1) as f32 * 2.25 + 0.8) * zoom;
+        let right_width = 29.75
+            + self.state.downloads.as_ref().map_or(0., |label| {
+                0.6 + if label.is_empty() {
+                    2.95
+                } else {
+                    3.45 + label.len() as f32 * 0.73
+                }
+            });
+        let right = viewport - (1.1 + right_width + 0.8) * zoom;
+        let search_width = (viewport * 0.24)
+            .clamp(zoom * 10., zoom * 28.)
+            .min((right - left).max(zoom * 6.));
+        let search_left = (viewport / 2. - search_width / 2.)
+            .max(left)
+            .min((right - search_width).max(left));
         let search_focus = self.search.focus_handle(cx);
         let search_active = search_focus.is_focused(window);
         div()
@@ -192,7 +215,14 @@ impl Render for Header {
                                     ("store", i),
                                     name,
                                     self.state.store == Some(i),
-                                    ["Steam", "Epic Games", "EA", "Ubisoft Connect", "Xbox"][i],
+                                    [
+                                        "Steam",
+                                        "Epic Games",
+                                        "EA",
+                                        "Ubisoft Connect",
+                                        "Xbox",
+                                        "Wargaming",
+                                    ][i],
                                 )
                                 .on_click(self.listener(
                                     move |this, _, _, cx| {
@@ -207,9 +237,7 @@ impl Render for Header {
                 pill()
                     .id("search-pill")
                     .absolute()
-                    .left(px(viewport / 2.
-                        - search_width / 2.
-                        - self.state.zoom * 1.1))
+                    .left(px(search_left - zoom * 1.1))
                     .w(px(search_width))
                     .h(rems(2.9))
                     .px(rems(0.8))
@@ -241,6 +269,16 @@ impl Render for Header {
                 div()
                     .flex()
                     .gap(rems(0.6))
+                    .when_some(self.state.downloads.clone(), |d, label| {
+                        d.child(
+                            crate::downloads::queue_pill(
+                                label,
+                                self.state.downloads_open,
+                                self.downloads_bounds.clone(),
+                            )
+                            .on_click(self.listener(|this, _, _, cx| this.toggle_downloads(cx))),
+                        )
+                    })
                     .child(
                         pill().children(
                             ["all", "installed", "not-installed"]

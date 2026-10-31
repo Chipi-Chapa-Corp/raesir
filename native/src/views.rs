@@ -166,9 +166,18 @@ impl Launcher {
         let Some(game) = self.games.iter().find(|g| &g.source.key == key) else {
             return div().into_any_element();
         };
-        let local = game.installed(self.os, self.host) == 1;
+        let busy = self
+            .steam_operations
+            .get(key)
+            .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+        let local = !busy && game.installed(self.os, self.host) == 1;
         let items = [
             ("launch", "Launch", local && game.source.launch.is_some()),
+            (
+                "install",
+                "Install",
+                !busy && self.os != 2 && raesir_backend::actions::can_install(&game.source),
+            ),
             ("store", "View in store", game.source.store_page.is_some()),
             (
                 "uninstall",
@@ -230,10 +239,14 @@ impl Launcher {
             .as_ref()
             .and_then(|a| a.note.clone())
             .unwrap_or_else(|| {
-                format!(
-                    "{} will handle removing this installation.",
-                    game.source.client
-                )
+                if game.source.store == "steam" {
+                    "Removes the local game files. The game stays in your Steam library.".into()
+                } else {
+                    format!(
+                        "{} will handle removing this installation.",
+                        game.source.client
+                    )
+                }
             });
         div()
             .absolute()

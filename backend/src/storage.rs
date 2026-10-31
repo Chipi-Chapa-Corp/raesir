@@ -25,6 +25,7 @@ pub fn cached(dir: &Path) -> Option<Report> {
     }
     report.catalog.retain(crate::catalog::visible);
     crate::catalog::hydrate_os(&mut report);
+    crate::catalog::hydrate_install_actions(&mut report);
     Some(report)
 }
 
@@ -58,6 +59,7 @@ pub fn apply_owned(dir: &Path, owned: &OwnedLibrary, mut report: Report) -> Repo
     report
         .catalog
         .sort_by_cached_key(|g| (g.title.to_lowercase(), g.key.clone()));
+    crate::catalog::hydrate_install_actions(&mut report);
     if let Err(error) = write_json(&dir.join("inventory.json"), &report) {
         report.warnings.push(error);
     }

@@ -52,6 +52,10 @@ pub fn scan(scan: &mut Scan<'_>) {
                         .find(|g| g.key == format!("epic:{id}"))
                     {
                         catalog::add_os(&mut game.client_os, home.os);
+                        game.in_library = true;
+                        if home.local && !catalog::local(&game.installations) {
+                            game.client = "Heroic".into();
+                        }
                         if let Some(cover) = image(row) {
                             game.cover = Some(cover);
                         }
@@ -137,9 +141,17 @@ pub fn scan(scan: &mut Scan<'_>) {
             continue;
         };
         for game in &mut scan.games {
-            if !catalog::local(&game.installations)
-                || !crate::runtime::matches(&prefix, game, scan.report)
-            {
+            // WGC uses its own per-game API helper with the bottle's runner.
+            if game.store == "wargaming" {
+                continue;
+            }
+            if !prefix.local || !crate::runtime::matches(&prefix, game, scan.report) {
+                continue;
+            }
+            if !catalog::local(&game.installations) {
+                if game.in_library {
+                    game.client = "Bottles".into();
+                }
                 continue;
             }
             let programs = data.get("External_Programs").and_then(|v| v.as_object());
@@ -265,7 +277,7 @@ fn attach_runtimes(scan: &mut Scan<'_>) {
                 .filter(|(_, g)| {
                     g.store == store
                         && g.launch.is_none()
-                        && catalog::local(&g.installations)
+                        && (catalog::local(&g.installations) || g.in_library)
                         && crate::runtime::matches(&prefix, g, scan.report)
                 })
                 .map(|(i, _)| i)
@@ -278,6 +290,26 @@ fn attach_runtimes(scan: &mut Scan<'_>) {
                 continue;
             };
             for index in indices {
+                if !catalog::local(&scan.games[index].installations) {
+                    let game = &mut scan.games[index];
+                    let address = match store {
+                        "ubisoft" => format!("uplay://open/game/{}", catalog::encode(&game.id)),
+                        "ea" => "origin2://library/open".into(),
+                        _ => "com.epicgames.launcher://store/library".into(),
+                    };
+                    let mut action = template.clone();
+                    if let ActionTarget::Command { args, .. } = &mut action.target
+                        && let Some(last) = args.last_mut()
+                    {
+                        *last = address;
+                    }
+                    action.note = Some(format!(
+                        "Select {} in the client to finish installing, then refresh your library.",
+                        game.title
+                    ));
+                    game.install = Some(action);
+                    continue;
+                }
                 let address = uri(scan, &scan.games[index]);
                 let mut action = template.clone();
                 if let ActionTarget::Command { args, .. } = &mut action.target

@@ -24,6 +24,7 @@ pub fn scan(
     report.catalog = catalog;
     report.linux_systems = crate::linux_support::scan(&report);
     crate::catalog::hydrate_os(&mut report);
+    crate::catalog::hydrate_install_actions(&mut report);
     report.scanned_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

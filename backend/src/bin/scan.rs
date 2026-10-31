@@ -6,6 +6,16 @@ use raesir_backend::{
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 6 && args[1] == "--steam-control" {
+        let appid = args[4].to_string_lossy().parse().unwrap_or(0);
+        raesir_backend::steam_control::helper(
+            std::path::Path::new(&args[2]),
+            appid,
+            &args[3].to_string_lossy(),
+            std::path::Path::new(&args[5]),
+        );
+        return;
+    }
     if args.len() == 6 && args[1] == "--game-details" {
         let game = raesir_backend::catalog::entry(
             &args[2].to_string_lossy(),

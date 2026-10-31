@@ -267,6 +267,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
         "ea" => providers::ea(client, game, &mut details),
         "ubisoft" => providers::ubisoft(client, game, &mut details),
         "xbox" => providers::xbox(client, game, &mut details),
+        "wargaming" => providers::wargaming(client, game, &mut details),
         _ => Err("This store does not supply game details yet.".into()),
     };
     details.developers.retain(|s| !s.trim().is_empty());

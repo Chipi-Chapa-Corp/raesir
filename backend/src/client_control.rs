@@ -1,4 +1,4 @@
-use crate::{model::OwnedLibrary, platform};
+use crate::{model::OwnedLibrary, platform, steam_control};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
@@ -87,7 +87,13 @@ pub fn clients() -> Vec<Client> {
             prefix,
         });
     }
-    result.sort_by_key(|c| !c.label.starts_with("Flatpak"));
+    let running = snapshot();
+    result.sort_by_key(|c| {
+        (
+            !running.processes().values().any(|p| belongs_to(p, &c.root)),
+            !c.label.starts_with("Flatpak"),
+        )
+    });
     result
 }
 
@@ -105,7 +111,14 @@ struct Identity {
 
 fn snapshot() -> System {
     let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_exe(sysinfo::UpdateKind::OnlyIfNotSet)
+            .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
+            .without_tasks(),
+    );
     system
 }
 
@@ -114,11 +127,21 @@ fn is_steam(name: &std::ffi::OsStr) -> bool {
     name.eq_ignore_ascii_case("steam") || name.eq_ignore_ascii_case("steam.exe")
 }
 
+fn belongs_to(process: &sysinfo::Process, root: &str) -> bool {
+    is_steam(process.name())
+        && (process.exe().is_some_and(|exe| exe.starts_with(root))
+            || process
+                .cmd()
+                .first()
+                .is_some_and(|arg| Path::new(arg).starts_with(root)))
+}
+
 struct Lease {
     client: Client,
     child: Child,
     owned: BTreeSet<Identity>,
     before: BTreeSet<Identity>,
+    keep_running: bool,
 }
 
 impl Lease {
@@ -185,6 +208,12 @@ impl Lease {
         }
     }
     fn stop(&mut self) -> Result<(), String> {
+        // A user-requested install/removal belongs to Steam and continues after Raesir
+        // closes. Only temporary library-lookup sessions are shut down here.
+        if self.keep_running {
+            let _ = self.child.try_wait();
+            return Ok(());
+        }
         let mut system = snapshot();
         self.capture(&system);
         if self.alive(&system) {
@@ -298,13 +327,14 @@ impl Manager {
             .into_iter()
             .find(|c| c.root == root)
             .ok_or("Choose a locally detected Steam client first.")?;
-        self.read_client(client, |root| self.probe(root))
+        self.read_client(client, false, |root| self.probe(root))
     }
-    fn read_client(
+    fn read_client<T>(
         &self,
         client: Client,
-        probe: impl FnOnce(&str) -> Result<OwnedLibrary, String>,
-    ) -> Result<OwnedLibrary, String> {
+        keep_running: bool,
+        probe: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut lock = self
             .lease
             .lock()
@@ -320,7 +350,11 @@ impl Manager {
             }
         } else {
             let before = snapshot();
-            if before.processes().values().any(|p| is_steam(p.name())) {
+            if before
+                .processes()
+                .values()
+                .any(|p| belongs_to(p, &client.root))
+            {
                 // Borrow the running session without creating a lease. Neither
                 // Stop nor app exit may send shutdown or signals to this client,
                 // even when the lookup fails or the external client exits.
@@ -343,6 +377,7 @@ impl Manager {
                 child,
                 owned: BTreeSet::new(),
                 before,
+                keep_running: false,
             });
             // Track the bootstrap while it starts; no retries that spawn clients.
             for _ in 0..15 {
@@ -358,6 +393,9 @@ impl Manager {
         if !lease.alive(&snapshot()) {
             return Err("Steam exited during startup. Check the client/runtime, stop the managed session and retry.".into());
         }
+        // Protect the client before sending a mutation: shutdown may race the
+        // reply, and an accepted Steam operation must survive that race.
+        lease.keep_running |= keep_running;
         let result = probe(&lease.client.root);
         lease.capture(&snapshot());
         result
@@ -405,6 +443,64 @@ impl Manager {
         lease.take();
         Ok(())
     }
+
+    pub fn control(
+        &self,
+        root: &str,
+        appid: u32,
+        operation: &str,
+    ) -> Result<steam_control::Status, steam_control::Error> {
+        use steam_control::Error;
+        if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
+            return Err(Error::Unavailable);
+        }
+        let client = clients()
+            .into_iter()
+            .find(|c| c.root == root)
+            .ok_or(Error::Unavailable)?;
+        self.read_client(
+            client,
+            matches!(operation, "install" | "uninstall" | "pause" | "resume"),
+            |root| Ok(self.control_helper(root, appid, operation)),
+        )
+        .map_err(|_| Error::Unavailable)?
+    }
+
+    fn control_helper(
+        &self,
+        root: &str,
+        appid: u32,
+        operation: &str,
+    ) -> Result<steam_control::Status, steam_control::Error> {
+        use steam_control::Error;
+        let output = tempfile::NamedTempFile::new().map_err(|_| Error::Unavailable)?;
+        let mut child = Command::new(env::current_exe().map_err(|_| Error::Unavailable)?)
+            .args(["--steam-control", root, operation, &appid.to_string()])
+            .arg(output.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| Error::Unavailable)?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => break,
+                Ok(Some(_)) => return Err(Error::Unavailable),
+                Ok(None) if !self.closing.load(Ordering::SeqCst) && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(30))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Error::Unavailable);
+                }
+            }
+        }
+        let bytes = std::fs::read(output.path()).map_err(|_| Error::Unavailable)?;
+        serde_json::from_slice::<Result<steam_control::Status, Error>>(&bytes)
+            .map_err(|_| Error::Unavailable)?
+    }
 }
 
 #[cfg(test)]
@@ -436,7 +532,7 @@ mod tests {
         };
         for fail in [false, true] {
             let mut probed = false;
-            let result = manager.read_client(client.clone(), |root| {
+            let result = manager.read_client(client.clone(), false, |root| {
                 probed = true;
                 assert_eq!(root, client.root);
                 if fail {
@@ -491,9 +587,14 @@ mod tests {
             child,
             owned: BTreeSet::new(),
             before: BTreeSet::new(),
+            keep_running: false,
         };
         lease.capture(&snapshot());
         assert!(lease.owned.iter().any(|i| i.pid == id));
+        lease.keep_running = true;
+        lease.stop().unwrap();
+        assert!(lease.child.try_wait().unwrap().is_none());
+        lease.keep_running = false;
         lease.stop().unwrap();
         assert!(lease.child.try_wait().unwrap().is_some());
         assert!(unrelated.try_wait().unwrap().is_none());

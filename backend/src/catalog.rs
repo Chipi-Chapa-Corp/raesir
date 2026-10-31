@@ -59,6 +59,8 @@ pub fn entry(
         client_os,
         cover: None,
         launch: None,
+        library: None,
+        install: None,
         store_page: None,
         uninstall: None,
         source: source.into(),
@@ -298,6 +300,12 @@ pub fn merge(games: &mut Vec<LibraryGame>, incoming: LibraryGame) {
         if incoming.uninstall.is_some() {
             existing.uninstall = incoming.uninstall;
         }
+        if incoming.install.is_some() {
+            existing.install = incoming.install;
+        }
+        if incoming.library.is_some() {
+            existing.library = incoming.library;
+        }
         if (existing.title == existing.id || incoming.in_library) && incoming.title != incoming.id {
             existing.title = incoming.title;
         }
@@ -380,6 +388,17 @@ pub fn visible(game: &LibraryGame) -> bool {
         && game.installations.is_empty())
 }
 
+/// Populate client install handoffs, including snapshots saved before install actions existed.
+pub fn hydrate_install_actions(report: &mut Report) {
+    for game in &mut report.catalog {
+        if !game.in_library || !game.client_os.contains(&Os::host()) || local(&game.installations) {
+            game.install = None;
+        } else if game.install.is_none() {
+            game.install = crate::actions::install_action(game).ok();
+        }
+    }
+}
+
 pub fn install(source: &str, path: String, os: Os, complete: bool) -> Installation {
     let state = if Path::new(&path).is_dir() {
         if complete { "installed" } else { "incomplete" }
@@ -401,6 +420,36 @@ pub fn install(source: &str, path: String, os: Os, complete: bool) -> Installati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_snapshots_gain_install_actions_and_installed_games_lose_them() {
+        let mut report = crate::steam::scan_sources(
+            &[],
+            &[],
+            &[],
+            &OwnedLibrary::default(),
+            None,
+            vec![],
+            vec![],
+        );
+        let mut game = entry("steam", "42", "Game", vec![], "steam");
+        game.in_library = true;
+        game.client_os.push(Os::host());
+        let mut old = serde_json::to_value(game).unwrap();
+        old.as_object_mut().unwrap().remove("install");
+        report.catalog.push(serde_json::from_value(old).unwrap());
+        hydrate_install_actions(&mut report);
+        assert!(crate::actions::can_install(&report.catalog[0]));
+        report.catalog[0].installations.push(Installation {
+            library: "fixture".into(),
+            path: "/fixture".into(),
+            os: Os::host(),
+            state: "installed".into(),
+            last_seen: 0,
+        });
+        hydrate_install_actions(&mut report);
+        assert!(report.catalog[0].install.is_none());
+    }
 
     #[test]
     fn steam_cover_reads_hashed_and_legacy_library_cache() {

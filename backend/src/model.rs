@@ -111,6 +111,10 @@ pub struct LibraryGame {
     pub client_os: Vec<Os>,
     pub cover: Option<String>,
     pub launch: Option<GameAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<GameAction>,
+    #[serde(default)]
+    pub install: Option<GameAction>,
     pub store_page: Option<GameAction>,
     pub uninstall: Option<GameAction>,
     #[serde(default)]
@@ -130,6 +134,11 @@ pub struct GameAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionTarget {
+    Steam {
+        root: String,
+        appid: u32,
+        operation: crate::steam_control::Operation,
+    },
     Url {
         url: String,
     },

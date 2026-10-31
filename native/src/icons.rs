@@ -49,8 +49,11 @@ pub fn assets() -> AssetRegistry {
         asset!("back", "adwaita/go-previous-symbolic.svg"),
         asset!("sync", "adwaita/arrows-circle-rotated-symbolic.svg"),
         asset!("all", "adwaita/view-grid-symbolic.svg"),
-        asset!("installed", "adwaita/games-symbolic.svg"),
-        asset!("not-installed", "adwaita/document-save-symbolic.svg"),
+        asset!("installed", "adwaita/input-gaming-symbolic.svg"),
+        asset!("not-installed", "adwaita/forbidden-symbolic.svg"),
+        asset!("install", "adwaita/folder-download-symbolic.svg"),
+        asset!("stop", "adwaita/media-playback-stop-symbolic.svg"),
+        asset!("trash", "adwaita/user-trash-symbolic.svg"),
         asset!("this", "adwaita/computer-symbolic.svg"),
         asset!("other", "adwaita/drive-harddisk-symbolic.svg"),
         asset!("menu", "adwaita/org.gnome.Settings-symbolic.svg"),
@@ -67,6 +70,7 @@ pub fn assets() -> AssetRegistry {
         asset!("ea", "ea.svg"),
         asset!("ubisoft", "ubisoft.svg"),
         asset!("xbox", "xbox.svg"),
+        asset!("wargaming", "wargaming.svg"),
         asset!("windows", "windows.svg"),
         asset!("linux", "linux.svg"),
     ]
@@ -77,7 +81,7 @@ pub fn assets() -> AssetRegistry {
 pub fn icon(name: &'static str) -> Svg {
     let (color, size) = match name {
         "steam" => (0x66c0f4, 1.55),
-        "epic" | "ubisoft" => (0xf5f5f5, 1.55),
+        "epic" | "ubisoft" | "wargaming" => (0xf5f5f5, 1.55),
         "ea" => (0xff585d, 1.55),
         "xbox" => (0x107c10, 1.55),
         "windows" => (0x00a4ef, 1.55),

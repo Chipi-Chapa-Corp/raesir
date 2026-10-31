@@ -1,5 +1,63 @@
 use super::*;
 
+pub(super) fn wargaming(
+    client: &Client,
+    game: &LibraryGame,
+    out: &mut Details,
+) -> Result<(), String> {
+    let mut supplied = false;
+    if let Some(id) = crate::adapters::wargaming_steam_app(&game.id) {
+        match steam(client, id, out, true) {
+            Ok(()) => {
+                supplied = true;
+                out.sources =
+                    vec!["Information and reviews from the matching Steam edition".into()];
+            }
+            Err(e) => out.warnings.push(e),
+        }
+    }
+    // Keep the WGC store link even when Steam supplies media and reviews.
+    out.store_url = crate::adapters::wargaming_store_url(&game.id).map(str::to_owned);
+    if !supplied {
+        let url = crate::adapters::wargaming_store_url(&game.id)
+            .ok_or("No public Wargaming page is known for this game")?;
+        let html = get_html(client, url)?;
+        parse_wargaming(&html, url, out);
+        out.sources.push("Wargaming".into());
+    }
+    Ok(())
+}
+
+fn parse_wargaming(html: &str, base: &str, out: &mut Details) {
+    let document = Html::parse_document(html);
+    parse_schema(&document, out);
+    if out.description.is_empty() {
+        if let Some(description) = document
+            .select(&selector("meta[property='og:description']"))
+            .next()
+            .and_then(|n| n.value().attr("content"))
+        {
+            out.set_description(description.into());
+        }
+    }
+    collect_html_media(&document, base, out);
+    if let Some(image) = document
+        .select(&selector("meta[property='og:image']"))
+        .next()
+        .and_then(|n| n.value().attr("content"))
+    {
+        let url = absolute(image, base);
+        if safe_url(&url) {
+            out.media.push(Media {
+                preview: url.clone(),
+                url,
+                title: "Game artwork".into(),
+                video: false,
+            });
+        }
+    }
+}
+
 pub(super) fn steam(
     client: &Client,
     id: &str,
@@ -986,6 +1044,27 @@ mod tests {
                 .iter()
                 .any(|m| m.url == "https://store.ubisoft.com/screen.jpg")
         );
+    }
+    #[test]
+    fn wargaming_uses_public_description_and_media_without_executing_scripts() {
+        let mut out = Details::default();
+        parse_wargaming(
+            r#"<meta property='og:description' content='Naval battles'><meta property='og:image' content='/cover.jpg'><iframe src='https://www.youtube.com/embed/trailer'></iframe><script>throw new Error('must not execute')</script>"#,
+            "https://worldofwarships.eu",
+            &mut out,
+        );
+        assert_eq!(out.description, "Naval battles");
+        assert!(
+            out.media
+                .iter()
+                .any(|m| m.url == "https://worldofwarships.eu/cover.jpg")
+        );
+        assert!(
+            out.media
+                .iter()
+                .any(|m| m.video && m.url.contains("youtube.com"))
+        );
+        assert!(out.reviews.is_empty());
     }
     #[test]
     fn microsoft_uses_pc_sku_requirements_and_labels_customer_reviews() {

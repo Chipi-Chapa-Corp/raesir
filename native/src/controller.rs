@@ -64,7 +64,15 @@ impl Launcher {
         {
             self.store = None;
         }
+        self.download_preview.seed(&self.games);
         self.report = Some(report);
+        self.steam_operations = self.backend.current_steam_progress();
+        if self.steam_operations.values().any(|p| p.active()) {
+            self.download_preview.clear();
+        }
+        self.watch_download_preview(cx);
+        self.update_steam_details(cx);
+        self.watch_steam(cx);
         self.starting = false;
         self.load_error = None;
         self.game_menu = None;
@@ -219,6 +227,14 @@ impl Launcher {
         if self.closing || self.pending_action.is_some() {
             return;
         }
+        if matches!(kind, "launch" | "install" | "uninstall")
+            && self
+                .steam_operations
+                .get(&key)
+                .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed)
+        {
+            return;
+        }
         self.game_menu = None;
         if kind == "uninstall" {
             self.confirm = Some(key);
@@ -233,19 +249,50 @@ impl Launcher {
             return;
         }
         self.pending_action = Some(key.clone());
+        let steam_operation = self
+            .games
+            .iter()
+            .find(|g| g.source.key == key)
+            .and_then(|game| {
+                let action = match kind {
+                    "install" => game.source.install.as_ref(),
+                    "uninstall" => game.source.uninstall.as_ref(),
+                    _ => None,
+                }?;
+                if let raesir_backend::model::ActionTarget::Steam { operation, .. } = &action.target
+                {
+                    Some(*operation)
+                } else {
+                    None
+                }
+            });
+        if let Some(operation) = steam_operation {
+            self.download_preview.clear();
+            self.steam_operations.insert(
+                key.clone(),
+                raesir_backend::steam_control::Progress::starting(operation),
+            );
+            self.update_steam_details(cx);
+        }
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { backend.action(&key, kind) })
                 .await;
-            let refresh = result.is_ok() && kind == "uninstall";
+            let refresh = result.is_ok() && kind == "uninstall" && steam_operation.is_none();
             this.update(cx, |this, cx| {
                 this.pending_action = None;
-                match result {
-                    Err(error) => this.notice(error, cx),
-                    Ok(message) if !message.starts_with("Sent to ") => this.notice(message, cx),
-                    _ => {}
+                if steam_operation.is_some() {
+                    this.steam_operations = this.backend.current_steam_progress();
+                    this.update_steam_details(cx);
+                    this.watch_steam(cx);
+                } else {
+                    match result {
+                        Err(error) => this.notice(error, cx),
+                        Ok(message) if !message.starts_with("Sent to ") => this.notice(message, cx),
+                        _ => {}
+                    }
                 }
                 cx.notify();
             })
@@ -258,6 +305,88 @@ impl Launcher {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(crate) fn update_steam_details(&self, cx: &mut Context<Self>) {
+        let progress = self.display_operations();
+        if let Some(page) = &self.details {
+            page.update(cx, |page, cx| {
+                page.library_changed(&self.games, &progress, cx)
+            });
+        }
+    }
+
+    pub(crate) fn watch_steam(&mut self, cx: &mut Context<Self>) {
+        if self.steam_watching
+            || self.closing
+            || !self.steam_operations.values().any(|p| p.active())
+        {
+            return;
+        }
+        self.steam_watching = true;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(millis(1000)).await;
+                let poll = backend.clone();
+                let progress = cx
+                    .background_executor()
+                    .spawn(async move { poll.steam_progress() })
+                    .await;
+                let complete = progress
+                    .values()
+                    .any(|p| p.phase == raesir_backend::steam_control::Phase::Complete);
+                let stop = this
+                    .update(cx, |this, cx| {
+                        if this.closing {
+                            this.steam_watching = false;
+                            return true;
+                        }
+                        if this.steam_operations != progress {
+                            this.steam_operations = progress;
+                            this.update_steam_details(cx);
+                            cx.notify();
+                        }
+                        false
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    return;
+                }
+                if complete {
+                    let scan = backend.clone();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { scan.scan() })
+                        .await;
+                    if let Ok(report) = result {
+                        backend.finish_steam_jobs();
+                        this.update(cx, |this, cx| {
+                            this.apply_report(report, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }
+                // A new job can arrive while the completion scan awaits. Decide
+                // whether to stop from current UI state, in the same update that
+                // clears the flag, so a newly queued job always has a watcher.
+                let active = this
+                    .update(cx, |this, _| {
+                        let active =
+                            !this.closing && this.steam_operations.values().any(|p| p.active());
+                        if !active {
+                            this.steam_watching = false;
+                        }
+                        active
+                    })
+                    .unwrap_or(false);
+                if !active {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {

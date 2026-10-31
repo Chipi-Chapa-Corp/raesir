@@ -25,6 +25,7 @@ const REVIEW_FILTERS: [[&str; 3]; 2] = [
 
 pub struct DetailsPage {
     game: LibraryGame,
+    steam_progress: Option<raesir_backend::steam_control::Progress>,
     poster: Option<Arc<RenderImage>>,
     backdrop: Entity<crate::backdrop::Backdrop>,
     backdrop_source: String,
@@ -142,6 +143,7 @@ fn store_icon(store: &str) -> &'static str {
         "epic" => "epic",
         "ea" => "ea",
         "ubisoft" => "ubisoft",
+        "wargaming" => "wargaming",
         _ => "xbox",
     }
 }
@@ -344,6 +346,7 @@ impl Launcher {
         let return_focus = self.focus.clone();
         let page = cx.new(|cx| DetailsPage {
             game: source,
+            steam_progress: self.display_progress(key),
             poster,
             backdrop,
             backdrop_source: String::new(),
@@ -398,6 +401,19 @@ impl Launcher {
     }
 }
 impl DetailsPage {
+    pub fn library_changed(
+        &mut self,
+        games: &[crate::library::Game],
+        progress: &HashMap<String, raesir_backend::steam_control::Progress>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(game) = games.iter().find(|g| g.source.key == self.game.key) {
+            self.game = game.source.clone();
+        }
+        self.steam_progress = progress.get(&self.game.key).cloned();
+        cx.notify();
+    }
+
     fn close_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter_menu = None;
         window.focus(&self.return_focus, cx);
@@ -1173,18 +1189,91 @@ impl Render for DetailsPage {
                     }),
             );
         }
-        title = title.when(self.game.launch.is_some(), |d| {
-            d.child(
-                action_button("details-launch", "play", "Launch")
+        let installable = raesir_backend::actions::can_install(&self.game);
+        let working = self
+            .steam_progress
+            .as_ref()
+            .filter(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+        let primary_action = if installable { "install" } else { "launch" };
+        let primary_tip = working.map(|p| p.label()).unwrap_or_else(|| {
+            if installable {
+                self.game
+                    .install
+                    .as_ref()
+                    .and_then(|a| a.note.clone())
+                    .unwrap_or_else(|| "Install".into())
+            } else {
+                "Play".into()
+            }
+        });
+        let uninstall_owner = self.owner.clone();
+        let uninstall_key = self.game.key.clone();
+        if raesir_backend::catalog::local(&self.game.installations)
+            && self.game.uninstall.is_some()
+            && working.is_none()
+        {
+            title = title.child(
+                action_button("details-uninstall", "trash", "Uninstall")
                     .size(rems(3.3))
                     .on_click(move |_, _, cx| {
-                        action_owner
-                            .update(cx, |this, cx| this.action(key.clone(), "launch", cx))
+                        uninstall_owner
+                            .update(cx, |this, cx| {
+                                this.action(uninstall_key.clone(), "uninstall", cx)
+                            })
                             .ok();
                     }),
-            )
-        });
+            );
+        }
+        title = title.when(
+            installable || self.game.launch.is_some() || working.is_some(),
+            |d| {
+                d.child(
+                    crate::header::button_shell("details-primary-action", false)
+                        .size(rems(3.3))
+                        .bg(rgba(0x101010b8))
+                        .hover(|s| s.bg(rgba(0x303030b3)))
+                        .child(if working.is_some() {
+                            spinner("details-install-spin", 1.25).into_any_element()
+                        } else {
+                            icon(if installable { "install" } else { "play" })
+                                .text_color(rgb(0xf0f8f3))
+                                .into_any_element()
+                        })
+                        .tooltip(move |_, cx| cx.new(|_| DetailTooltip(primary_tip.clone())).into())
+                        .when_some(
+                            working
+                                .map(crate::downloads::button_label)
+                                .filter(|s| !s.is_empty()),
+                            |d, label| d.w_auto().px(rems(1.)).gap(rems(0.5)).child(label),
+                        )
+                        .on_click(move |_, _, cx| {
+                            action_owner
+                                .update(cx, |this, cx| {
+                                    if this.display_progress(&key).is_some_and(|p| {
+                                        p.active()
+                                            && p.operation
+                                                == raesir_backend::steam_control::Operation::Install
+                                    }) {
+                                        this.toggle_downloads(cx);
+                                    } else {
+                                        this.action(key.clone(), primary_action, cx);
+                                    }
+                                })
+                                .ok();
+                        }),
+                )
+            },
+        );
         meta = meta.child(title);
+        if let Some(error) = self.steam_progress.as_ref().and_then(|p| p.error) {
+            meta = meta.child(
+                div()
+                    .text_size(rems(0.95))
+                    .text_color(rgb(0xe6c58d))
+                    .whitespace_normal()
+                    .child(error.message()),
+            );
+        }
         let mut facts = Vec::new();
         if let Some(data) = &info {
             let mut badges = div().flex().flex_wrap().items_center().gap(rems(0.65));

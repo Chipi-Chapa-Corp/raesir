@@ -119,6 +119,32 @@ pub fn wine(prefix: &Location, exe: &Path, args: Vec<String>) -> Option<GameActi
 }
 
 pub fn matches(prefix: &Location, game: &LibraryGame, report: &Report) -> bool {
+    if prefix.local && !catalog::local(&game.installations) {
+        let sources = match game.store.as_str() {
+            "ea" => report
+                .ea
+                .games
+                .iter()
+                .find(|g| g.id == game.id)
+                .map(|g| &g.library_sources),
+            "epic" => report
+                .epic
+                .games
+                .iter()
+                .find(|g| g.app_name == game.id)
+                .map(|g| &g.library_sources),
+            _ => None,
+        };
+        if Path::new(&game.source).starts_with(&prefix.path)
+            || sources.is_some_and(|sources| {
+                sources
+                    .iter()
+                    .any(|source| Path::new(source).starts_with(&prefix.path))
+            })
+        {
+            return true;
+        }
+    }
     if game.installations.iter().any(|i| {
         i.os == Os::host()
             && (Path::new(&i.path).starts_with(&prefix.path)
@@ -223,6 +249,55 @@ fn lutris_runner(prefix: &Path) -> Option<(String, std::collections::BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstalled_games_match_their_local_client_profile_without_changing_installed_routing() {
+        let mut report = crate::steam::scan_sources(
+            &[],
+            &[],
+            &[],
+            &OwnedLibrary::default(),
+            None,
+            vec![],
+            vec![],
+        );
+        let mut prefix = Location {
+            path: "/fixture/prefix".into(),
+            os: Os::host(),
+            local: true,
+            client: "Proton".into(),
+            drive_c: None,
+        };
+        let mut game = catalog::entry(
+            "ubisoft",
+            "42",
+            "Game",
+            vec![],
+            "/fixture/prefix/drive_c/users/user/cache/configurations",
+        );
+        assert!(matches(&prefix, &game, &report));
+        prefix.local = false;
+        assert!(!matches(&prefix, &game, &report));
+        prefix.local = true;
+        game.store = "epic".into();
+        game.source = "epic".into();
+        report.epic.games.push(EpicGame {
+            app_name: game.id.clone(),
+            title: game.title.clone(),
+            installations: vec![],
+            library_sources: vec!["/fixture/prefix/drive_c/profile".into()],
+        });
+        assert!(matches(&prefix, &game, &report));
+        game.installations.push(Installation {
+            library: "/another/prefix/profile".into(),
+            path: "/another/prefix/game".into(),
+            os: Os::host(),
+            state: "installed".into(),
+            last_seen: 0,
+        });
+        assert!(!matches(&prefix, &game, &report));
+    }
+
     #[test]
     fn proton_reuses_the_runner_recorded_by_the_prefix() {
         let dir = tempfile::tempdir().unwrap();

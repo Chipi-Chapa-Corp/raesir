@@ -1,6 +1,7 @@
 mod epic_beta;
 mod third_party;
 mod ubisoft;
+mod wargaming;
 mod xbox;
 use crate::{
     catalog,
@@ -9,6 +10,8 @@ use crate::{
 };
 use std::{collections::BTreeSet, path::Path};
 pub(crate) use ubisoft::cached_cover as ubisoft_cover;
+pub(crate) use wargaming::steam_app as wargaming_steam_app;
+pub(crate) use wargaming::store_url as wargaming_store_url;
 
 pub struct Scan<'a> {
     pub report: &'a Report,
@@ -37,6 +40,7 @@ pub fn scan(
     epic_beta::scan(&mut scan);
     ubisoft::scan(&mut scan);
     xbox::scan(&mut scan);
+    wargaming::scan(&mut scan);
     third_party::scan(&mut scan);
     if let Some(previous) = previous {
         retain(&mut scan, previous);
@@ -118,6 +122,8 @@ fn retain(scan: &mut Scan<'_>, previous: &Report) {
         }
         game.in_library = membership;
         game.launch = None;
+        game.library = None;
+        game.install = None;
         game.uninstall = None;
         catalog::merge(&mut scan.games, game);
     }

@@ -2,6 +2,14 @@ use crate::model::*;
 use std::process::{Command, Stdio};
 
 pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String> {
+    let action = resolve(report, key, kind)?;
+    dispatch(&action.target)?;
+    Ok(action
+        .note
+        .unwrap_or_else(|| format!("Sent to {}", action.client)))
+}
+
+pub fn resolve(report: &Report, key: &str, kind: &str) -> Result<GameAction, String> {
     if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
@@ -15,6 +23,7 @@ pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String>
         .transpose()?;
     let action = match kind {
         "launch" => &game.launch,
+        "install" => &game.install,
         "store" => &game.store_page,
         "uninstall" => &game.uninstall,
         "library" => &library,
@@ -22,19 +31,60 @@ pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String>
     }
     .as_ref()
     .ok_or("This client does not expose that action here")?;
+    if let ActionTarget::Steam {
+        appid, operation, ..
+    } = &action.target
+        && (game.store != "steam"
+            || game.id.parse::<u32>().ok() != Some(*appid)
+            || operation.as_str() != kind)
+    {
+        return Err("This Steam action no longer matches the selected game".into());
+    }
+    if kind == "install" {
+        check_install(game)?;
+    }
     if ["launch", "uninstall"].contains(&kind) && !crate::catalog::local(&game.installations) {
         return Err("This game is not installed on this OS".into());
     }
-    dispatch(&action.target)?;
-    Ok(action
-        .note
-        .clone()
-        .unwrap_or_else(|| format!("Sent to {}", action.client)))
+    Ok(action.clone())
+}
+
+fn check_install(game: &LibraryGame) -> Result<(), String> {
+    if !game.in_library || !game.client_os.contains(&Os::host()) {
+        return Err("This game is not available to install on this OS".into());
+    }
+    if crate::catalog::local(&game.installations) {
+        return Err("This game is already installed on this OS".into());
+    }
+    Ok(())
+}
+
+pub fn can_install(game: &LibraryGame) -> bool {
+    game.install.is_some() && check_install(game).is_ok()
+}
+
+pub(crate) fn install_action(game: &LibraryGame) -> Result<GameAction, String> {
+    check_install(game)?;
+    if game.store == "steam" {
+        return Ok(crate::catalog::url(
+            "Steam",
+            format!("steam://install/{}", crate::catalog::encode(&game.id)),
+        ));
+    }
+    let mut action = library_action(game)?;
+    action.note = Some(format!(
+        "Select {} in {} to finish installing, then refresh your library.",
+        game.title, action.client
+    ));
+    Ok(action)
 }
 
 fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
     if !game.client_os.contains(&Os::host()) {
         return Err("This game's client library is on another OS".into());
+    }
+    if let Some(action) = &game.library {
+        return Ok(action.clone());
     }
     let id = crate::catalog::encode(&game.id);
     let address = match game.store.as_str() {
@@ -45,7 +95,7 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
         "xbox" => "ms-xbox://".into(),
         _ => return Err("This client does not expose its library".into()),
     };
-    if let Some(mut action) = game.launch.clone()
+    if let Some(mut action) = game.launch.as_ref().or(game.install.as_ref()).cloned()
         && let ActionTarget::Command { args, .. } = &mut action.target
         && let Some(arg) = args.iter_mut().find(|s| {
             ["origin2://", "uplay://", "com.epicgames.launcher://"]
@@ -61,6 +111,7 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
     }
     let desktop = match game.client.as_str() {
         "Heroic" => "heroic",
+        "Epic" | "Epic Preview" => "epic",
         "Lutris" => "lutris",
         "Bottles" => "bottles",
         "Ferestre" => "ferestre",
@@ -74,6 +125,9 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
 
 fn dispatch(target: &ActionTarget) -> Result<(), String> {
     let mut command = match target {
+        ActionTarget::Steam { .. } => {
+            return Err("Steam installation requests must be handled by the launcher".into());
+        }
         ActionTarget::Url { url } => return open_url(url),
         ActionTarget::Command {
             program,
@@ -272,6 +326,149 @@ pub fn support(project: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_steam_action_must_match_the_selected_game_and_operation() {
+        let mut game = crate::catalog::entry("steam", "42", "Game", vec![], "fixture");
+        game.in_library = true;
+        game.client_os.push(Os::host());
+        let mut report = Report {
+            host_os: Os::host(),
+            games: vec![],
+            libraries: vec![],
+            volumes: vec![],
+            linux_systems: vec![],
+            warnings: vec![],
+            owned_account: None,
+            owned_source: String::new(),
+            epic: Default::default(),
+            ea: Default::default(),
+            catalog: vec![game],
+            scanned_at: 0,
+        };
+        let key = report.catalog[0].key.clone();
+        for (appid, operation, allowed) in [
+            (43, crate::steam_control::Operation::Install, false),
+            (42, crate::steam_control::Operation::Uninstall, false),
+            (42, crate::steam_control::Operation::Install, true),
+        ] {
+            report.catalog[0].install = Some(GameAction {
+                client: "Steam".into(),
+                note: None,
+                target: ActionTarget::Steam {
+                    root: "/fixture".into(),
+                    appid,
+                    operation,
+                },
+            });
+            assert_eq!(resolve(&report, &key, "install").is_ok(), allowed);
+        }
+    }
+
+    #[test]
+    fn explicit_wargaming_library_handoff_keeps_runner_and_checks_host_os() {
+        let mut game = crate::catalog::entry(
+            "wargaming",
+            "WOT.EU.PRODUCTION",
+            "World of Tanks",
+            vec![],
+            "fixture",
+        );
+        game.in_library = true;
+        game.library = Some(crate::catalog::command(
+            "Wargaming Game Center",
+            "fixture-runner".into(),
+            vec!["wgc_api.exe".into(), "--open".into()],
+        ));
+        assert!(library_action(&game).is_err());
+        game.client_os.push(Os::host());
+        assert!(
+            matches!(library_action(&game).unwrap().target, ActionTarget::Command { program, args, .. }
+            if program == "fixture-runner" && args == ["wgc_api.exe", "--open"])
+        );
+        game.install = Some(install_action(&game).unwrap());
+        assert!(can_install(&game));
+        game.client_os.clear();
+        assert!(!can_install(&game));
+        assert!(library_action(&game).is_err());
+    }
+
+    #[test]
+    fn install_requires_local_membership_and_no_completed_local_install() {
+        let mut game = crate::catalog::entry("steam", "42", "Game", vec![], "fixture");
+        assert!(install_action(&game).is_err());
+        game.in_library = true;
+        game.client_os = vec![Os::Unknown];
+        assert!(install_action(&game).is_err());
+        let foreign = if Os::host() == Os::Linux {
+            Os::Windows
+        } else {
+            Os::Linux
+        };
+        game.client_os = vec![foreign];
+        assert!(install_action(&game).is_err());
+        game.client_os.push(Os::host());
+        game.install = Some(install_action(&game).unwrap());
+        assert!(can_install(&game));
+        assert!(matches!(&game.install.as_ref().unwrap().target,
+            ActionTarget::Url { url } if url == "steam://install/42"));
+
+        game.installations.push(Installation {
+            library: "fixture".into(),
+            path: "/fixture".into(),
+            os: foreign,
+            state: "installed".into(),
+            last_seen: 0,
+        });
+        assert!(can_install(&game));
+        game.installations[0].os = Os::host();
+        for state in ["incomplete", "unavailable", "files_missing"] {
+            game.installations[0].state = state.into();
+            assert!(can_install(&game), "{state}");
+        }
+        for state in ["installed", "external"] {
+            game.installations[0].state = state.into();
+            assert!(!can_install(&game), "{state}");
+            assert!(
+                check_install(&game)
+                    .unwrap_err()
+                    .contains("already installed")
+            );
+        }
+        game.installations.clear();
+        game.in_library = false;
+        assert!(!can_install(&game));
+    }
+
+    #[test]
+    fn install_handoff_preserves_the_client_runtime_and_never_launches_the_game() {
+        let mut game = crate::catalog::entry("ubisoft", "42", "Game", vec![], "fixture");
+        game.in_library = true;
+        game.client_os.push(Os::host());
+        game.install = Some(crate::catalog::command(
+            "Proton",
+            "proton".into(),
+            vec![
+                "run".into(),
+                "UbisoftConnect.exe".into(),
+                "uplay://open/game/42".into(),
+            ],
+        ));
+        if let ActionTarget::Command { env, cwd, .. } = &mut game.install.as_mut().unwrap().target {
+            env.insert("WINEPREFIX".into(), "/fixture/prefix".into());
+            *cwd = Some("/fixture".into());
+        }
+        let action = install_action(&game).unwrap();
+        assert!(action.note.unwrap().contains("finish installing"));
+        let ActionTarget::Command { args, env, cwd, .. } = action.target else {
+            panic!("lost runtime")
+        };
+        assert_eq!(args, ["run", "UbisoftConnect.exe", "uplay://open/game/42"]);
+        assert_eq!(env["WINEPREFIX"], "/fixture/prefix");
+        assert_eq!(cwd.as_deref(), Some("/fixture"));
+        assert!(game.launch.is_none());
+    }
+
     #[test]
     fn library_navigation_never_launches_a_game_and_keeps_its_runtime() {
         let mut game = crate::catalog::entry("steam", "42", "Game", vec![], "fixture");

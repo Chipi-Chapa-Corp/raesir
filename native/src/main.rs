@@ -7,7 +7,11 @@ use gpui_ce_elements::editable_text::{
 };
 use library::Game;
 use raesir_backend::model::{Os, Report};
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 actions!(raesir, [ClearSearch]);
 
@@ -16,6 +20,7 @@ mod backdrop;
 mod backend;
 mod controller;
 mod details;
+mod downloads;
 mod header;
 mod icons;
 mod library;
@@ -29,7 +34,7 @@ use smooth_scroll::SmoothWheel;
 #[cfg(feature = "benchmark")]
 mod benchmark;
 
-const STORES: [&str; 5] = ["steam", "epic", "ea", "ubisoft", "xbox"];
+const STORES: [&str; 6] = ["steam", "epic", "ea", "ubisoft", "xbox", "wargaming"];
 const CARD_TITLE_HEIGHT: f32 = 4.;
 const CARD_TITLE_OVERLAP: f32 = 0.08;
 
@@ -45,6 +50,12 @@ struct Launcher {
     _activation: Subscription,
     last_refresh: Instant,
     pending_action: Option<String>,
+    steam_operations: HashMap<String, raesir_backend::steam_control::Progress>,
+    steam_watching: bool,
+    preview_watching: bool,
+    downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
+    download_preview: downloads::PreviewQueue,
+    downloads_open: bool,
     game_menu: Option<(String, Point<Pixels>)>,
     details: Option<Entity<details::DetailsPage>>,
     confirm: Option<String>,
@@ -104,15 +115,19 @@ impl Launcher {
             menu: false,
             syncing: false,
             available: 0,
+            downloads: None,
+            downloads_open: false,
             zoom,
             viewport: f32::from(window.viewport_size().width),
         };
         let owner = cx.weak_entity();
+        let downloads_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::default()));
         let header = cx.new(|cx| {
             let search_focus = search.focus_handle(cx);
             Header {
                 state: header_state.clone(),
                 owner,
+                downloads_bounds: downloads_bounds.clone(),
                 search: search.clone(),
                 _focus_subscriptions: [
                     cx.on_focus(&search_focus, window, |_, _, cx| cx.notify()),
@@ -137,6 +152,12 @@ impl Launcher {
             _activation: activation,
             last_refresh: Instant::now(),
             pending_action: None,
+            steam_operations: HashMap::new(),
+            steam_watching: false,
+            preview_watching: false,
+            downloads_bounds,
+            download_preview: Default::default(),
+            downloads_open: false,
             game_menu: None,
             details: None,
             confirm: None,
@@ -334,8 +355,33 @@ impl Launcher {
         let installed = g.installed(self.os, self.host);
         let installed_here = installed == 1;
         let playable = installed_here && g.source.launch.is_some();
+        let installable = self.os != 2 && raesir_backend::actions::can_install(&g.source);
+        let action = if playable { "launch" } else { "install" };
+        let progress = self.display_progress(&g.source.key);
+        let working = progress
+            .as_ref()
+            .filter(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+        let error = progress.as_ref().and_then(|p| p.error);
+        let action_tip = error.map(|e| e.message().to_owned()).or_else(|| {
+            if let Some(progress) = working {
+                Some(progress.label())
+            } else if installable {
+                Some(
+                    g.source
+                        .install
+                        .as_ref()
+                        .and_then(|a| a.note.clone())
+                        .unwrap_or_else(|| "Install".into()),
+                )
+            } else if playable {
+                Some("Play".into())
+            } else {
+                None
+            }
+        });
         let duplicate_systems = g.duplicate_systems(self.host);
         let key = g.key.clone();
+        let uninstall_key = key.clone();
         let menu_key = key.clone();
         let details_key = key.clone();
         let title = g.title.clone();
@@ -465,7 +511,11 @@ impl Launcher {
                         d.child(
                             div()
                                 .absolute()
-                                .bottom(rems(2.8))
+                                .bottom(rems(if playable || installable || working.is_some() {
+                                    4.4
+                                } else {
+                                    2.8
+                                }))
                                 .left(rems(0.85))
                                 .right(rems(0.75))
                                 .text_size(rems(1.125))
@@ -486,18 +536,72 @@ impl Launcher {
                                 .bg(rgb(0x9ff4bc)),
                         )
                     })
-                    .when(playable, |d| {
+                    .when(
+                        installed_here && g.source.uninstall.is_some() && working.is_none(),
+                        |d| {
+                            d.child(
+                                button_shell(("uninstall", i), false)
+                                    .child(icon("trash").text_color(rgb(0xf0f8f3)))
+                                    .absolute()
+                                    .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
+                                    .right(rems(if playable { 3.2 } else { 0.55 }))
+                                    .bg(rgba(0x101010b8))
+                                    .hover(|s| s.bg(rgba(0x303030e6)))
+                                    .tooltip(|_, cx| {
+                                        cx.new(|_| {
+                                            crate::library::ActionTooltip("Uninstall".into())
+                                        })
+                                        .into()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.action(uninstall_key.to_string(), "uninstall", cx);
+                                    })),
+                            )
+                        },
+                    )
+                    .when(playable || installable || working.is_some(), |d| {
                         d.child(
                             button_shell(("action", i), false)
-                                .child(icon("play"))
+                                .child(if working.is_some() {
+                                    header::spinner_colored("install-spin", 1.25, 0x172b22)
+                                } else {
+                                    icon(if playable { "play" } else { "install" })
+                                        .text_color(rgb(0x172b22))
+                                        .into_any_element()
+                                })
+                                .when_some(
+                                    working
+                                        .map(downloads::button_label)
+                                        .filter(|s| !s.is_empty()),
+                                    |d, label| {
+                                        d.w_auto().px(rems(0.7)).gap(rems(0.35)).child(label)
+                                    },
+                                )
+                                .text_color(rgb(0x172b22))
+                                .text_size(rems(1.125))
                                 .absolute()
                                 .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
                                 .right(rems(0.55))
                                 .bg(rgba(0xdcece4f2))
                                 .hover(|s| s.bg(rgba(0xf0f8f3ff)))
+                                .when_some(action_tip, |d, tip| {
+                                    d.tooltip(move |_, cx| {
+                                        cx.new(|_| crate::library::ActionTooltip(tip.clone()))
+                                            .into()
+                                    })
+                                })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    this.action(key.to_string(), "launch", cx);
+                                    if this.display_progress(&key).is_some_and(|p| {
+                                        p.active()
+                                            && p.operation
+                                                == raesir_backend::steam_control::Operation::Install
+                                    }) {
+                                        this.toggle_downloads(cx);
+                                    } else {
+                                        this.action(key.to_string(), action, cx);
+                                    }
                                 })),
                         )
                     }),
@@ -537,6 +641,7 @@ impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = f32::from(window.viewport_size().width);
         self.viewport_height = f32::from(window.viewport_size().height);
+        self.request_download_artwork(cx);
         let header_state = HeaderState {
             store: self.store,
             status: self.status,
@@ -545,6 +650,8 @@ impl Render for Launcher {
             menu: self.menu,
             syncing: self.syncing,
             available: self.available,
+            downloads: self.download_summary(),
+            downloads_open: self.downloads_open,
             zoom: self.zoom,
             viewport,
         };
@@ -669,6 +776,12 @@ impl Render for Launcher {
                     return;
                 }
                 if key.key == "escape" {
+                    if this.downloads_open {
+                        this.downloads_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
                     if this.dismiss_details(window, cx) {
                         cx.stop_propagation();
                         cx.notify();
@@ -736,7 +849,23 @@ impl Render for Launcher {
                     .h(rems(0.5))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
             )
+            .when(self.details.is_some(), |d| {
+                d.when_some(self.download_summary(), |d, label| {
+                    d.child(
+                        downloads::queue_pill(
+                            label,
+                            self.downloads_open,
+                            self.downloads_bounds.clone(),
+                        )
+                        .absolute()
+                        .top(rems(0.7))
+                        .right(rems(9.55))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_downloads(cx))),
+                    )
+                })
+            })
             .when(self.menu, |d| d.child(self.settings()))
+            .when(self.downloads_open, |d| d.child(self.download_popup(cx)))
             .when(self.game_menu.is_some(), |d| d.child(self.game_actions(cx)))
             .when(self.confirm.is_some(), |d| {
                 d.child(self.confirm_uninstall(cx))
@@ -774,6 +903,16 @@ impl Render for Launcher {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 6 && args[1] == "--steam-control" {
+        let appid = args[4].to_string_lossy().parse().unwrap_or(0);
+        raesir_backend::steam_control::helper(
+            std::path::Path::new(&args[2]),
+            appid,
+            &args[3].to_string_lossy(),
+            std::path::Path::new(&args[5]),
+        );
+        return;
+    }
     if args.len() == 4 && args[1] == "--steam-library-probe" {
         raesir_backend::steam_ipc::helper(
             std::path::Path::new(&args[2]),

@@ -2,12 +2,32 @@ use gpui::RenderImage;
 use raesir_backend::model::{LibraryGame, Os};
 use std::sync::Arc;
 
+pub struct ActionTooltip(pub String);
+
+impl gpui::Render for ActionTooltip {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{prelude::*, *};
+        crate::header::pill()
+            .rounded(rems(0.8))
+            .px(rems(0.85))
+            .py(rems(0.55))
+            .max_w(rems(26.))
+            .whitespace_normal()
+            .text_size(rems(0.95))
+            .child(self.0.clone())
+    }
+}
+
 pub fn xbox_runtime_notice(
     report: &raesir_backend::model::Report,
     scope: u8,
     store: Option<&str>,
 ) -> bool {
-    if store.is_some_and(|store| store != "xbox") {
+    if store != Some("xbox") {
         return false;
     }
     let linux_selected = match scope {
@@ -136,7 +156,7 @@ mod tests {
             (Os::Windows, 2, true),
         ] {
             report.host_os = host;
-            assert_eq!(xbox_runtime_notice(&report, scope, None), shown);
+            assert!(!xbox_runtime_notice(&report, scope, None));
             assert_eq!(xbox_runtime_notice(&report, scope, Some("xbox")), shown);
             assert!(!xbox_runtime_notice(&report, scope, Some("steam")));
         }
