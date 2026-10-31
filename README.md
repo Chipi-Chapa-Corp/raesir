@@ -21,7 +21,7 @@ cargo run --release
 
 Click a game to see its details. Right-click for game actions. Use **Ctrl + / − / 0** to adjust text size.
 
-For live UI development, install `dioxus-cli` 0.7.10 once, then run `./dev`. Saved UI changes patch the running window. Changes to initialization or state layout need a restart.
+For live UI development, install `dioxus-cli` 0.7.10 once, then run `./dev`. Saved UI changes patch the running window. Press **r** or **R** in the terminal for a full rebuild and restart, including after closing the app. Use this after changes to initialization or state layout.
 
 ## Games on another OS
 

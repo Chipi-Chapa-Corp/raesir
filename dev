@@ -5,4 +5,36 @@ if ! command -v dx >/dev/null; then
     echo 'Install once: cargo install dioxus-cli --version 0.7.10 --locked' >&2
     exit 127
 fi
-exec dx serve --desktop --renderer native --hot-patch --package raesir-native --features hot-reload "$@"
+
+dev_pid=
+stop() {
+    if [[ -n "$dev_pid" ]]; then
+        kill -INT "$dev_pid" 2>/dev/null || true
+        wait "$dev_pid" || true
+        dev_pid=
+    fi
+}
+start() {
+    dx serve --desktop --renderer native --hot-patch --interactive false \
+        --package raesir --features hot-reload "$@" &
+    dev_pid=$!
+}
+trap stop EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+printf '[dev] Saved UI edits hot-patch. r/R: rebuild and restart; q: quit.\n'
+start "$@"
+while kill -0 "$dev_pid" 2>/dev/null; do
+    if [[ -t 0 ]]; then
+        if IFS= read -rsn1 -t 0.2 key; then
+            case "$key" in
+                r|R) stop; start "$@" ;;
+                q|Q) exit 0 ;;
+            esac
+        fi
+    else
+        sleep 0.2
+    fi
+done
+wait "$dev_pid"

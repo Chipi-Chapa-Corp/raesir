@@ -5224,6 +5224,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "raesir"
+version = "0.1.0"
+dependencies = [
+ "dirs 7.0.0",
+ "futures",
+ "gpui-ce",
+ "gpui_ce_elements",
+ "gpui_ce_platform",
+ "image",
+ "libloading",
+ "raesir-backend",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "raesir-backend"
 version = "0.1.0"
 dependencies = [
@@ -5245,23 +5262,6 @@ dependencies = [
  "tempfile",
  "zbus",
  "zip",
-]
-
-[[package]]
-name = "raesir-native"
-version = "0.1.0"
-dependencies = [
- "dirs 7.0.0",
- "futures",
- "gpui-ce",
- "gpui_ce_elements",
- "gpui_ce_platform",
- "image",
- "libloading",
- "raesir-backend",
- "serde_json",
- "tempfile",
- "unicode-segmentation",
 ]
 
 [[package]]
