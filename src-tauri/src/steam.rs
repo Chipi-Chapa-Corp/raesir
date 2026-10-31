@@ -336,6 +336,7 @@ pub fn scan_sources(
         games,
         libraries,
         volumes,
+        linux_systems: vec![],
         warnings,
         owned_account: (!owned.steamid.is_empty()).then(|| owned.steamid.clone()),
         owned_source: owned.source.clone(),

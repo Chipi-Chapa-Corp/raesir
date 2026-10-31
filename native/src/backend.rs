@@ -201,6 +201,14 @@ impl Backend {
         artwork::fetch(game, &self.cache.join("artwork"))
     }
 
+    pub fn support(&self, project: &str) -> Result<(), String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return Err("Project links are disabled in the fixture profile".into());
+        }
+        actions::support(project)
+    }
+
     pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_lib::details::Details> {
         raesir_lib::details::cached(game, &self.cache.join("details"))
     }

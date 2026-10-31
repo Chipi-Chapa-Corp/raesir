@@ -89,6 +89,20 @@ impl Launcher {
         self.start_refresh(true, cx);
     }
 
+    pub fn support_project(&mut self, project: &'static str, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { backend.support(project) })
+                .await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| this.notice(error, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     pub fn refresh_on_focus(&mut self, cx: &mut Context<Self>) {
         if self.last_refresh.elapsed().as_secs() > 90 {
             self.start_refresh(false, cx);

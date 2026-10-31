@@ -22,6 +22,7 @@ pub fn scan(
     report.warnings.extend(warnings);
     let (catalog, warnings) = adapters::scan(&report, previous, prefixes);
     report.catalog = catalog;
+    report.linux_systems = crate::linux_support::scan(&report);
     crate::catalog::hydrate_os(&mut report);
     report.scanned_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

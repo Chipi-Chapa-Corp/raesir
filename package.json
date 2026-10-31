@@ -15,7 +15,7 @@
     "web:dev": "vite dev",
     "web:build": "vite build"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@tauri-apps/api": "^2"
   },

@@ -1,6 +1,7 @@
 [package]
 name = "raesir"
 version = "0.1.0"
+license = "GPL-3.0-only"
 description = "A unified game library for Windows and Linux"
 edition = "2024"
 default-run = "raesir"

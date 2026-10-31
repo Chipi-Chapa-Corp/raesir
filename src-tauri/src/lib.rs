@@ -9,6 +9,7 @@ pub mod ea;
 pub mod epic;
 pub mod epic_online;
 pub mod inventory;
+pub mod linux_support;
 pub mod model;
 pub mod mount;
 pub mod owned;

@@ -52,6 +52,13 @@ impl Launcher {
     }
 
     pub fn banners(&self, cx: &mut Context<Self>) -> Div {
+        let xbox_notice = self.report.as_ref().is_some_and(|report| {
+            crate::library::xbox_runtime_notice(
+                report,
+                self.os,
+                self.store.map(|s| crate::STORES[s]),
+            )
+        });
         let volumes: Vec<_> = self
             .report
             .as_ref()
@@ -67,12 +74,24 @@ impl Launcher {
             })
             .unwrap_or_default();
         div()
+            .w_full()
             .pt(rems(5.))
             .px(rems(1.5))
-            .pb(rems(if volumes.is_empty() { 0. } else { 1. }))
+            .pb(rems(if volumes.is_empty() && !xbox_notice { 0. } else { 1. }))
             .flex()
             .flex_col()
             .gap(rems(0.5))
+            .when(xbox_notice, |d| d.child(
+                pill().w_full().rounded(rems(1.4)).px(rems(1.)).py(rems(0.7)).gap(rems(0.8))
+                    .child(crate::icons::icon("warning").flex_none().text_color(rgb(0xffcf70)))
+                    .child(div().flex_1().min_w_0().whitespace_normal().child("One of your Linux installations is missing Ferestre or Xodus Nexus to run Xbox games."))
+                    .child(div().flex().gap(rems(0.5)).flex_none().children(
+                        [("ferestre", "Ferestre"), ("nexus", "Xodus Nexus")].into_iter().map(|(project, label)| {
+                            text_button(project, label).rounded_full().bg(rgba(0xffffff12))
+                                .on_click(cx.listener(move |this, _, _, cx| this.support_project(project, cx)))
+                        })
+                    ))
+            ))
             .children(volumes.into_iter().enumerate().map(|(i, volume)| {
                 let id = volume.id.clone();
                 let os = if volume.os == Os::Windows || volume.filesystem == "ntfs" {

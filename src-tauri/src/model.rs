@@ -76,6 +76,8 @@ pub struct Report {
     pub games: Vec<Game>,
     pub libraries: Vec<Source>,
     pub volumes: Vec<Volume>,
+    #[serde(default)]
+    pub linux_systems: Vec<LinuxSystem>,
     pub warnings: Vec<String>,
     pub owned_account: Option<String>,
     #[serde(default)]
@@ -88,6 +90,12 @@ pub struct Report {
     pub catalog: Vec<LibraryGame>,
     #[serde(default)]
     pub scanned_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LinuxSystem {
+    pub root: String,
+    pub xbox_runtime: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -2,6 +2,26 @@ use gpui::RenderImage;
 use raesir_lib::model::{LibraryGame, Os};
 use std::sync::Arc;
 
+pub fn xbox_runtime_notice(
+    report: &raesir_lib::model::Report,
+    scope: u8,
+    store: Option<&str>,
+) -> bool {
+    if store.is_some_and(|store| store != "xbox") {
+        return false;
+    }
+    let linux_selected = match scope {
+        1 => report.host_os == Os::Linux,
+        2 => report.host_os == Os::Windows,
+        _ => true,
+    };
+    linux_selected
+        && report
+            .linux_systems
+            .iter()
+            .any(|system| !system.xbox_runtime)
+}
+
 pub struct Game {
     pub key: Arc<str>,
     pub title: String,
@@ -100,6 +120,31 @@ impl Game {
 mod tests {
     use super::*;
     use raesir_lib::{catalog, model::Installation};
+
+    #[test]
+    fn xbox_notice_tracks_os_and_client_filters_and_each_linux_system() {
+        let mut report: raesir_lib::model::Report = serde_json::from_value(serde_json::json!({
+            "host_os":"linux","games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null,
+            "linux_systems":[{"root":"/","xbox_runtime":true},{"root":"/mounted/linux","xbox_runtime":false}]
+        })).unwrap();
+        for (host, scope, shown) in [
+            (Os::Linux, 0, true),
+            (Os::Linux, 1, true),
+            (Os::Linux, 2, false),
+            (Os::Windows, 0, true),
+            (Os::Windows, 1, false),
+            (Os::Windows, 2, true),
+        ] {
+            report.host_os = host;
+            assert_eq!(xbox_runtime_notice(&report, scope, None), shown);
+            assert_eq!(xbox_runtime_notice(&report, scope, Some("xbox")), shown);
+            assert!(!xbox_runtime_notice(&report, scope, Some("steam")));
+        }
+        report.linux_systems[1].xbox_runtime = true;
+        assert!(!xbox_runtime_notice(&report, 0, None));
+        report.linux_systems.clear();
+        assert!(!xbox_runtime_notice(&report, 0, None));
+    }
 
     fn game(client: Vec<Os>, installed: Vec<(Os, &str)>) -> Game {
         let mut source = catalog::entry(
