@@ -14,7 +14,7 @@ gpui = { package = "gpui-ce", version = "=0.3.0", default-features = false }
 gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", default-features = false, features = ["wayland", "x11"] }
 gpui_ce_elements = "=0.3.0"
 serde_json = "1"
-raesir_lib = { package = "raesir", path = "../src-tauri", default-features = false }
+raesir-backend = { path = "../backend" }
 dirs = "7"
 libloading = "0.8"
 futures = "0.3"

@@ -176,7 +176,7 @@ pub fn unreadable_note(host: Os, filesystem: &str, driver_present: bool) -> Stri
         (Os::Windows, "btrfs") =>
             "WinBtrfs is installed, but this partition has no accessible mount. Expose the correct subvolume in read-only mode and rescan.".into(),
         (Os::Windows, "ext4") =>
-            "ext4 is not readable here. A filesystem reader/driver is required; this prototype scans exposed directories only. Add the accessible path after mounting. WSL --mount cannot attach the running Windows disk.".into(),
+            "ext4 is not readable here. A filesystem reader/driver is required; Raesir scans readable mounted partitions. WSL --mount cannot attach the running Windows disk.".into(),
         (_, "crypto_luks" | "bitlocker") =>
             "Encrypted partition. Unlock and expose it using your OS tools, then rescan. Raesir does not unlock volumes.".into(),
         (Os::Linux, "ntfs") =>

@@ -162,7 +162,7 @@ pub fn probe(_root: &Path) -> Result<OwnedLibrary, String> {
     Err("The experimental Steam client-auth bridge currently supports Linux x86_64. Use the Steam Web API lookup on this platform.".into())
 }
 
-/// Entrypoint used by the desktop executable before initializing GTK/WebKit.
+/// Entrypoint used by the desktop executable before starting the UI.
 pub fn helper(root: &Path, result: &Path) {
     let output = std::panic::catch_unwind(|| probe(root))
         .unwrap_or_else(|_| Err("Steam cache parsing failed".into()));

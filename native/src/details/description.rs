@@ -1,5 +1,5 @@
 use super::*;
-use raesir_lib::details::rich::{Block, Span};
+use raesir_backend::details::rich::{Block, Span};
 
 #[derive(Default)]
 pub(super) struct AnimationSlot {

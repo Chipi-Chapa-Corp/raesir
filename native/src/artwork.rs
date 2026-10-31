@@ -1,6 +1,6 @@
 use crate::{Launcher, backend::Backend};
 use gpui::{Context, RenderImage};
-use raesir_lib::model::LibraryGame;
+use raesir_backend::model::LibraryGame;
 use std::{
     fs,
     hash::{DefaultHasher, Hash, Hasher},

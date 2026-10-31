@@ -1,4 +1,4 @@
-use raesir_lib::{actions, artwork, client_control, epic_online, model::*, mount, storage};
+use raesir_backend::{actions, artwork, client_control, epic_online, model::*, mount, storage};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -209,23 +209,23 @@ impl Backend {
         actions::support(project)
     }
 
-    pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_lib::details::Details> {
-        raesir_lib::details::cached(game, &self.cache.join("details"))
+    pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_backend::details::Details> {
+        raesir_backend::details::cached(game, &self.cache.join("details"))
     }
 
-    pub fn details(&self, game: &LibraryGame) -> Result<raesir_lib::details::Details, String> {
+    pub fn details(&self, game: &LibraryGame) -> Result<raesir_backend::details::Details, String> {
         self.ready()?;
         if self.fixture.is_some() {
             return self
                 .cached_details(game)
                 .ok_or("No details in this diagnostic profile".into());
         }
-        raesir_lib::details::fetch(game, &self.cache.join("details"))
+        raesir_backend::details::fetch(game, &self.cache.join("details"))
     }
 
     pub fn detail_media(&self, url: &str) -> Result<String, String> {
         self.ready()?;
-        let mut game = raesir_lib::catalog::entry("media", url, "", vec![], "media");
+        let mut game = raesir_backend::catalog::entry("media", url, "", vec![], "media");
         game.cover = Some(url.into());
         if self.fixture.is_some() {
             if let Some(art) = artwork::cached(&game, &self.cache.join("artwork")) {
@@ -241,7 +241,7 @@ impl Backend {
 
     pub fn detail_animation(&self, url: &str) -> Result<String, String> {
         self.ready()?;
-        raesir_lib::details::media::animation(
+        raesir_backend::details::media::animation(
             url,
             &self.cache.join("animations"),
             self.fixture.is_none(),
@@ -432,7 +432,8 @@ mod tests {
         image_codec::RgbImage::from_pixel(8, 12, image_codec::Rgb([40, 80, 120]))
             .save_with_format(&path, image_codec::ImageFormat::Jpeg)
             .unwrap();
-        let mut game = raesir_lib::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
+        let mut game =
+            raesir_backend::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
         game.cover = Some(path.to_string_lossy().into_owned());
         let (image, _, _, _) = crate::artwork::load(&backend, &game).unwrap();
         assert_eq!(image.frame_count(), 1);

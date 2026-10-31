@@ -5071,7 +5071,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "raesir"
+name = "raesir-backend"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -5090,7 +5090,6 @@ dependencies = [
  "steam-vdf-parser",
  "sysinfo 0.37.2",
  "tempfile",
- "tokio",
  "zbus",
 ]
 
@@ -5105,7 +5104,7 @@ dependencies = [
  "gpui_ce_platform",
  "image",
  "libloading",
- "raesir",
+ "raesir-backend",
  "serde_json",
  "tempfile",
  "unicode-segmentation",

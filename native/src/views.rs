@@ -1,6 +1,6 @@
 use crate::{Launcher, header::pill};
 use gpui::{prelude::*, *};
-use raesir_lib::model::Os;
+use raesir_backend::model::Os;
 
 fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
     div()

@@ -90,8 +90,8 @@ pub fn start(window: &Window, cx: &mut Context<Launcher>) {
         }
         let intervals: Vec<_> = present.windows(2).map(|v| v[1] - v[0]).collect();
         let fps = (present.len() - 1) as f64 * 1000. / (present.last().unwrap() - present[0]);
-        let report = json!({"blur": std::env::var_os("RAESIR_MOCK_NO_BLUR").is_none(),
-            "inactive_cap": std::env::var_os("RAESIR_MOCK_LIMIT_BACKGROUND").is_some(),
+        let report = json!({"blur": std::env::var_os("RAESIR_NO_BLUR").is_none(),
+            "inactive_cap": std::env::var_os("RAESIR_LIMIT_BACKGROUND").is_some(),
             "active": active,
             "input": if fast { "spin" } else { "wheel" }, "refresh_hz": refresh, "submitted_fps": fps,
             "present_interval_ms": summary(intervals), "cpu_draw_ms": summary(draw), "layout_ms": summary(layout),

@@ -6,7 +6,7 @@ use gpui_ce_elements::editable_text::{
     actions::{DEFAULT_INPUT_CONTEXT, default_bindings},
 };
 use library::Game;
-use raesir_lib::model::{Os, Report};
+use raesir_backend::model::{Os, Report};
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
 actions!(raesir, [ClearSearch]);
@@ -774,7 +774,7 @@ impl Render for Launcher {
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() == 4 && args[1] == "--steam-library-probe" {
-        raesir_lib::steam_ipc::helper(
+        raesir_backend::steam_ipc::helper(
             std::path::Path::new(&args[2]),
             std::path::Path::new(&args[3]),
         );
@@ -784,7 +784,7 @@ fn main() {
     let app_backend = backend.clone();
     eprintln!(
         "Raesir: native GPUI; pill blur {}.",
-        if std::env::var_os("RAESIR_MOCK_NO_BLUR").is_some() {
+        if std::env::var_os("RAESIR_NO_BLUR").is_some() {
             "disabled"
         } else {
             "enabled"
@@ -811,7 +811,7 @@ fn main() {
                     window_decorations: Some(WindowDecorations::Client),
                     app_id: Some("dev.raesir.launcher".into()),
                     window_min_size: Some(size(px(1180.), px(700.))),
-                    inactive_frame_interval: std::env::var_os("RAESIR_MOCK_LIMIT_BACKGROUND")
+                    inactive_frame_interval: std::env::var_os("RAESIR_LIMIT_BACKGROUND")
                         .map(|_| millis(33)),
                     ..Default::default()
                 },

@@ -33,7 +33,7 @@ pub fn pill() -> Div {
         .rounded_full()
         .bg(rgba(0x101010a6))
         .text_color(rgb(0xf0f8f3))
-        .when(std::env::var_os("RAESIR_MOCK_NO_BLUR").is_none(), |d| {
+        .when(std::env::var_os("RAESIR_NO_BLUR").is_none(), |d| {
             d.backdrop_blur(px(14.))
         })
 }

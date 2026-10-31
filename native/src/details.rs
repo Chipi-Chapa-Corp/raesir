@@ -6,7 +6,7 @@ use crate::{
     smooth_scroll::SmoothWheel,
 };
 use gpui::{prelude::*, *};
-use raesir_lib::{details::Details, model::LibraryGame};
+use raesir_backend::{details::Details, model::LibraryGame};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -546,7 +546,7 @@ impl DetailsPage {
                 })
                 .await;
             let fresh = cached.as_ref().is_some_and(|v| {
-                raesir_lib::details::now().saturating_sub(v.updated) < 21600
+                raesir_backend::details::now().saturating_sub(v.updated) < 21600
                     && (v.description.is_empty() || v.description_html.is_some())
                     && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft")
                         || v.store_url.is_some())
@@ -1087,7 +1087,11 @@ impl Render for DetailsPage {
             .child(self.game.client.clone());
         let client_label = format!("Open in {} library", self.game.client);
         title = title.child(
-            if self.game.client_os.contains(&raesir_lib::model::Os::host()) {
+            if self
+                .game
+                .client_os
+                .contains(&raesir_backend::model::Os::host())
+            {
                 platform
                     .tooltip(move |_, cx| cx.new(|_| DetailTooltip(client_label.clone())).into())
                     .on_click(move |_, _, cx| {
@@ -1325,7 +1329,8 @@ impl Render for DetailsPage {
                                 }),
                         ),
                 );
-            let since = raesir_lib::details::review_cutoff([0, 30, 365][self.review_date as usize]);
+            let since =
+                raesir_backend::details::review_cutoff([0, 30, 365][self.review_date as usize]);
             let recommendation = match self.review_rating {
                 1 => Some(true),
                 2 => Some(false),

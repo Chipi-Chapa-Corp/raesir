@@ -1,6 +1,6 @@
 use crate::{Launcher, library::Game};
 use gpui::*;
-use raesir_lib::{catalog, model::Report};
+use raesir_backend::{catalog, model::Report};
 use std::{collections::HashMap, sync::Arc};
 
 impl Launcher {

@@ -1,9 +1,9 @@
 use gpui::RenderImage;
-use raesir_lib::model::{LibraryGame, Os};
+use raesir_backend::model::{LibraryGame, Os};
 use std::sync::Arc;
 
 pub fn xbox_runtime_notice(
-    report: &raesir_lib::model::Report,
+    report: &raesir_backend::model::Report,
     scope: u8,
     store: Option<&str>,
 ) -> bool {
@@ -119,11 +119,11 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raesir_lib::{catalog, model::Installation};
+    use raesir_backend::{catalog, model::Installation};
 
     #[test]
     fn xbox_notice_tracks_os_and_client_filters_and_each_linux_system() {
-        let mut report: raesir_lib::model::Report = serde_json::from_value(serde_json::json!({
+        let mut report: raesir_backend::model::Report = serde_json::from_value(serde_json::json!({
             "host_os":"linux","games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null,
             "linux_systems":[{"root":"/","xbox_runtime":true},{"root":"/mounted/linux","xbox_runtime":false}]
         })).unwrap();
