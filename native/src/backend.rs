@@ -1,5 +1,6 @@
 use raesir_backend::{actions, artwork, client_control, epic_online, model::*, mount, storage};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
@@ -12,6 +13,7 @@ pub struct Backend {
     pub cache: PathBuf,
     fixture: Option<PathBuf>,
     report: RwLock<Option<Arc<Report>>>,
+    achievement_icons: Mutex<HashMap<String, Arc<gpui::RenderImage>>>,
     operation: Mutex<()>,
     cleanup: Mutex<()>,
     ui: OnceLock<Mutex<serde_json::Map<String, serde_json::Value>>>,
@@ -42,6 +44,7 @@ impl Backend {
                 }),
             fixture: std::env::var_os("RAESIR_LIBRARY_FIXTURE").map(PathBuf::from),
             report: RwLock::new(None),
+            achievement_icons: Mutex::new(HashMap::new()),
             operation: Mutex::new(()),
             cleanup: Mutex::new(()),
             ui: OnceLock::new(),
@@ -213,6 +216,33 @@ impl Backend {
         raesir_backend::details::cached(game, &self.cache.join("details"))
     }
 
+    pub fn player_stats(
+        &self,
+        game: &LibraryGame,
+        refresh: bool,
+    ) -> raesir_backend::player_stats::PlayerStats {
+        if self.fixture.is_some() {
+            return std::fs::read(self.data.join("player-stats.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| serde_json::from_value(v.get(&game.key)?.clone()).ok())
+                .unwrap_or_default();
+        }
+        let report = self
+            .report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(report) = report else {
+            return Default::default();
+        };
+        if refresh {
+            raesir_backend::player_stats::refresh(game, &report, &self.cache.join("player-stats"))
+        } else {
+            raesir_backend::player_stats::cached(game, &report, &self.cache.join("player-stats"))
+        }
+    }
+
     pub fn details(&self, game: &LibraryGame) -> Result<raesir_backend::details::Details, String> {
         self.ready()?;
         if self.fixture.is_some() {
@@ -237,6 +267,75 @@ impl Backend {
                 .ok_or("No local diagnostic image".into());
         }
         artwork::fetch(&game, &self.cache.join("artwork")).map(|art| art.path)
+    }
+
+    pub fn cached_achievement_icon(&self, url: &str) -> Option<Arc<gpui::RenderImage>> {
+        self.achievement_icons
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(url)
+            .cloned()
+    }
+
+    pub fn warm_achievement_icons(&self, stats: &raesir_backend::player_stats::PlayerStats) {
+        let order = stats.highlights().into_iter().chain(
+            stats
+                .by_progress()
+                .into_iter()
+                .filter(|&i| stats.achievements[i].concealed()),
+        );
+        for index in order.take(512) {
+            let _ = self.achievement_icon(&stats.achievements[index].icon, false);
+        }
+    }
+
+    pub fn achievement_icon(
+        &self,
+        url: &str,
+        download: bool,
+    ) -> Result<Arc<gpui::RenderImage>, String> {
+        if let Some(image) = self.cached_achievement_icon(url) {
+            return Ok(image);
+        }
+        if url.is_empty() {
+            return Err("No achievement icon".into());
+        }
+        let mut game = raesir_backend::catalog::entry("media", url, "", vec![], "media");
+        game.cover = Some(url.into());
+        let path = if Path::new(url).is_file() {
+            url.to_owned()
+        } else if let Some(art) = artwork::cached(&game, &self.cache.join("artwork")) {
+            art.path
+        } else if download {
+            self.detail_media(url)?
+        } else {
+            return Err("Icon is not cached".into());
+        };
+        let mut pixels = image_codec::ImageReader::open(path)
+            .map_err(|e| e.to_string())?
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .decode()
+            .map_err(|e| e.to_string())?
+            .thumbnail(128, 128)
+            .into_rgba8();
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let image = Arc::new(gpui::RenderImage::new(vec![image_codec::Frame::new(
+            pixels,
+        )]));
+        let mut icons = self
+            .achievement_icons
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if icons.len() >= 512 {
+            if let Some(key) = icons.keys().next().cloned() {
+                icons.remove(&key);
+            }
+        }
+        icons.insert(url.to_owned(), image.clone());
+        Ok(image)
     }
 
     pub fn detail_animation(&self, url: &str) -> Result<String, String> {
@@ -424,6 +523,28 @@ mod tests {
         assert_eq!(fixture(dir.path()).filters(), (1, 0, None));
     }
 
+    #[test]
+    fn cached_achievement_icons_are_ready_before_publishing_stats_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = fixture(dir.path());
+        let path = dir.path().join("achievement.png");
+        image_codec::RgbaImage::from_pixel(64, 64, image_codec::Rgba([40, 80, 120, 255]))
+            .save(&path)
+            .unwrap();
+        let url = path.to_string_lossy().into_owned();
+        let stats = raesir_backend::player_stats::PlayerStats {
+            achievements: vec![raesir_backend::player_stats::Achievement {
+                icon: url.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        backend.warm_achievement_icons(&stats);
+        let first = backend.cached_achievement_icon(&url).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let second = backend.achievement_icon(&url, false).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
     #[test]
     fn existing_artwork_cache_with_img_extension_decodes_without_network() {
         let dir = tempfile::tempdir().unwrap();

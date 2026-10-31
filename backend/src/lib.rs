@@ -14,6 +14,7 @@ pub mod model;
 pub mod mount;
 pub mod owned;
 pub mod platform;
+pub mod player_stats;
 pub mod runtime;
 pub mod steam;
 pub mod steam_ipc;

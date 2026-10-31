@@ -12,8 +12,10 @@ use std::{
         mpsc::{self as commands, SyncSender},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+mod controls;
+use controls::{Control, Flight};
 
 #[repr(C)]
 struct Param {
@@ -48,6 +50,7 @@ enum Slider {
 struct Drag {
     slider: Slider,
     ratio: f64,
+    resume: bool,
 }
 
 struct Api {
@@ -57,6 +60,7 @@ struct Api {
     command: unsafe extern "C" fn(*mut c_void, u64, *const *const c_char) -> c_int,
     event: unsafe extern "C" fn(*mut c_void, f64) -> *const Event,
     observe: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
+    get: unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *mut c_void) -> c_int,
     terminate: unsafe extern "C" fn(*mut c_void),
     context: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut Param) -> c_int,
     callback:
@@ -111,6 +115,7 @@ impl Api {
                 command: symbol!("mpv_command_async"),
                 event: symbol!("mpv_wait_event"),
                 observe: symbol!("mpv_observe_property"),
+                get: symbol!("mpv_get_property"),
                 terminate: symbol!("mpv_terminate_destroy"),
                 context: symbol!("mpv_render_context_create"),
                 callback: symbol!("mpv_render_context_set_update_callback"),
@@ -127,14 +132,15 @@ struct Playback {
     frame: Option<Arc<RenderImage>>,
     error: Option<String>,
     position: f64,
-    seek_target: Option<f64>,
+    seek: Control,
     duration: f64,
     volume: f64,
+    volume_edit: Control,
     paused: bool,
+    resume_after_seek: bool,
     muted: bool,
 }
 pub struct Player {
-    url: String,
     animation: bool,
     state: Arc<Mutex<Playback>>,
     commands: commands::Sender<Vec<String>>,
@@ -182,7 +188,7 @@ impl Player {
         });
         let thread_state = state.clone();
         let thread_stop = stop.clone();
-        let source = url.clone();
+        let source = url;
         thread::spawn(move || {
             let result = run(
                 source,
@@ -199,7 +205,6 @@ impl Player {
             }
         });
         Self {
-            url,
             animation: animation.is_some(),
             state,
             commands: command_tx,
@@ -224,9 +229,11 @@ impl EventEmitter<Fullscreen> for Player {}
 impl Player {
     fn toggle_pause(&self) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.duration > 0. && state.position >= state.duration - 0.2 {
+        if state.duration > 0.
+            && state.seek.target().unwrap_or(state.position) >= state.duration - 0.2
+        {
             drop(state);
-            self.command(&["seek", "0", "absolute"]);
+            self.seek_to(0.);
             self.command(&["set", "pause", "no"]);
         } else {
             drop(state);
@@ -239,7 +246,9 @@ impl Player {
         }
         self.restore_window = false;
         self.fullscreen = false;
-        self.drag = None;
+        if let Some(drag) = self.drag.take() {
+            self.commit_drag(drag);
+        }
     }
     fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.fullscreen {
@@ -266,28 +275,49 @@ impl Player {
         let width = f32::from(bounds.size.width);
         if width > 0. {
             drag.ratio = ((f32::from(position.x - bounds.origin.x) / width) as f64).clamp(0., 1.);
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match drag.slider {
+                Slider::Seek if state.duration > 0. => {
+                    let target = drag.ratio * state.duration;
+                    state.seek.request(target, Instant::now());
+                }
+                Slider::Volume => state.volume_edit.request(drag.ratio * 100., Instant::now()),
+                _ => {}
+            }
             cx.notify();
         }
     }
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
         if let Some(drag) = self.drag.take() {
-            match drag.slider {
-                Slider::Seek => {
-                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    let target = drag.ratio * state.duration;
-                    state.seek_target = Some(target);
-                    drop(state);
-                    self.command(&["seek", &target.to_string(), "absolute+exact"]);
-                }
-                Slider::Volume => {
-                    self.command(&["set", "volume", &format!("{}", drag.ratio * 100.)]);
-                    if drag.ratio > 0. {
-                        self.command(&["set", "mute", "no"]);
-                    }
-                }
-            }
+            self.commit_drag(drag);
             cx.notify();
         }
+    }
+    fn commit_drag(&self, drag: Drag) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match drag.slider {
+            Slider::Seek => {
+                state.seek.flush();
+                state.resume_after_seek = drag.resume;
+            }
+            Slider::Volume => state.volume_edit.flush(),
+        }
+    }
+    fn seek_to(&self, target: f64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.duration <= 0. {
+            return;
+        }
+        let target = target.clamp(0., state.duration);
+        state.seek.request(target, Instant::now());
+        state.seek.flush();
+    }
+    fn seek_by(&self, seconds: f64) {
+        let position = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.seek.target().unwrap_or(state.position)
+        };
+        self.seek_to(position + seconds);
     }
     fn slider(
         &self,
@@ -338,7 +368,21 @@ impl Player {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    this.drag = Some(Drag { slider, ratio: 0. });
+                    let resume = if slider == Slider::Seek {
+                        let mut state = this.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let resume = !state.paused || state.resume_after_seek;
+                        state.resume_after_seek = false;
+                        drop(state);
+                        this.command(&["set", "pause", "yes"]);
+                        resume
+                    } else {
+                        false
+                    };
+                    this.drag = Some(Drag {
+                        slider,
+                        ratio: 0.,
+                        resume,
+                    });
                     this.drag_at(event.position, cx);
                 }),
             )
@@ -445,7 +489,7 @@ fn run(
                 Some(wake),
                 (&*sender as *const SyncSender<()>) as *mut _,
             );
-            let send = |args: Vec<String>| {
+            let send = |id: u64, args: Vec<String>| {
                 let strings = args
                     .iter()
                     .map(|s| CString::new(s.as_str()).map_err(|_| "Invalid video URL"))
@@ -455,10 +499,21 @@ fn run(
                     .map(|s| s.as_ptr())
                     .chain(std::iter::once(std::ptr::null()))
                     .collect::<Vec<_>>();
-                if (api.command)(handle, 0, pointers.as_ptr()) < 0 {
+                if (api.command)(handle, id, pointers.as_ptr()) < 0 {
                     return Err("The video command failed");
                 }
                 Ok(())
+            };
+            let read_double = |name: &std::ffi::CStr| {
+                let mut value = 0_f64;
+                ((api.get)(handle, name.as_ptr(), 5, (&mut value as *mut f64).cast()) >= 0
+                    && value.is_finite())
+                .then_some(value)
+            };
+            let read_flag = |name: &std::ffi::CStr| {
+                let mut value: c_int = 0;
+                ((api.get)(handle, name.as_ptr(), 3, (&mut value as *mut c_int).cast()) >= 0)
+                    .then_some(value != 0)
             };
             for (id, name, format) in [
                 (1, c"time-pos", 5),
@@ -471,27 +526,28 @@ fn run(
                     (api.observe)(handle, id, name.as_ptr(), format);
                 }
             }
-            let loaded = send(vec!["loadfile".into(), url]);
+            let loaded = send(0, vec!["loadfile".into(), url]);
             let result = (|| {
                 loaded?;
                 let mut size = animation.map(animation_size).unwrap_or([960, 540]);
                 let mut stride = size[0] as usize * 4;
-                let mut seeking = None;
+                let mut seeking: Option<Flight> = None;
+                let mut volume: Option<Flight> = None;
+                let mut command_id = 0;
                 while !stop.load(Ordering::Relaxed) {
                     let _ = rx.recv_timeout(Duration::from_millis(40));
+                    let mut position_dirty = false;
+                    let mut volume_dirty = false;
                     loop {
                         let event = &*(api.event)(handle, 0.);
                         if event.kind == 0 {
                             break;
                         }
-                        if event.kind == 21
-                            && let Some(target) = seeking.take()
-                        {
-                            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-                            if state.seek_target == Some(target) {
-                                state.position = target;
-                                state.seek_target = None;
-                            }
+                        if let Some(flight) = &mut seeking {
+                            flight.event(event.kind, event.userdata, event.error);
+                        }
+                        if let Some(flight) = &mut volume {
+                            flight.event(event.kind, event.userdata, event.error);
                         }
                         if event.kind == 22 && !event.data.is_null() {
                             let property = &*(event.data as *const Property);
@@ -501,9 +557,9 @@ fn run(
                                     let value = *(property.data as *const f64);
                                     if value.is_finite() {
                                         match event.userdata {
-                                            1 => state.position = value.max(0.),
+                                            1 => position_dirty = true,
                                             2 => state.duration = value.max(0.),
-                                            5 => state.volume = value.clamp(0., 100.),
+                                            5 => volume_dirty = true,
                                             _ => {}
                                         }
                                     }
@@ -528,13 +584,110 @@ fn run(
                             }
                         }
                     }
-                    for args in commands.try_iter() {
-                        if args.first().is_some_and(|s| s == "seek") {
-                            seeking = args.get(1).and_then(|s| s.parse::<f64>().ok());
+                    let mut seek_settled = false;
+                    if position_dirty || seeking.is_some() {
+                        let position = read_double(c"time-pos");
+                        let ready = seeking.as_ref().is_some_and(|f| f.seek_ready())
+                            && read_flag(c"seeking") == Some(false);
+                        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(position) = position {
+                            state.position = position.max(0.);
                         }
-                        send(args)?;
+                        if let Some(f) = &seeking {
+                            if f.failed
+                                || (ready
+                                    && position.is_some_and(|p| (p - f.change.value).abs() < 0.75))
+                            {
+                                state.seek.finish(f.change.revision);
+                                seeking = None;
+                                seek_settled = true;
+                            }
+                        }
                     }
-                    if (api.update)(context) & 1 == 0 {
+                    let mut volume_settled = false;
+                    if volume_dirty || volume.as_ref().is_some_and(|f| f.replied) {
+                        let value = read_double(c"volume");
+                        let muted = read_flag(c"mute");
+                        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(value) = value {
+                            state.volume = value.clamp(0., 100.);
+                        }
+                        if let Some(muted) = muted {
+                            state.muted = muted;
+                        }
+                        if let Some(f) = &volume {
+                            if f.failed
+                                || (f.replied
+                                    && value.is_some_and(|v| (v - f.change.value).abs() < 0.05)
+                                    && (f.change.value == 0. || muted == Some(false)))
+                            {
+                                state.volume_edit.finish(f.change.revision);
+                                volume = None;
+                                volume_settled = true;
+                            }
+                        }
+                    }
+                    for args in commands.try_iter() {
+                        send(0, args)?;
+                    }
+                    let now = Instant::now();
+                    let (seek_change, volume_change) = {
+                        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                        (
+                            state.seek.ready(
+                                now,
+                                Duration::from_millis(70),
+                                Duration::from_millis(140),
+                            ),
+                            if volume.is_none() {
+                                state.volume_edit.ready(
+                                    now,
+                                    Duration::from_millis(25),
+                                    Duration::from_millis(60),
+                                )
+                            } else {
+                                None
+                            },
+                        )
+                    };
+                    if let Some(change) = seek_change {
+                        command_id += 1;
+                        send(
+                            command_id,
+                            vec![
+                                "seek".into(),
+                                change.value.to_string(),
+                                "absolute+exact".into(),
+                            ],
+                        )?;
+                        seeking = Some(Flight::new(change, command_id));
+                    }
+                    if let Some(change) = volume_change {
+                        command_id += 1;
+                        send(
+                            command_id,
+                            vec!["set".into(), "volume".into(), change.value.to_string()],
+                        )?;
+                        if change.value > 0. {
+                            send(0, vec!["set".into(), "mute".into(), "no".into()])?;
+                        }
+                        volume = Some(Flight::new(change, command_id));
+                    }
+                    let resume = {
+                        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                        let resume = state.resume_after_seek && state.seek.target().is_none();
+                        if resume {
+                            state.resume_after_seek = false;
+                        }
+                        resume
+                    };
+                    if resume {
+                        send(0, vec!["set".into(), "pause".into(), "no".into()])?;
+                    }
+                    if position_dirty || volume_dirty || seek_settled || volume_settled {
+                        let _ = notify.try_send(());
+                    }
+                    if (api.update)(context) & 1 == 0 && !seek_settled {
                         continue;
                     }
                     let mut pixels = vec![0u32; stride * size[1] as usize / 4];
@@ -568,6 +721,15 @@ fn run(
                     if (api.render)(context, params.as_mut_ptr()) < 0 {
                         return Err("The video frame could not be rendered");
                     }
+                    if state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .seek
+                        .target()
+                        .is_some()
+                    {
+                        continue;
+                    }
                     let pixels = pixels
                         .into_iter()
                         .flat_map(|pixel| {
@@ -581,9 +743,15 @@ fn run(
                     let buffer =
                         image_codec::RgbaImage::from_raw(size[0] as u32, size[1] as u32, pixels)
                             .ok_or("Invalid video frame")?;
-                    state.lock().unwrap_or_else(|e| e.into_inner()).frame = Some(Arc::new(
-                        RenderImage::new(vec![image_codec::Frame::new(buffer)]),
-                    ));
+                    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                    // Render intermediate seeks for mpv, but never publish their stale frames.
+                    if state.seek.target().is_none() {
+                        state.frame =
+                            Some(Arc::new(RenderImage::new(vec![image_codec::Frame::new(
+                                buffer,
+                            )])));
+                    }
+                    drop(state);
                     let _ = notify.try_send(());
                 }
                 Ok(())
@@ -612,18 +780,24 @@ impl Render for Player {
         let frame = state.frame.clone();
         let error = state.error.clone();
         let paused = state.paused;
-        let muted = state.muted;
+        let muted = state.muted && state.volume_edit.target().is_none_or(|v| v == 0.);
         let duration = state.duration;
         let position = self
             .drag
             .filter(|d| d.slider == Slider::Seek)
             .map(|d| d.ratio * duration)
-            .unwrap_or(state.seek_target.unwrap_or(state.position));
+            .unwrap_or(state.seek.target().unwrap_or(state.position));
         let volume = self
             .drag
             .filter(|d| d.slider == Slider::Volume)
             .map(|d| d.ratio)
-            .unwrap_or(if muted { 0. } else { state.volume / 100. });
+            .unwrap_or_else(|| {
+                state
+                    .volume_edit
+                    .target()
+                    .map(|v| v / 100.)
+                    .unwrap_or(if muted { 0. } else { state.volume / 100. })
+            });
         drop(state);
         if self.last_frame.as_ref().map(|f| f.id) != frame.as_ref().map(|f| f.id) {
             if let Some(previous) = self.last_frame.take() {
@@ -668,8 +842,8 @@ impl Render for Player {
                             .ok();
                     }
                 });
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture {
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
                         owner.update(cx, |this, cx| this.finish_drag(cx)).ok();
                     }
                 });
@@ -713,16 +887,12 @@ impl Render for Player {
                     .child(
                         action_button("video-back", "rewind", "Back 10 seconds")
                             .size(rems(2.25))
-                            .on_click(cx.listener(|this, _, _, _| {
-                                this.command(&["seek", "-10", "relative"])
-                            })),
+                            .on_click(cx.listener(|this, _, _, _| this.seek_by(-10.))),
                     )
                     .child(
                         action_button("video-forward", "forward", "Forward 10 seconds")
                             .size(rems(2.25))
-                            .on_click(cx.listener(|this, _, _, _| {
-                                this.command(&["seek", "10", "relative"])
-                            })),
+                            .on_click(cx.listener(|this, _, _, _| this.seek_by(10.))),
                     )
                     .child(div().px(rems(0.5)).text_size(rems(1.125)).child(format!(
                         "{} / {}",
@@ -743,17 +913,6 @@ impl Render for Player {
                         self.slider("video-volume", Slider::Volume, volume, cx)
                             .w(rems(5.))
                             .mx(rems(0.35)),
-                    )
-                    .child(
-                        action_button("video-external", "external", "Open externally")
-                            .size(rems(2.25))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none()
-                                    && std::env::var_os("ISOLATED_GUI_SESSION").is_none()
-                                {
-                                    cx.open_url(&this.url);
-                                }
-                            })),
                     )
                     .child(
                         action_button(
@@ -839,12 +998,123 @@ fn animation_size([width, height]: [u32; 2]) -> [i32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::animation_size;
+    use super::{Playback, animation_size, run};
+    use futures::channel::mpsc;
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+            mpsc as commands,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
     #[test]
     fn animations_preserve_aspect_ratio_with_bounded_frame_buffers() {
         assert_eq!(animation_size([780, 316]), [780, 316]);
         assert_eq!(animation_size([3840, 1080]), [960, 270]);
         assert_eq!(animation_size([1200, 1800]), [360, 540]);
         assert_eq!(animation_size([0, 0]), [1, 1]);
+    }
+    #[test]
+    #[ignore = "requires RAESIR_VIDEO_FIXTURE (30-second red/green/blue clip) and libmpv"]
+    fn live_scrubbing_updates_before_release_without_replaying_old_frames() {
+        let clip = std::env::var("RAESIR_VIDEO_FIXTURE").expect("local diagnostic clip");
+        let state = Arc::new(Mutex::new(Playback {
+            volume: 100.,
+            ..Default::default()
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        struct Cleanup(Arc<AtomicBool>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _cleanup = Cleanup(stop.clone());
+        let (tx, rx) = commands::channel();
+        let (mut notify, _receive) = mpsc::channel(1);
+        let s = state.clone();
+        let stopping = stop.clone();
+        let worker =
+            thread::spawn(move || run(clip, PathBuf::new(), None, &s, &stopping, rx, &mut notify));
+        let wait = |check: &dyn Fn(&Playback) -> bool| {
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                let s = state.lock().unwrap();
+                assert!(s.error.is_none(), "{:?}", s.error);
+                if check(&s) {
+                    break;
+                }
+                drop(s);
+                assert!(
+                    Instant::now() < until,
+                    "mpv did not settle the requested control"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait(&|s| s.duration > 29. && s.frame.is_some());
+        tx.send(vec!["set".into(), "pause".into(), "yes".into()])
+            .unwrap();
+        wait(&|s| s.paused);
+        state.lock().unwrap().seek.request(24., Instant::now());
+        wait(&|s| s.seek.target().is_none() && (s.position - 24.).abs() < 0.1);
+        let blue = |s: &Playback| {
+            let f = s.frame.as_ref().unwrap();
+            let bytes = f.as_bytes(0).unwrap();
+            let i = (960 * 270 + 480) * 4;
+            bytes[i] > 200 && bytes[i + 2] < 30
+        };
+        wait(&blue);
+        for target in [8., 16., 26.] {
+            state.lock().unwrap().seek.request(target, Instant::now());
+            thread::sleep(Duration::from_millis(15));
+        }
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let s = state.lock().unwrap();
+            assert!(blue(&s), "an obsolete red/green seek frame was published");
+            assert!(
+                (s.seek.target().unwrap_or(s.position) - 26.).abs() < 0.2,
+                "seek knob reverted"
+            );
+            if s.seek.target().is_none() {
+                break;
+            }
+            drop(s);
+            assert!(Instant::now() < until, "latest seek did not complete");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut observed = Vec::new();
+        for i in 0..20 {
+            let mut s = state.lock().unwrap();
+            s.seek.request(2. + i as f64, Instant::now());
+            observed.push(s.position);
+            drop(s);
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            observed.windows(2).any(|p| (p[1] - p[0]).abs() > 0.5),
+            "continuous dragging never applied a seek"
+        );
+        wait(&|s| s.seek.target().is_none() && (s.position - 21.).abs() < 0.1);
+        state.lock().unwrap().resume_after_seek = true;
+        wait(&|s| !s.paused);
+        for value in [20., 80., 35.] {
+            state
+                .lock()
+                .unwrap()
+                .volume_edit
+                .request(value, Instant::now());
+            thread::sleep(Duration::from_millis(10));
+        }
+        wait(&|s| s.volume_edit.target().is_none() && (s.volume - 35.).abs() < 0.05);
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap().unwrap();
+        eprintln!(
+            "Live seeks, stale-frame suppression, continuous scrubbing and volume passed without release."
+        );
     }
 }

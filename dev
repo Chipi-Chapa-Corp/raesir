@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+if ! command -v dx >/dev/null; then
+    echo 'Install once: cargo install dioxus-cli --version 0.7.10 --locked' >&2
+    exit 127
+fi
+exec dx serve --desktop --renderer native --hot-patch --package raesir-native --features hot-reload "$@"

@@ -21,7 +21,7 @@ mod icons;
 mod library;
 mod video;
 mod views;
-use header::{Header, HeaderState, button, pill};
+use header::{Header, HeaderState, button_shell, pill};
 use icons::{icon, system_icon};
 
 mod smooth_scroll;
@@ -488,7 +488,8 @@ impl Launcher {
                     })
                     .when(playable, |d| {
                         d.child(
-                            button(("action", i), "play", false)
+                            button_shell(("action", i), false)
+                                .child(icon("play"))
                                 .absolute()
                                 .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
                                 .right(rems(0.55))

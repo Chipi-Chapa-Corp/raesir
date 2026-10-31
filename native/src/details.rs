@@ -15,6 +15,7 @@ use std::{
     time::Instant,
 };
 mod description;
+mod player_stats;
 use unicode_segmentation::UnicodeSegmentation;
 
 const REVIEW_FILTERS: [[&str; 3]; 2] = [
@@ -35,6 +36,17 @@ pub struct DetailsPage {
     loading: bool,
     error: Option<String>,
     task: Option<Task<()>>,
+    stats: Option<Arc<raesir_backend::player_stats::PlayerStats>>,
+    stats_task: Option<Task<()>>,
+    stats_loading: bool,
+    achievements_open: bool,
+    hidden_achievements_expanded: bool,
+    achievement_rows: ListState,
+    achievement_order: Vec<usize>,
+    achievement_preview_slots: usize,
+    achievement_focus: FocusHandle,
+    achievement_wheel: SmoothWheel,
+    achievement_frame_pending: bool,
     images: HashMap<String, Arc<RenderImage>>,
     pending: HashSet<String>,
     failed: HashSet<String>,
@@ -297,7 +309,10 @@ impl Launcher {
             return false;
         };
         if !page.update(cx, |page, cx| {
-            if page.filter_menu.is_some() {
+            if page.achievements_open {
+                page.close_achievements(window, cx);
+                true
+            } else if page.filter_menu.is_some() {
                 page.close_filter(window, cx);
                 true
             } else {
@@ -340,6 +355,17 @@ impl Launcher {
             loading: true,
             error: None,
             task: None,
+            stats: None,
+            stats_task: None,
+            stats_loading: true,
+            achievements_open: false,
+            hidden_achievements_expanded: false,
+            achievement_rows: ListState::new(0, ListAlignment::Top, px(200.)),
+            achievement_order: Vec::new(),
+            achievement_preview_slots: 1,
+            achievement_focus: cx.focus_handle(),
+            achievement_wheel: SmoothWheel::default(),
+            achievement_frame_pending: false,
             images: HashMap::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
@@ -363,7 +389,10 @@ impl Launcher {
             frame_pending: false,
             cleanup_registered: false,
         });
-        page.update(cx, |page, cx| page.load(cx));
+        page.update(cx, |page, cx| {
+            page.load(cx);
+            page.load_stats(cx);
+        });
         self.details = Some(page);
         cx.notify();
     }
@@ -632,14 +661,20 @@ impl DetailsPage {
         }));
     }
     fn image(&mut self, url: &str, cx: &mut Context<Self>) {
-        if url.is_empty()
-            || self.images.contains_key(url)
-            || self.pending.contains(url)
-            || self.failed.contains(url)
-            || self.pending.len() >= 3
-        {
+        if url.is_empty() || self.images.contains_key(url) {
             return;
         }
+        if let Some(image) = self.backend.cached_achievement_icon(url) {
+            self.images.insert(url.to_owned(), image);
+            return;
+        }
+        if self.pending.contains(url) || self.failed.contains(url) || self.pending.len() >= 3 {
+            return;
+        }
+        let achievement = self
+            .stats
+            .as_ref()
+            .is_some_and(|stats| stats.achievements.iter().any(|a| a.icon == url));
         let url = url.to_owned();
         self.pending.insert(url.clone());
         let backend = self.backend.clone();
@@ -648,6 +683,9 @@ impl DetailsPage {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    if achievement {
+                        return backend.achievement_icon(&request, true);
+                    }
                     let path = backend.detail_media(&request)?;
                     let image = image_codec::ImageReader::open(path)
                         .map_err(|e| e.to_string())?
@@ -729,6 +767,10 @@ impl DetailsPage {
         true
     }
     fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.achievements_open {
+            self.scroll_achievements(event, window, cx);
+            return;
+        }
         if self.fullscreen {
             return;
         }
@@ -827,6 +869,9 @@ impl DetailsPage {
                 .iter()
                 .any(|url| !url.is_empty() && !self.failed.contains(url.as_str()));
         let count = data.media.len();
+        if count == 1 {
+            self.strip_bounds.set(Bounds::default());
+        }
         let previous = (self.selected + count - 1) % count;
         let next = (self.selected + 1) % count;
         let viewer = div()
@@ -914,58 +959,60 @@ impl DetailsPage {
                             .on_click(cx.listener(move |this, _, _, cx| this.select(next, cx))),
                     ),
             )
-            .child(
-                div()
-                    .id("media-strip")
-                    .flex()
-                    .gap(rems(0.6))
-                    .w_full()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.media_scroll)
-                    .on_prepaint(move |paint, _, _| strip_bounds.set(paint.bounds))
-                    .child(div().flex().flex_none().mx_auto().gap(rems(0.6)).children(
-                        data.media.iter().enumerate().map(|(i, item)| {
-                            let url = if item.video { &item.preview } else { &item.url };
-                            div()
-                                .id(("media-thumb", i))
-                                .w(rems(7.))
-                                .h(rems(4.))
-                                .flex_none()
-                                .relative()
-                                .rounded(rems(0.7))
-                                .overflow_hidden()
-                                .cursor_pointer()
-                                .opacity(if i == self.selected { 1. } else { 0.65 })
-                                .hover(|s| s.opacity(1.))
-                                .when_some(self.images.get(url).cloned(), |d, image| {
-                                    d.child(
-                                        img(image)
-                                            .size_full()
-                                            .rounded(rems(0.7))
-                                            .object_fit(ObjectFit::Cover),
-                                    )
-                                })
-                                .when(item.video, |d| {
-                                    d.child(
-                                        div()
-                                            .absolute()
-                                            .inset_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                div()
-                                                    .rounded_full()
-                                                    .p(rems(0.3))
-                                                    .bg(rgba(0xe6f3eaf0))
-                                                    .child(icon("play").size(rems(1.))),
-                                            ),
-                                    )
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
-                        }),
-                    )),
-            )
+            .when(count > 1, |d| {
+                d.child(
+                    div()
+                        .id("media-strip")
+                        .flex()
+                        .gap(rems(0.6))
+                        .w_full()
+                        .overflow_x_scroll()
+                        .track_scroll(&self.media_scroll)
+                        .on_prepaint(move |paint, _, _| strip_bounds.set(paint.bounds))
+                        .child(div().flex().flex_none().mx_auto().gap(rems(0.6)).children(
+                            data.media.iter().enumerate().map(|(i, item)| {
+                                let url = if item.video { &item.preview } else { &item.url };
+                                div()
+                                    .id(("media-thumb", i))
+                                    .w(rems(7.))
+                                    .h(rems(4.))
+                                    .flex_none()
+                                    .relative()
+                                    .rounded(rems(0.7))
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .opacity(if i == self.selected { 1. } else { 0.65 })
+                                    .hover(|s| s.opacity(1.))
+                                    .when_some(self.images.get(url).cloned(), |d, image| {
+                                        d.child(
+                                            img(image)
+                                                .size_full()
+                                                .rounded(rems(0.7))
+                                                .object_fit(ObjectFit::Cover),
+                                        )
+                                    })
+                                    .when(item.video, |d| {
+                                        d.child(
+                                            div()
+                                                .absolute()
+                                                .inset_0()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    div()
+                                                        .rounded_full()
+                                                        .p(rems(0.3))
+                                                        .bg(rgba(0xe6f3eaf0))
+                                                        .child(icon("play").size(rems(1.))),
+                                                ),
+                                        )
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
+                            }),
+                        )),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1174,19 +1221,24 @@ impl Render for DetailsPage {
             .as_ref()
             .map(|data| data.age_rating.as_str())
             .filter(|r| !r.is_empty());
-        if !facts.is_empty() || rating.is_some() {
+        let stats_block = self.stats_block(cx);
+        if !facts.is_empty() || rating.is_some() || stats_block.is_some() {
             let mut row = div()
                 .flex()
+                .flex_wrap()
                 .items_stretch()
                 .self_start()
+                .w_full()
                 .max_w_full()
                 .gap(rems(0.9));
-            if facts.is_empty() {
+            if facts.is_empty() && rating.is_some() {
                 row = row.min_h(rems(8.7));
-            } else {
+            }
+            if !facts.is_empty() {
                 row = row.child(
                     panel()
                         .min_w_0()
+                        .max_w(rems(27.))
                         .p(rems(1.15))
                         .gap(rems(0.5))
                         .children(facts.into_iter().map(paragraph)),
@@ -1194,6 +1246,9 @@ impl Render for DetailsPage {
             }
             if let Some(rating) = rating {
                 row = row.child(age_badge(rating));
+            }
+            if let Some(stats) = stats_block {
+                row = row.child(stats);
             }
             meta = meta.child(row);
         }
@@ -1322,7 +1377,9 @@ impl Render for DetailsPage {
                                                                 .child(system_icon(&r.platform))
                                                                 .child(label),
                                                         )
-                                                        .child(paragraph(text.clone()))
+                                                        .child(paragraph(
+                                                            raesir_backend::details::requirement_text(text),
+                                                        ))
                                                 }),
                                             ),
                                         )
@@ -1415,6 +1472,7 @@ impl Render for DetailsPage {
             body = body.child(content_skeleton());
         }
         let dropdown = self.review_menu(window, cx);
+        let achievements = self.achievements_popup(cx);
         let owner = cx.weak_entity();
         let scroll_input = canvas(
             |_, _, _| (),
@@ -1457,6 +1515,7 @@ impl Render for DetailsPage {
                 )
             })
             .child(dropdown)
+            .child(achievements)
             .when_some(
                 self.player.clone().filter(|_| self.fullscreen),
                 |d, player| {

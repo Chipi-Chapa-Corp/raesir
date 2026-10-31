@@ -34,6 +34,8 @@ pub fn assets() -> AssetRegistry {
         asset!("expand", "adwaita/go-down-symbolic.svg"),
         asset!("collapse", "adwaita/go-up-symbolic.svg"),
         asset!("more", "adwaita/list-add-symbolic.svg"),
+        asset!("achievement-more", "adwaita/dots-horizontal-symbolic.svg"),
+        asset!("rare", "material/flash_on.svg"),
         asset!("thumb-up", "material/thumb_up.svg"),
         asset!("thumb-down", "material/thumb_down.svg"),
         asset!("next", "adwaita/go-next-symbolic.svg"),

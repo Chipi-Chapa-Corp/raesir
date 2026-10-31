@@ -174,6 +174,20 @@ fn review_text(text: &str) -> String {
     lines.join("\n").trim().into()
 }
 
+pub fn requirement_text(text: &str) -> String {
+    text.replace("OS *:", "OS:")
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !(lower.contains("steam client")
+                && (lower.contains("starting january") || lower.contains("will only support")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
 pub fn review_cutoff(days: u32) -> String {
     if days == 0 {
         return String::new();
@@ -192,7 +206,7 @@ fn review_platform(value: &str) -> String {
     }
 }
 
-fn display_date(value: &str) -> String {
+pub fn display_date(value: &str) -> String {
     use chrono::{DateTime, NaiveDate};
     let value = value.trim();
     if let Ok(timestamp) = value.parse::<i64>() {

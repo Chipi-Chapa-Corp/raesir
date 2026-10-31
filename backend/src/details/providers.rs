@@ -109,7 +109,7 @@ fn parse_steam(data: &Value, out: &mut Details) {
     }
 }
 fn requirement_text(s: &str) -> String {
-    clean(s)
+    super::requirement_text(&clean(s))
         .lines()
         .filter(|line| {
             !matches!(
@@ -885,6 +885,15 @@ fn collect_html_media(document: &Html, base: &str, out: &mut Details) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn steam_requirements_drop_client_footnote_and_marker() {
+        assert_eq!(
+            requirement_text(
+                "<b>OS *:</b> Windows 7<br>Memory: 4 GB<br>* Starting January 1st, 2024, the Steam Client will only support Windows 10 and later versions."
+            ),
+            "OS: Windows 7\nMemory: 4 GB"
+        );
+    }
     #[test]
     fn steam_details_support_streaming_trailers_and_new_review_response() {
         let data = json!({"detailed_description":"<p>A game</p>","developers":["Studio"],"publishers":["Publisher"],"ratings":{"esrb":{"rating":"T"}},"movies":[{"name":"Trailer","hls_h264":"https://cdn.example/trailer.m3u8"}],"screenshots":[{"path_full":"https://cdn.example/shot.jpg"}],"pc_requirements":{"minimum":"<b>OS:</b> Windows 10<br>RAM: 8GB"},"linux_requirements":{"minimum":"<b>Minimum:</b>"}});

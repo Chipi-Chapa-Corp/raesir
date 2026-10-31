@@ -21,6 +21,8 @@ cargo run --release
 
 Click a game to see its details. Right-click for game actions. Use **Ctrl + / − / 0** to adjust text size.
 
+For live UI development, install `dioxus-cli` 0.7.10 once, then run `./dev`. Saved UI changes patch the running window. Changes to initialization or state layout need a restart.
+
 ## Games on another OS
 
 Raesir can read libraries on accessible Windows and Linux partitions. On Linux, mount banners offer read-only access with approval through your desktop. Partitions mounted by Raesir are unmounted when you close it.

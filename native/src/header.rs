@@ -76,7 +76,9 @@ fn sync_icon(syncing: bool) -> AnyElement {
 }
 
 pub fn button(id: impl Into<ElementId>, name: &'static str, selected: bool) -> Stateful<Div> {
-    button_shell(id, selected).child(icon(name))
+    button_shell(id, selected)
+        .hover(|s| s.bg(rgba(0xffffff29)))
+        .child(icon(name))
 }
 
 pub fn action_button(
@@ -119,7 +121,7 @@ fn filter_button(
         .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
 }
 
-fn button_shell(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
+pub fn button_shell(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -134,7 +136,6 @@ fn button_shell(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
         } else {
             rgba(0x00000000)
         })
-        .hover(|s| s.bg(rgba(0xffffff29)))
         .transitions(|t| t.bg(millis(130)))
 }
 
@@ -283,6 +284,7 @@ impl Render for Header {
                         pill()
                             .child(
                                 button_shell("sync", self.state.syncing)
+                                    .hover(|s| s.bg(rgba(0xffffff29)))
                                     .child(sync_icon(self.state.syncing))
                                     .on_click(self.listener(|this, _, _, cx| this.sync(cx))),
                             )
