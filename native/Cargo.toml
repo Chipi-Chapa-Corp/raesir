@@ -21,11 +21,9 @@ libloading = "0.8"
 futures = "0.3"
 unicode-segmentation = "1"
 image_codec = { package = "image", version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif-native"] }
+tempfile = "3"
 
 
 [[bin]]
 name = "raesir"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile = "3"

@@ -24,6 +24,8 @@ pub fn cached(dir: &Path) -> Option<Report> {
         report.catalog = crate::catalog::from_report(&report);
     }
     report.catalog.retain(crate::catalog::visible);
+    crate::adapters::hydrate_game_pass(&mut report.catalog);
+    crate::game_pass::load(dir, &mut report);
     crate::catalog::hydrate_os(&mut report);
     crate::catalog::hydrate_install_actions(&mut report);
     Some(report)
@@ -32,6 +34,10 @@ pub fn cached(dir: &Path) -> Option<Report> {
 pub fn apply_owned(dir: &Path, owned: &OwnedLibrary, mut report: Report) -> Report {
     for game in &mut report.games {
         game.owned = owned.games.iter().any(|g| g.appid == game.appid);
+        game.is_demo |= owned
+            .games
+            .iter()
+            .any(|g| g.appid == game.appid && g.is_demo);
     }
     for game in &owned.games {
         if !report.games.iter().any(|g| g.appid == game.appid) {
@@ -39,6 +45,7 @@ pub fn apply_owned(dir: &Path, owned: &OwnedLibrary, mut report: Report) -> Repo
                 appid: game.appid,
                 title: game.name.clone(),
                 owned: true,
+                is_demo: game.is_demo,
                 installations: vec![],
             });
         }
@@ -48,6 +55,10 @@ pub fn apply_owned(dir: &Path, owned: &OwnedLibrary, mut report: Report) -> Repo
     for game in &mut report.catalog {
         if game.store == "steam" {
             game.in_library = owned.games.iter().any(|g| g.appid.to_string() == game.id);
+            game.is_demo |= owned
+                .games
+                .iter()
+                .any(|g| g.appid.to_string() == game.id && g.is_demo);
         }
     }
     for game in crate::catalog::from_report(&report)
@@ -93,6 +104,7 @@ pub fn scan_and_save(dir: &Path, options: &ScanOptions) -> Report {
     let online = load::<Vec<EpicOnlineLibrary>>(&dir.join("epic-owned.json"), &mut warnings)
         .unwrap_or_default();
     let mut report = inventory::scan(options, &owned, &online, previous.as_ref());
+    crate::game_pass::load(dir, &mut report);
     report.warnings.extend(warnings);
     if let Err(e) = write_json(&dir.join("inventory.json"), &report) {
         report.warnings.push(e);

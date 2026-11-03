@@ -5260,6 +5260,7 @@ dependencies = [
  "steam-vdf-parser",
  "sysinfo 0.37.2",
  "tempfile",
+ "tokio",
  "zbus",
  "zip",
 ]

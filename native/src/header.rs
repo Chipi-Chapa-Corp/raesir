@@ -8,10 +8,10 @@ pub struct HeaderState {
     pub store: Option<usize>,
     pub status: u8,
     pub os: u8,
+    pub access: u8,
     pub query: String,
     pub menu: bool,
     pub syncing: bool,
-    pub available: u8,
     pub downloads: Option<String>,
     pub downloads_open: bool,
     pub zoom: f32,
@@ -42,7 +42,7 @@ pub fn pill() -> Div {
 }
 
 pub fn spinner(id: &'static str, size: f32) -> AnyElement {
-    spinner_colored(id, size, 0xf0f8f3)
+    spinner_colored(id, size, 0xf0f0f0)
 }
 
 pub fn spinner_colored(id: &'static str, size: f32, color: u32) -> AnyElement {
@@ -65,7 +65,7 @@ fn sync_icon(syncing: bool) -> AnyElement {
     let icon = svg()
         .path("sync")
         .size(rems(1.25))
-        .text_color(rgb(0xbccfc7));
+        .text_color(rgb(0xd8d8d8));
     if syncing {
         icon.with_animation(
             "sync-spin",
@@ -97,7 +97,7 @@ pub fn action_button(
         .size(rems(2.6))
         .bg(rgba(0x101010b8))
         .hover(|s| s.bg(rgba(0x303030b3)))
-        .child(icon(name).text_color(rgb(0xf0f8f3)))
+        .child(icon(name).text_color(rgb(0xf0f0f0)))
         .tooltip_show_delay(millis(400))
         .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
 }
@@ -164,7 +164,9 @@ impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = self.state.viewport;
         let zoom = self.state.zoom;
-        let left = (1.1 + 0.5 + (self.state.available.count_ones() + 1) as f32 * 2.25 + 0.8) * zoom;
+        let stores_width = 0.5 + (STORES.len() + 1) as f32 * 2.25 + STORES.len() as f32 * 0.15;
+        let access_width = 0.5 + 3. * 2.25 + 2. * 0.15;
+        let left = (1.1 + stores_width + 0.6 + access_width + 0.8) * zoom;
         let right_width = 29.75
             + self.state.downloads.as_ref().map_or(0., |label| {
                 0.6 + if label.is_empty() {
@@ -192,25 +194,27 @@ impl Render for Header {
             .items_start()
             .justify_between()
             .child(
-                pill()
+                div()
+                    .flex()
+                    .gap(rems(0.6))
+                    .flex_none()
                     .child(
-                        filter_button(
-                            "all-stores",
-                            "all",
-                            self.state.store.is_none(),
-                            "All platforms",
-                        )
-                        .on_click(self.listener(|this, _, _, cx| {
-                            this.store = None;
-                            this.filter(cx);
-                        })),
-                    )
-                    .children(
-                        STORES
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| self.state.available & (1 << i) != 0)
-                            .map(|(i, name)| {
+                        pill()
+                            .child(
+                                filter_button(
+                                    "all-stores",
+                                    "all",
+                                    self.state.store.is_none(),
+                                    "All platforms",
+                                )
+                                .on_click(self.listener(
+                                    |this, _, _, cx| {
+                                        this.store = None;
+                                        this.filter(cx);
+                                    },
+                                )),
+                            )
+                            .children(STORES.iter().enumerate().map(|(i, name)| {
                                 filter_button(
                                     ("store", i),
                                     name,
@@ -230,7 +234,31 @@ impl Render for Header {
                                         this.filter(cx);
                                     },
                                 ))
-                            }),
+                            })),
+                    )
+                    .child(
+                        pill().children(
+                            ["all", "wallet", "game-pass"].into_iter().enumerate().map(
+                                |(i, icon)| {
+                                    filter_button(
+                                        ("access", i),
+                                        icon,
+                                        self.state.access == i as u8,
+                                        ["All games", "Purchased", "Game Pass"][i],
+                                    )
+                                    .on_click(self.listener(
+                                        move |this, _, _, cx| {
+                                            this.access = i as u8;
+                                            if i == 2 {
+                                                this.status = 0;
+                                                this.os = 0;
+                                            }
+                                            this.filter(cx);
+                                        },
+                                    ))
+                                },
+                            ),
+                        ),
                     ),
             )
             .child(

@@ -6,6 +6,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime},
 };
 
@@ -19,6 +20,9 @@ fn stem(game: &LibraryGame) -> String {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     game.key.hash(&mut hash);
     game.cover.hash(&mut hash);
+    if game.store == "steam" {
+        "portrait-before-header-v3".hash(&mut hash);
+    }
     if game.store == "xbox" {
         "portrait-v2".hash(&mut hash);
     }
@@ -49,6 +53,17 @@ pub fn cached(game: &LibraryGame, root: &Path) -> Option<Artwork> {
     })
 }
 pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
+    fetch_cancelable(game, root, &AtomicBool::new(false))
+}
+
+pub fn fetch_cancelable(
+    game: &LibraryGame,
+    root: &Path,
+    cancel: &AtomicBool,
+) -> Result<Artwork, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Artwork request superseded".into());
+    }
     if let Some(path) = game.cover.as_ref().filter(|p| Path::new(p).is_file()) {
         return Ok(Artwork {
             path: path.clone(),
@@ -92,6 +107,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
     }
     if game.store == "xbox"
         && game.id.len() == 12
+        && (game.cover.is_none() || game.title == game.id)
         && let Ok(value) = json(
             http,
             &format!(
@@ -123,16 +139,16 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
             );
         }
     }
-    if game.store == "steam" && game.id.bytes().all(|b| b.is_ascii_digit()) {
-        candidates.push(format!(
-            "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
-            game.id
-        ));
-    }
     for url in candidates {
-        if let Ok(bytes) = image(http, &url) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Artwork request superseded".into());
+        }
+        if let Ok(bytes) = image(http, &url, cancel) {
             return save(root, &key, &bytes, title.clone());
         }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Artwork request superseded".into());
     }
     let provider_cover = match game.store.as_str() {
         "epic" => crate::details::epic_cover(http, game).ok(),
@@ -140,13 +156,27 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
         _ => None,
     };
     if let Some(url) = provider_cover
-        && let Ok(bytes) = image(http, &url)
+        && let Ok(bytes) = image(http, &url, cancel)
     {
         return save(root, &key, &bytes, None);
     }
     if game.store == "steam"
         && let Some(url) = steam_portrait(http, &game.id)
-        && let Ok(bytes) = image(http, &url)
+        && let Ok(bytes) = image(http, &url, cancel)
+    {
+        return save(root, &key, &bytes, None);
+    }
+    // Header capsules are landscape fallbacks, after both portrait sources.
+    if game.store == "steam"
+        && game.id.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(bytes) = image(
+            http,
+            &format!(
+                "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
+                game.id
+            ),
+            cancel,
+        )
     {
         return save(root, &key, &bytes, None);
     }
@@ -162,7 +192,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
             .get(&game.id)
             .and_then(|v| v.pointer("/data/header_image"))
             .and_then(Value::as_str)
-        && let Ok(bytes) = image(http, url)
+        && let Ok(bytes) = image(http, url, cancel)
     {
         return save(root, &key, &bytes, None);
     }
@@ -189,9 +219,12 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Artwork, String> {
     {
         let url =
             format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg");
-        if let Ok(bytes) = image(http, &url) {
+        if let Ok(bytes) = image(http, &url, cancel) {
             return save(root, &key, &bytes, None);
         }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Artwork request superseded".into());
     }
     let _ = fs::write(missing, []);
     Err("No matching cover artwork found".into())
@@ -207,11 +240,21 @@ fn steam_portrait(http: &reqwest::blocking::Client, id: &str) -> Option<String> 
         ),
     )
     .ok()?;
+    steam_portrait_url(&data, appid)
+}
+
+fn steam_portrait_url(data: &Value, appid: u32) -> Option<String> {
     let assets = data.pointer("/response/store_items/0/assets")?;
     let file = assets
         .get("library_capsule_2x")
-        .or_else(|| assets.get("library_capsule"))?
-        .as_str()?;
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            assets
+                .get("library_capsule")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })?;
     let path = assets
         .get("asset_url_format")?
         .as_str()?
@@ -239,7 +282,31 @@ fn json(http: &reqwest::blocking::Client, url: &str) -> Result<Value, String> {
         .map_err(|_| "Artwork metadata could not be read")?;
     serde_json::from_slice(&bytes).map_err(|_| "Artwork metadata is invalid".into())
 }
-fn image(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
+fn thumbnail_url(url: &str) -> Result<reqwest::Url, String> {
+    let mut parsed = reqwest::Url::parse(url).map_err(|_| "Invalid artwork URL")?;
+    if parsed.host_str() == Some("store-images.s-microsoft.com") {
+        let pairs: Vec<_> = parsed
+            .query_pairs()
+            .filter(|(k, _)| !matches!(k.as_ref(), "w" | "h" | "q"))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        parsed.set_query(None);
+        parsed
+            .query_pairs_mut()
+            .extend_pairs(pairs)
+            .append_pair("w", "272");
+    }
+    Ok(parsed)
+}
+
+fn image(
+    _http: &reqwest::blocking::Client,
+    url: &str,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Artwork request superseded".into());
+    }
     let mut bytes = Vec::new();
     if Path::new(url).is_file() {
         fs::File::open(url)
@@ -248,7 +315,7 @@ fn image(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String>
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
     } else {
-        let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid artwork URL")?;
+        let parsed = thumbnail_url(url)?;
         if parsed.scheme() != "https"
             || parsed
                 .host_str()
@@ -256,13 +323,7 @@ fn image(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String>
         {
             return Err("Unsupported artwork URL".into());
         }
-        http.get(parsed)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|_| "Cover unavailable")?
-            .take(6 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Cover could not be read")?;
+        bytes = remote_image(parsed, cancel)?;
     }
     if bytes.len() > 6 * 1024 * 1024
         || !(bytes.starts_with(b"\xff\xd8\xff")
@@ -275,6 +336,63 @@ fn image(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String>
         return Err("Invalid cover image".into());
     }
     Ok(bytes)
+}
+
+/// Dropping a timed-out polling reference keeps the request alive; dropping the
+/// owned future when cancelled aborts the connection, including a pending send.
+fn remote_image(url: reqwest::Url, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+    struct Transport {
+        runtime: tokio::runtime::Runtime,
+        client: reqwest::Client,
+    }
+    static HTTP: std::sync::LazyLock<Result<Transport, String>> = std::sync::LazyLock::new(|| {
+        Ok(Transport {
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?,
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(7))
+                .connect_timeout(Duration::from_secs(3))
+                .user_agent("Raesir/0.1")
+                .build()
+                .map_err(|e| e.to_string())?,
+        })
+    });
+    let http = HTTP.as_ref().map_err(Clone::clone)?;
+    http.runtime.block_on(async {
+        let mut request = Box::pin(async {
+            let mut response = http
+                .client
+                .get(url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map_err(|_| "Cover unavailable")?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| "Cover could not be read")?
+            {
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > 6 * 1024 * 1024 {
+                    break;
+                }
+            }
+            Ok(bytes)
+        });
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Artwork request superseded".into());
+            }
+            if let Ok(result) = tokio::time::timeout(Duration::from_millis(20), &mut request).await
+            {
+                return result;
+            }
+        }
+    })
 }
 fn save(root: &Path, key: &str, bytes: &[u8], title: Option<String>) -> Result<Artwork, String> {
     let path: PathBuf = root.join(format!("{key}.img"));
@@ -296,6 +414,65 @@ fn save(root: &Path, key: &str, bytes: &[u8], title: Option<String>) -> Result<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obsolete_request_aborts_while_waiting_for_http_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = reqwest::Url::parse(&format!(
+            "http://{}/pending",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let (received, wait_received) = std::sync::mpsc::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 2048];
+            stream.read(&mut buffer).unwrap();
+            received.send(()).unwrap();
+            let _ = wait_release.recv_timeout(Duration::from_secs(5));
+        });
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (done, wait_done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done.send(remote_image(url, &worker_cancel)).unwrap();
+        });
+        wait_received.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancel.store(true, Ordering::Relaxed);
+        let result = wait_done
+            .recv_timeout(Duration::from_millis(500))
+            .expect("cancel must not wait for HTTP timeout");
+        assert!(result.unwrap_err().contains("superseded"));
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn thumbnail_dimensions_replace_duplicate_parameters_and_cancel_does_not_poison_cache() {
+        let url = thumbnail_url("https://store-images.s-microsoft.com/image/test?w=1920&h=1080&w=384&q=90&mode=letterbox").unwrap();
+        let pairs: Vec<_> = url.query_pairs().collect();
+        assert_eq!(pairs.iter().filter(|(k, _)| k == "w").count(), 1);
+        assert!(pairs.iter().any(|(k, v)| k == "w" && v == "272"));
+        assert!(!pairs.iter().any(|(k, _)| k == "h"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-created");
+        let game = catalog::entry("xbox", "TEST", "Fixture", vec![], "fixture");
+        assert!(fetch_cancelable(&game, &path, &AtomicBool::new(true)).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn steam_portraits_use_declared_asset_names_and_ignore_empty_high_resolution_slots() {
+        let data = serde_json::json!({"response":{"store_items":[{"assets":{
+            "asset_url_format":"steam/apps/319510/${FILENAME}?t=123",
+            "library_capsule_2x":"", "library_capsule":"portrait.png"
+        }}]}});
+        let url = steam_portrait_url(&data, 319510).unwrap();
+        assert!(url.ends_with("/319510/portrait.png?t=123"));
+        assert!(steam_portrait_url(&data, 42).is_none());
+    }
 
     #[test]
     fn local_cover_takes_priority_over_download_and_missing_caches() {

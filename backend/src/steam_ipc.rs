@@ -39,6 +39,7 @@ pub fn catalog(path: &Path) -> Result<Vec<OwnedGame>, String> {
         games.push(OwnedGame {
             appid,
             name: title.into(),
+            is_demo: kind.eq_ignore_ascii_case("demo"),
         });
     }
     if games.is_empty() {
@@ -197,7 +198,11 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let mut entries = Vec::new();
-        for (id, name) in [(42u32, "Licensed fixture"), (43u32, "Unlicensed fixture")] {
+        for (id, name, kind) in [
+            (42u32, "Licensed fixture", "game"),
+            (43u32, "Unlicensed fixture", "game"),
+            (44u32, "Preview without a demo suffix", "demo"),
+        ] {
             let mut kv = vec![0];
             kv.extend(0u32.to_le_bytes()); // appinfo
             kv.push(0);
@@ -208,7 +213,8 @@ mod tests {
             kv.push(0);
             kv.push(1);
             kv.extend(3u32.to_le_bytes());
-            kv.extend(b"game\0");
+            kv.extend(kind.as_bytes());
+            kv.push(0);
             kv.extend([8, 8, 8]);
             entries.extend(id.to_le_bytes());
             entries.extend((60u32 + kv.len() as u32).to_le_bytes());
@@ -223,6 +229,12 @@ mod tests {
         bytes.extend(4u32.to_le_bytes());
         bytes.extend(b"appinfo\0common\0name\0type\0");
         fs::write(dir.path().join("appcache/appinfo.vdf"), bytes).unwrap();
+        assert!(
+            catalog(&dir.path().join("appcache/appinfo.vdf"))
+                .unwrap()
+                .iter()
+                .any(|g| g.appid == 44 && g.is_demo)
+        );
         let owned = probe(dir.path()).unwrap();
         assert_eq!(owned.steamid, "76561198000000000");
         assert_eq!(owned.source, "steam_client");

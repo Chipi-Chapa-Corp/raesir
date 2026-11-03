@@ -37,6 +37,20 @@ pub fn local(installs: &[Installation]) -> bool {
         .iter()
         .any(|i| i.os == Os::host() && ["installed", "external"].contains(&i.state.as_str()))
 }
+
+/// Also recognize old snapshots that predate Steam's explicit demo metadata.
+pub fn demo_title(title: &str) -> bool {
+    let words: Vec<_> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    words
+        .last()
+        .is_some_and(|w| matches!(w.as_str(), "demo" | "playtest" | "trial"))
+        || words.ends_with(&["demo".into(), "version".into()])
+        || words.ends_with(&["trial".into(), "version".into()])
+}
 pub fn entry(
     store: &str,
     id: &str,
@@ -54,6 +68,9 @@ pub fn entry(
         id: id.into(),
         title: title.into(),
         in_library: false,
+        game_pass: false,
+        game_pass_only: false,
+        is_demo: demo_title(title),
         installations: installs,
         client: store.into(),
         client_os,
@@ -82,6 +99,7 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
             "steam",
         );
         item.in_library = game.owned;
+        item.is_demo |= game.is_demo;
         if game.owned {
             add_os(&mut item.client_os, report.host_os);
         }
@@ -282,6 +300,9 @@ pub fn merge(games: &mut Vec<LibraryGame>, incoming: LibraryGame) {
                 .filter(|i| seen.insert((i.path.clone(), format!("{:?}", i.os)))),
         );
         existing.in_library |= incoming.in_library;
+        existing.game_pass |= incoming.game_pass;
+        existing.game_pass_only |= incoming.game_pass_only;
+        existing.is_demo |= incoming.is_demo;
         existing.is_game = match (existing.is_game, incoming.is_game) {
             (Some(false), _) | (_, Some(false)) => Some(false),
             (Some(true), _) | (_, Some(true)) => Some(true),
@@ -526,6 +547,7 @@ mod tests {
             appid: 42,
             title: "Steam game".into(),
             owned: true,
+            is_demo: false,
             installations: vec![],
         });
         report.epic.sources.push(EpicSource {

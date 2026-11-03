@@ -52,17 +52,15 @@ struct Launcher {
     pending_action: Option<String>,
     steam_operations: HashMap<String, raesir_backend::steam_control::Progress>,
     steam_watching: bool,
-    preview_watching: bool,
     downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
-    download_preview: downloads::PreviewQueue,
     downloads_open: bool,
     game_menu: Option<(String, Point<Pixels>)>,
     details: Option<Entity<details::DetailsPage>>,
     confirm: Option<String>,
-    artwork_pending: HashSet<String>,
+    artwork_pending: HashMap<String, artwork::Job>,
     artwork_attempted: HashSet<String>,
+    artwork_cache: artwork::Cache,
     games: Vec<Game>,
-    available: u8,
     search: Entity<EditableTextState>,
     _search_subscription: Subscription,
     header: Entity<Header>,
@@ -73,7 +71,8 @@ struct Launcher {
     store: Option<usize>,
     status: u8,
     os: u8,
-    saved_filters: (u8, u8, Option<usize>),
+    access: u8,
+    saved_filters: (u8, u8, Option<usize>, u8),
     query: String,
     focus: FocusHandle,
     backdrop: Entity<backdrop::Backdrop>,
@@ -97,7 +96,7 @@ impl Launcher {
         #[cfg(feature = "benchmark")]
         benchmark::start(window, cx);
         let zoom = backend.zoom();
-        let (status, os, store) = backend.filters();
+        let (status, os, store, access) = backend.filters();
         window.set_rem_size(px(zoom));
         eprintln!("GPU: {:?}", window.gpu_specs());
         let focus = cx.focus_handle();
@@ -111,10 +110,10 @@ impl Launcher {
             store,
             status,
             os,
+            access,
             query: String::new(),
             menu: false,
             syncing: false,
-            available: 0,
             downloads: None,
             downloads_open: false,
             zoom,
@@ -154,17 +153,15 @@ impl Launcher {
             pending_action: None,
             steam_operations: HashMap::new(),
             steam_watching: false,
-            preview_watching: false,
             downloads_bounds,
-            download_preview: Default::default(),
             downloads_open: false,
             game_menu: None,
             details: None,
             confirm: None,
-            artwork_pending: HashSet::new(),
+            artwork_pending: HashMap::new(),
             artwork_attempted: HashSet::new(),
+            artwork_cache: artwork::Cache::default(),
             games: vec![],
-            available: 0,
             search,
             _search_subscription: search_subscription,
             header,
@@ -175,7 +172,8 @@ impl Launcher {
             store,
             status,
             os,
-            saved_filters: (status, os, store),
+            access,
+            saved_filters: (status, os, store, access),
             query: String::new(),
             focus,
             backdrop: cx.new(|_| backdrop::Backdrop::default()),
@@ -196,27 +194,39 @@ impl Launcher {
     }
 
     fn filter(&mut self, cx: &mut Context<Self>) {
-        let filters = (self.status, self.os, self.store);
+        let filters = (self.status, self.os, self.store, self.access);
         if filters != self.saved_filters {
             self.saved_filters = filters;
-            self.backend.set_filters(self.status, self.os, self.store);
+            self.backend
+                .set_filters(self.status, self.os, self.store, self.access);
             let backend = self.backend.clone();
             cx.background_executor()
                 .spawn(async move { backend.save_ui() })
                 .detach();
         }
-        let query = self.query.to_lowercase();
+        let query = self.query.trim().to_lowercase();
         self.visible = self
             .games
             .iter()
             .enumerate()
-            .filter(|(_, g)| g.matches(&query, self.store, self.status, self.os, self.host))
+            .filter(|(_, g)| {
+                g.matches_access(self.access)
+                    && g.matches(&query, self.store, self.status, self.os, self.host)
+            })
             .map(|(i, _)| i)
             .collect();
         self.reset_rows();
         self.hover_task = None;
         self.hovered = None;
         cx.notify();
+    }
+
+    fn library_scope(&self) -> u8 {
+        if self.query.trim().is_empty() {
+            self.os
+        } else {
+            0
+        }
     }
 
     fn reset_rows(&mut self) {
@@ -352,10 +362,11 @@ impl Launcher {
 
     fn card(&self, i: usize, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let g = &self.games[i];
-        let installed = g.installed(self.os, self.host);
+        let scope = self.library_scope();
+        let installed = g.installed(scope, self.host);
         let installed_here = installed == 1;
         let playable = installed_here && g.source.launch.is_some();
-        let installable = self.os != 2 && raesir_backend::actions::can_install(&g.source);
+        let installable = scope != 2 && raesir_backend::actions::can_install(&g.source);
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
         let working = progress
@@ -487,7 +498,7 @@ impl Launcher {
                         )
                     })
                     .when(
-                        !installed_here && self.os != 1 && g.other_os(self.host).is_some(),
+                        !installed_here && scope != 1 && g.other_os(self.host).is_some(),
                         |d| {
                             d.child(
                                 div()
@@ -541,7 +552,7 @@ impl Launcher {
                         |d| {
                             d.child(
                                 button_shell(("uninstall", i), false)
-                                    .child(icon("trash").text_color(rgb(0xf0f8f3)))
+                                    .child(icon("trash").text_color(rgb(0xf0f0f0)))
                                     .absolute()
                                     .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
                                     .right(rems(if playable { 3.2 } else { 0.55 }))
@@ -564,10 +575,10 @@ impl Launcher {
                         d.child(
                             button_shell(("action", i), false)
                                 .child(if working.is_some() {
-                                    header::spinner_colored("install-spin", 1.25, 0x172b22)
+                                    header::spinner_colored("install-spin", 1.25, 0x202020)
                                 } else {
                                     icon(if playable { "play" } else { "install" })
-                                        .text_color(rgb(0x172b22))
+                                        .text_color(rgb(0x202020))
                                         .into_any_element()
                                 })
                                 .when_some(
@@ -578,7 +589,7 @@ impl Launcher {
                                         d.w_auto().px(rems(0.7)).gap(rems(0.35)).child(label)
                                     },
                                 )
-                                .text_color(rgb(0x172b22))
+                                .text_color(rgb(0x202020))
                                 .text_size(rems(1.125))
                                 .absolute()
                                 .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
@@ -641,15 +652,14 @@ impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = f32::from(window.viewport_size().width);
         self.viewport_height = f32::from(window.viewport_size().height);
-        self.request_download_artwork(cx);
         let header_state = HeaderState {
             store: self.store,
             status: self.status,
             os: self.os,
+            access: self.access,
             query: self.query.clone(),
             menu: self.menu,
             syncing: self.syncing,
-            available: self.available,
             downloads: self.download_summary(),
             downloads_open: self.downloads_open,
             zoom: self.zoom,
@@ -676,6 +686,8 @@ impl Render for Launcher {
             self.row_height = row_height;
             self.reset_rows();
         }
+        artwork::maintain(self, window, cx);
+        self.request_download_artwork(cx);
         let this = cx.weak_entity();
         let rows = list(self.rows.clone(), move |row, _, cx| {
             this.update(cx, |this, cx| {
@@ -903,6 +915,28 @@ impl Render for Launcher {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    #[cfg(feature = "benchmark")]
+    if args.len() == 3 && args[1] == "--artwork-probe" {
+        let backend = backend::Backend::new();
+        let mut game = raesir_backend::catalog::entry(
+            "media",
+            &args[2].to_string_lossy(),
+            "Probe",
+            vec![],
+            "diagnostic",
+        );
+        game.cover = Some(args[2].to_string_lossy().into_owned());
+        for stage in ["cold", "cached"] {
+            let start = Instant::now();
+            let ready = artwork::load(&backend, &game).expect("artwork probe");
+            println!(
+                "{stage}: {:.2} ms, {:?}",
+                start.elapsed().as_secs_f64() * 1000.,
+                ready.poster.size(0)
+            );
+        }
+        return;
+    }
     if args.len() == 6 && args[1] == "--steam-control" {
         let appid = args[4].to_string_lossy().parse().unwrap_or(0);
         raesir_backend::steam_control::helper(

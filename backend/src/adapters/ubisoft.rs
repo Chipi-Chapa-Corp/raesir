@@ -21,6 +21,82 @@ struct Product {
     yaml: String,
 }
 
+#[derive(Clone, PartialEq, Message)]
+struct OwnershipCache {
+    #[prost(message, repeated, tag = "1")]
+    games: Vec<OwnedProduct>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct OwnedProduct {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+    #[prost(uint32, tag = "2")]
+    uplay_id: u32,
+    #[prost(uint32, tag = "17")]
+    partner: u32,
+}
+
+fn ownership(configurations: &Path) -> Result<BTreeMap<u32, bool>, String> {
+    let cache = configurations
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("Invalid Ubisoft configuration path")?;
+    let directory = cache.join("ownership");
+    if !directory.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let mut products = BTreeMap::new();
+    for entry in fs::read_dir(directory)
+        .map_err(|e| e.to_string())?
+        .take(128)
+    {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if !path.is_file() {
+            continue;
+        }
+        if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
+            return Err("Ubisoft ownership cache is too large".into());
+        }
+        let bytes = fs::read(path).map_err(|e| e.to_string())?;
+        // The account cache has a 264-byte signature header before the protobuf.
+        let payload = bytes
+            .get(264..)
+            .ok_or("Truncated Ubisoft ownership cache")?;
+        let cache =
+            OwnershipCache::decode(payload).map_err(|_| "Unsupported Ubisoft ownership cache")?;
+        for product in cache.games {
+            for id in [product.id, product.uplay_id]
+                .into_iter()
+                .filter(|id| *id != 0)
+            {
+                *products.entry(id).or_default() |= product.partner == 3;
+            }
+        }
+    }
+    Ok(products)
+}
+
+/// Upgrade inventories saved before Game Pass classification was recorded.
+pub(crate) fn hydrate_game_pass(games: &mut [LibraryGame]) {
+    let mut sources = BTreeMap::new();
+    for game in games.iter_mut().filter(|g| g.store == "ubisoft") {
+        let path = Path::new(&game.source);
+        if path.file_name().is_none_or(|name| name != "configurations") {
+            continue;
+        }
+        let products = sources
+            .entry(game.source.clone())
+            .or_insert_with(|| ownership(path).unwrap_or_default());
+        if let Ok(id) = game.id.parse::<u32>()
+            && let Some(game_pass) = products.get(&id)
+        {
+            game.game_pass = *game_pass;
+            game.game_pass_only = *game_pass;
+        }
+    }
+}
+
 pub fn scan(scan: &mut Scan<'_>) {
     let mut profiles = Vec::new();
     for home in &scan.homes {
@@ -53,6 +129,10 @@ pub fn scan(scan: &mut Scan<'_>) {
         }
         let path = profile.path.clone();
         file(scan, &path, |scan| {
+            let ownership = ownership(&path).unwrap_or_else(|error| {
+                scan.warnings.push(format!("{}: {error}", path.display()));
+                BTreeMap::new()
+            });
             let bytes = fs::read(&path).map_err(|e| e.to_string())?;
             if bytes.len() > 32 * 1024 * 1024 {
                 return Err("Ubisoft cache is too large".into());
@@ -136,6 +216,9 @@ pub fn scan(scan: &mut Scan<'_>) {
                 catalog::add_os(&mut game.client_os, profile.os);
                 game.is_game = Some(true);
                 game.in_library = true;
+                game.game_pass = ownership.get(&product.id).copied().unwrap_or(false)
+                    || ownership.get(&product.install_id).copied().unwrap_or(false);
+                game.game_pass_only = game.game_pass;
                 game.cover = cover_url(&data);
                 game.store_page = Some(catalog::url(
                     "Ubisoft Connect",
@@ -296,6 +379,85 @@ $out=@(foreach($key in @('HKLM:\SOFTWARE\Ubisoft\Launcher\Installs','HKLM:\SOFTW
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_ownership(configurations: &Path, games: Vec<OwnedProduct>) {
+        let directory = configurations
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("ownership");
+        fs::create_dir_all(&directory).unwrap();
+        let mut bytes = vec![0; 264];
+        bytes.extend(OwnershipCache { games }.encode_to_vec());
+        fs::write(directory.join("fixture-account"), bytes).unwrap();
+    }
+
+    #[test]
+    fn microsoft_partner_classification_reads_signed_cache_and_both_product_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration/configurations");
+        write_ownership(
+            &path,
+            vec![
+                OwnedProduct {
+                    id: 609,
+                    uplay_id: 610,
+                    partner: 3,
+                },
+                OwnedProduct {
+                    id: 42,
+                    uplay_id: 42,
+                    partner: 0,
+                },
+                OwnedProduct {
+                    id: 43,
+                    uplay_id: 43,
+                    partner: 1,
+                },
+            ],
+        );
+        let products = ownership(&path).unwrap();
+        assert_eq!(products.get(&609), Some(&true));
+        assert_eq!(products.get(&610), Some(&true));
+        assert_eq!(products.get(&42), Some(&false));
+        assert_eq!(products.get(&43), Some(&false));
+        let mut games = vec![catalog::entry(
+            "ubisoft",
+            "609",
+            "Child of Light",
+            vec![],
+            &epic::key(&path),
+        )];
+        hydrate_game_pass(&mut games);
+        assert!(games[0].game_pass && games[0].game_pass_only);
+        fs::write(
+            path.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("ownership/fixture-account"),
+            b"bad",
+        )
+        .unwrap();
+        assert!(ownership(&path).is_err());
+        hydrate_game_pass(&mut games);
+        assert!(
+            games[0].game_pass,
+            "unreadable caches preserve the last classification"
+        );
+        write_ownership(
+            &path,
+            vec![OwnedProduct {
+                id: 609,
+                uplay_id: 609,
+                partner: 0,
+            }],
+        );
+        hydrate_game_pass(&mut games);
+        assert!(!games[0].game_pass && !games[0].game_pass_only);
+    }
+
     #[test]
     fn portraits_resolve_localization_keys_and_reject_unresolved_keys() {
         let mut data = serde_json::json!({"root":{"thumb_image":"l2"},"localizations":{"default":{"l2":"portrait.jpg"},"ru-RU":{"l2":"russian.jpg"}}});
@@ -317,6 +479,14 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let cache = Cache { games: vec![Product { id:42, install_id:42, yaml:"root:\n  name: NAME\n  start_game: {}\n  thumb_image: cover.jpg\nlocalizations:\n  default:\n    NAME: Ubisoft fixture\n".into() },Product { id:43, install_id:43, yaml:"root:\n  name: DLC\n  is_ulc: true\n".into() }] };
         fs::write(&path, cache.encode_to_vec()).unwrap();
+        write_ownership(
+            &path,
+            vec![OwnedProduct {
+                id: 42,
+                uplay_id: 42,
+                partner: 3,
+            }],
+        );
         let report = crate::steam::scan_sources(
             &[],
             &[],
@@ -346,6 +516,7 @@ mod tests {
         scan.games.retain(catalog::visible);
         assert_eq!(scan.games.len(), 1);
         assert_eq!(scan.games[0].title, "Ubisoft fixture");
+        assert!(scan.games[0].game_pass && scan.games[0].game_pass_only);
         assert_eq!(scan.games[0].client_os, vec![Os::Windows]);
         assert!(scan.games[0].installations.is_empty());
         assert!(scan.games[0].launch.is_none());

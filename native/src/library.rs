@@ -114,6 +114,20 @@ impl Game {
             .collect()
     }
 
+    pub fn matches_access(&self, access: u8) -> bool {
+        match access {
+            0 => true,
+            1 => {
+                self.source.in_library
+                    && !self.source.game_pass_only
+                    && !self.source.is_demo
+                    && !raesir_backend::catalog::demo_title(&self.title)
+            }
+            2 => self.source.game_pass,
+            _ => false,
+        }
+    }
+
     pub fn matches(
         &self,
         query: &str,
@@ -124,6 +138,9 @@ impl Game {
     ) -> bool {
         if store.is_some_and(|s| s != self.store) || !self.title.to_lowercase().contains(query) {
             return false;
+        }
+        if !query.is_empty() {
+            return true;
         }
         let systems = &self.source.client_os;
         if scope == 1 && (host == Os::Unknown || !systems.contains(&host)) {
@@ -184,7 +201,43 @@ mod tests {
             "fixture",
         );
         source.client_os = client;
+        source.in_library = true;
         Game::new(source).unwrap()
+    }
+
+    #[test]
+    fn access_filter_separates_subscription_games_and_keeps_purchases_also_on_game_pass() {
+        let mut game = game(vec![Os::Windows], vec![]);
+        assert!(game.matches_access(0));
+        assert!(game.matches_access(1));
+        assert!(!game.matches_access(2));
+        game.source.game_pass = true;
+        game.source.game_pass_only = true;
+        assert!(game.matches_access(0));
+        assert!(!game.matches_access(1));
+        assert!(game.matches_access(2));
+        assert!(game.matches("test", None, 1, 1, Os::Linux));
+        assert!(
+            !game.matches_access(1),
+            "search does not bypass the access filter"
+        );
+        game.source.game_pass_only = false;
+        assert!(game.matches_access(1) && game.matches_access(2));
+        game.source.is_demo = true;
+        assert!(!game.matches_access(1));
+        assert!(game.matches_access(0));
+        game.source.is_demo = false;
+        game.title = "Half-Life 2: Demo".into();
+        assert!(
+            !game.matches_access(1),
+            "old inventories exclude demos before metadata refresh"
+        );
+        game.title = "Test game".into();
+        game.source.in_library = false;
+        assert!(
+            !game.matches_access(1),
+            "an installation does not prove ownership"
+        );
     }
 
     #[test]
@@ -196,6 +249,23 @@ mod tests {
         let foreign = game(vec![Os::Windows], vec![]);
         assert!(!foreign.matches("", None, 0, 1, Os::Linux));
         assert!(foreign.matches("", None, 0, 2, Os::Linux));
+    }
+
+    #[test]
+    fn search_ignores_status_and_os_but_keeps_provider_and_title() {
+        for game in [
+            game(vec![Os::Windows], vec![]),
+            game(vec![Os::Linux], vec![(Os::Linux, "installed")]),
+        ] {
+            for status in 0..=2 {
+                for scope in 0..=2 {
+                    assert!(game.matches("test", None, status, scope, Os::Linux));
+                    assert!(game.matches("test", Some(game.store), status, scope, Os::Linux));
+                    assert!(!game.matches("test", Some(game.store + 1), status, scope, Os::Linux));
+                    assert!(!game.matches("missing", None, status, scope, Os::Linux));
+                }
+            }
+        }
     }
 
     #[test]

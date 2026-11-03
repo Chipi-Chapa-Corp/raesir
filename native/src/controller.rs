@@ -57,20 +57,8 @@ impl Launcher {
                 game
             })
             .collect();
-        self.available = self.games.iter().fold(0, |bits, g| bits | (1 << g.store));
-        if self
-            .store
-            .is_some_and(|store| !self.games.iter().any(|g| g.store == store))
-        {
-            self.store = None;
-        }
-        self.download_preview.seed(&self.games);
         self.report = Some(report);
         self.steam_operations = self.backend.current_steam_progress();
-        if self.steam_operations.values().any(|p| p.active()) {
-            self.download_preview.clear();
-        }
-        self.watch_download_preview(cx);
         self.update_steam_details(cx);
         self.watch_steam(cx);
         self.starting = false;
@@ -137,6 +125,21 @@ impl Launcher {
                         .is_err()
                     {
                         return;
+                    }
+                    let pass = backend.clone();
+                    match cx
+                        .background_executor()
+                        .spawn(async move { pass.refresh_game_pass(full) })
+                        .await
+                    {
+                        Ok(Some(report)) => {
+                            this.update(cx, |this, cx| this.apply_report(report, cx))
+                                .ok();
+                        }
+                        Err(e) => {
+                            this.update(cx, |this, cx| this.notice(e, cx)).ok();
+                        }
+                        _ => {}
                     }
                     let owned = backend.clone();
                     match cx
@@ -267,7 +270,6 @@ impl Launcher {
                 }
             });
         if let Some(operation) = steam_operation {
-            self.download_preview.clear();
             self.steam_operations.insert(
                 key.clone(),
                 raesir_backend::steam_control::Progress::starting(operation),
@@ -308,10 +310,10 @@ impl Launcher {
     }
 
     pub(crate) fn update_steam_details(&self, cx: &mut Context<Self>) {
-        let progress = self.display_operations();
+        let progress = &self.steam_operations;
         if let Some(page) = &self.details {
             page.update(cx, |page, cx| {
-                page.library_changed(&self.games, &progress, cx)
+                page.library_changed(&self.games, progress, cx)
             });
         }
     }

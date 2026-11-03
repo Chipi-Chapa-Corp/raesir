@@ -57,6 +57,8 @@ pub struct Game {
     pub appid: u32,
     pub title: String,
     pub owned: bool,
+    #[serde(default)]
+    pub is_demo: bool,
     pub installations: Vec<Installation>,
 }
 
@@ -105,6 +107,14 @@ pub struct LibraryGame {
     pub id: String,
     pub title: String,
     pub in_library: bool,
+    /// Available through the Game Pass catalog or a discovered subscription grant.
+    #[serde(default)]
+    pub game_pass: bool,
+    /// Exclude subscription-only entries from the Purchased view.
+    #[serde(default)]
+    pub game_pass_only: bool,
+    #[serde(default)]
+    pub is_demo: bool,
     pub installations: Vec<Installation>,
     pub client: String,
     #[serde(default)]
@@ -219,4 +229,6 @@ pub struct OwnedLibrary {
 pub struct OwnedGame {
     pub appid: u32,
     pub name: String,
+    #[serde(default)]
+    pub is_demo: bool,
 }

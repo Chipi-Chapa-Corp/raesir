@@ -11,6 +11,20 @@ Raesir brings Steam, Epic Games, EA, Ubisoft Connect, Xbox, and Wargaming games 
 
 Keep your game clients installed and signed in. Raesir uses their existing libraries and launch tools.
 
+The selector beside the launcher filters switches between All, Purchased (the default),
+and Game Pass. Game Pass includes Microsoft's full PC catalog across Game Pass tiers for the US market,
+including uninstalled games, and is cached for offline browsing. Refresh updates the
+catalog; it also refreshes automatically once a day. Ubisoft games tagged with Microsoft
+partner code `3` appear under Game Pass rather than Purchased. Your subscription and
+the game's client determine whether you can install it. Purchased excludes demos,
+trials, and entries without library membership. The grid renders visible rows, keeps
+recent decoded cards in a bounded warm cache, and saves finished card thumbnails to
+disk. Twelve current-viewport download slots and eight cached-image slots prioritize
+visible cards. Six separate look-ahead slots prefetch in the scroll direction.
+Scrolling cancels obsolete HTTP requests; finished thumbnail writes
+run separately from first paint. Development builds optimize the image codecs and
+card processing so debug builds retain normal thumbnail performance.
+
 Wargaming support reads Game Center's registered installations on Windows, mounted Windows drives, and configured Wine/Proton prefixes (including Lutris and Bottles). Launch opens the game's page in Game Center; select **Play** there. Install and uninstall actions also use the existing client. Production games can show details and reviews from their matching Steam edition. Complete account libraries, historical playtime, and Wargaming achievements are not imported yet.
 
 ## Run
@@ -24,8 +38,6 @@ cargo run --release
 Click a game to see its details. Right-click for game actions. Use **Ctrl + / − / 0** to adjust text size.
 
 On supported Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Raesir. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; other builds use Steam's own dialogs.
-
-The download queue currently includes three preview entries (one starting at 45%, two queued, with simulated progress) chosen from local Steam library artwork. Preview controls do not affect Steam. Starting or detecting a real Steam operation clears the preview entries. Real Steam downloads use live client progress and per-game stop/resume controls. Set `RAESIR_MOCK_DOWNLOADS=0` to hide preview entries.
 
 For live UI development, install `dioxus-cli` 0.7.10 once, then run `./dev`. Saved UI changes patch the running window. Press **r** or **R** in the terminal for a full rebuild and restart, including after closing the app. Use this after changes to initialization or state layout.
 

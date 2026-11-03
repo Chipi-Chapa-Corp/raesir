@@ -158,16 +158,8 @@ pub fn from_media(backend: &Backend, source: &str) -> Result<Arc<RenderImage>, S
     Ok(prepare(&image, &cache))
 }
 
-pub fn from_cover(
-    image: &image_codec::DynamicImage,
-    path: &Path,
-    cache: &Path,
-) -> Arc<RenderImage> {
-    let path = cache_path(path, cache);
-    if let Ok(image) = image_codec::open(&path) {
-        return render_image(image.into_rgba8());
-    }
-    prepare(image, &path)
+pub(crate) fn preview(image: &image_codec::DynamicImage) -> Arc<RenderImage> {
+    render_image(color_mesh(image))
 }
 
 fn cache_path(source: &Path, cache: &Path) -> PathBuf {

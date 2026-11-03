@@ -10,6 +10,7 @@ use crate::{
 };
 use std::{collections::BTreeSet, path::Path};
 pub(crate) use ubisoft::cached_cover as ubisoft_cover;
+pub(crate) use ubisoft::hydrate_game_pass;
 pub(crate) use wargaming::steam_app as wargaming_steam_app;
 pub(crate) use wargaming::store_url as wargaming_store_url;
 

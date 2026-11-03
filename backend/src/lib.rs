@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod ea;
 pub mod epic;
 pub mod epic_online;
+pub mod game_pass;
 pub mod inventory;
 pub mod linux_support;
 pub mod model;

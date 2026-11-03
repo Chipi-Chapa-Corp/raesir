@@ -49,6 +49,8 @@ pub fn assets() -> AssetRegistry {
         asset!("back", "adwaita/go-previous-symbolic.svg"),
         asset!("sync", "adwaita/arrows-circle-rotated-symbolic.svg"),
         asset!("all", "adwaita/view-grid-symbolic.svg"),
+        asset!("wallet", "adwaita/wallet-symbolic.svg"),
+        asset!("game-pass", "game-pass.svg"),
         asset!("installed", "adwaita/input-gaming-symbolic.svg"),
         asset!("not-installed", "adwaita/forbidden-symbolic.svg"),
         asset!("install", "adwaita/folder-download-symbolic.svg"),
@@ -84,10 +86,11 @@ pub fn icon(name: &'static str) -> Svg {
         "epic" | "ubisoft" | "wargaming" => (0xf5f5f5, 1.55),
         "ea" => (0xff585d, 1.55),
         "xbox" => (0x107c10, 1.55),
+        "game-pass" => (0xf5f5f5, 1.55),
         "windows" => (0x00a4ef, 1.55),
         "linux" => (0xf6c94c, 1.55),
-        "play" => (0x172b22, 1.25),
-        _ => (0xbccfc7, 1.25),
+        "play" => (0x202020, 1.25),
+        _ => (0xd8d8d8, 1.25),
     };
     svg()
         .path(name)

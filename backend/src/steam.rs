@@ -180,6 +180,7 @@ pub fn scan_sources(
                 appid: game.appid,
                 title: game.name.clone(),
                 owned: true,
+                is_demo: game.is_demo,
                 installations: Vec::new(),
             },
         );
@@ -238,6 +239,7 @@ pub fn scan_sources(
                         appid: id,
                         title,
                         owned: false,
+                        is_demo: false,
                         installations: Vec::new(),
                     });
                     game.installations.push(installation);
@@ -312,6 +314,7 @@ pub fn scan_sources(
                     appid: old.appid,
                     title: old.title.clone(),
                     owned: owned.games.iter().any(|g| g.appid == old.appid),
+                    is_demo: old.is_demo,
                     installations: Vec::new(),
                 });
                 if game
@@ -572,10 +575,12 @@ mod tests {
                 OwnedGame {
                     appid: 1,
                     name: "Installed".into(),
+                    is_demo: false,
                 },
                 OwnedGame {
                     appid: 2,
                     name: "Owned only".into(),
+                    is_demo: false,
                 },
             ],
         };

@@ -1,110 +1,12 @@
-//! Queue presentation. Preview entries never send commands to a game client.
+//! Presentation and controls for real Steam operations.
 use crate::{
     Launcher,
     header::{action_button, pill},
     icons::icon,
-    library::Game,
 };
 use gpui::{prelude::*, *};
 use raesir_backend::steam_control::{Operation, Phase, Progress};
-use std::{
-    cell::Cell,
-    collections::{HashMap, hash_map::RandomState},
-    hash::BuildHasher,
-    rc::Rc,
-};
-
-#[derive(Default)]
-pub struct PreviewQueue {
-    seeded: bool,
-    items: Vec<(String, Option<u8>)>,
-}
-
-impl PreviewQueue {
-    pub fn clear(&mut self) {
-        self.seeded = true;
-        self.items.clear();
-    }
-    pub fn seed(&mut self, games: &[Game]) {
-        if self.seeded || games.is_empty() {
-            return;
-        }
-        self.seeded = true;
-        // Temporary preview requested for UI review. Opt out for live-only use.
-        if std::env::var_os("RAESIR_MOCK_DOWNLOADS").is_some_and(|v| v == "0") {
-            return;
-        }
-        let random = RandomState::new();
-        let mut candidates: Vec<_> = games
-            .iter()
-            .filter(|g| {
-                g.source.store == "steam" && raesir_backend::actions::can_install(&g.source)
-            })
-            .collect();
-        candidates.sort_by_key(|g| {
-            (
-                !g.source
-                    .cover
-                    .as_ref()
-                    .is_some_and(|p| std::path::Path::new(p).is_file()),
-                random.hash_one(&g.source.key),
-            )
-        });
-        self.items = candidates
-            .into_iter()
-            .take(3)
-            .enumerate()
-            .map(|(i, g)| (g.source.key.clone(), (i == 0).then_some(45)))
-            .collect();
-    }
-
-    fn progress(&self, key: &str) -> Option<Progress> {
-        let (_, percent) = self.items.iter().find(|(k, _)| k == key)?;
-        Some(Progress {
-            operation: Operation::Install,
-            phase: if percent.is_some() {
-                Phase::Downloading
-            } else {
-                Phase::Queued
-            },
-            percent: *percent,
-            error: None,
-        })
-    }
-
-    fn stop(&mut self, key: &str) {
-        self.items.retain(|(k, _)| k != key);
-        self.start_next();
-    }
-
-    fn start_next(&mut self) {
-        if !self.items.iter().any(|(_, percent)| percent.is_some())
-            && let Some((_, percent)) = self.items.first_mut()
-        {
-            *percent = Some(0);
-        }
-    }
-
-    fn advance(&mut self) {
-        self.items.retain(|(_, percent)| *percent != Some(100));
-        self.start_next();
-        if let Some((_, Some(percent))) = self.items.iter_mut().find(|(_, p)| p.is_some()) {
-            *percent = percent.saturating_add(1).min(100);
-        }
-    }
-
-    fn start_now(&mut self, key: &str) {
-        if !self.items.iter().any(|(k, _)| k == key) {
-            return;
-        }
-        // One active preview download; starting another moves the previous
-        // game back into the queue.
-        for (k, percent) in &mut self.items {
-            *percent = (k == key).then_some(0);
-        }
-        self.items.sort_by_key(|(_, percent)| percent.is_none());
-    }
-}
+use std::{cell::Cell, rc::Rc};
 
 pub fn button_label(progress: &Progress) -> String {
     match progress.phase {
@@ -146,18 +48,6 @@ impl Launcher {
         if self.closing || self.pending_action.is_some() {
             return;
         }
-        if self.download_preview.progress(&key).is_some()
-            && !self.steam_operations.contains_key(&key)
-        {
-            if resume {
-                self.download_preview.start_now(&key);
-            } else {
-                self.download_preview.stop(&key);
-            }
-            self.update_steam_details(cx);
-            cx.notify();
-            return;
-        }
         self.pending_action = Some(key.clone());
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
@@ -177,58 +67,17 @@ impl Launcher {
         .detach();
     }
 
-    pub(crate) fn watch_download_preview(&mut self, cx: &mut Context<Self>) {
-        if self.preview_watching || self.closing || self.download_preview.items.is_empty() {
-            return;
-        }
-        self.preview_watching = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(millis(1000)).await;
-                let stop = this
-                    .update(cx, |this, cx| {
-                        if this.closing || this.download_preview.items.is_empty() {
-                            this.preview_watching = false;
-                            return true;
-                        }
-                        this.download_preview.advance();
-                        this.update_steam_details(cx);
-                        cx.notify();
-                        false
-                    })
-                    .unwrap_or(true);
-                if stop {
-                    return;
-                }
-            }
-        })
-        .detach();
-    }
-
     pub(crate) fn display_progress(&self, key: &str) -> Option<Progress> {
-        self.steam_operations
-            .get(key)
-            .cloned()
-            .or_else(|| self.download_preview.progress(key))
-    }
-
-    pub(crate) fn display_operations(&self) -> HashMap<String, Progress> {
-        let mut progress = self.steam_operations.clone();
-        for (key, _) in &self.download_preview.items {
-            if let Some(value) = self.download_preview.progress(key) {
-                progress.entry(key.clone()).or_insert(value);
-            }
-        }
-        progress
+        self.steam_operations.get(key).cloned()
     }
 
     pub(crate) fn download_summary(&self) -> Option<String> {
-        let progress = self.display_operations();
+        let progress = &self.steam_operations;
         let mut installing: Vec<_> = progress
             .iter()
             .filter(|(_, p)| p.operation == Operation::Install && p.active())
             .collect();
-        installing.sort_by_key(|(key, _)| (!self.steam_operations.contains_key(*key), *key));
+        installing.sort_by_key(|(key, _)| *key);
         let (_, state) = installing
             .iter()
             .find(|(_, p)| p.percent.is_some())
@@ -247,7 +96,7 @@ impl Launcher {
 
     pub(crate) fn request_download_artwork(&mut self, cx: &mut Context<Self>) {
         if self.downloads_open {
-            let keys = self.display_operations();
+            let keys = &self.steam_operations;
             let indices: Vec<_> = self
                 .games
                 .iter()
@@ -262,7 +111,7 @@ impl Launcher {
     }
 
     pub(crate) fn download_popup(&self, cx: &mut Context<Self>) -> AnyElement {
-        let progress = self.display_operations();
+        let progress = &self.steam_operations;
         let mut entries: Vec<_> = self
             .games
             .iter()
@@ -444,51 +293,5 @@ impl Launcher {
                     })),
             )
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[::core::prelude::v1::test]
-    fn starting_a_queued_preview_switches_the_active_game_and_stop_removes_it() {
-        let mut queue = PreviewQueue {
-            seeded: true,
-            items: vec![
-                ("a".into(), Some(45)),
-                ("b".into(), None),
-                ("c".into(), None),
-            ],
-        };
-        queue.start_now("missing");
-        assert_eq!(queue.progress("a").unwrap().percent, Some(45));
-        queue.start_now("b");
-        assert_eq!(queue.progress("b").unwrap().percent, Some(0));
-        assert_eq!(queue.progress("a").unwrap().phase, Phase::Queued);
-        assert_eq!(queue.items.iter().filter(|(_, p)| p.is_some()).count(), 1);
-        queue.stop("b");
-        assert!(queue.progress("b").is_none());
-        assert_eq!(queue.items.len(), 2);
-        assert_eq!(queue.progress("a").unwrap().percent, Some(0));
-    }
-
-    #[::core::prelude::v1::test]
-    fn preview_progress_advances_completes_and_starts_the_next_download() {
-        let mut queue = PreviewQueue {
-            seeded: true,
-            items: vec![("a".into(), Some(45)), ("b".into(), None)],
-        };
-        queue.advance();
-        assert_eq!(queue.progress("a").unwrap().percent, Some(46));
-        for _ in 0..54 {
-            queue.advance();
-        }
-        assert_eq!(queue.progress("a").unwrap().percent, Some(100));
-        queue.advance();
-        assert!(queue.progress("a").is_none());
-        assert_eq!(queue.progress("b").unwrap().percent, Some(1));
-        queue.stop("b");
-        queue.advance();
-        assert!(queue.items.is_empty());
     }
 }

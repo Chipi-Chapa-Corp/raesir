@@ -55,7 +55,7 @@ impl Launcher {
         let xbox_notice = self.report.as_ref().is_some_and(|report| {
             crate::library::xbox_runtime_notice(
                 report,
-                self.os,
+                self.library_scope(),
                 self.store.map(|s| crate::STORES[s]),
             )
         });
@@ -170,13 +170,15 @@ impl Launcher {
             .steam_operations
             .get(key)
             .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
-        let local = !busy && game.installed(self.os, self.host) == 1;
+        let local = !busy && game.installed(self.library_scope(), self.host) == 1;
         let items = [
             ("launch", "Launch", local && game.source.launch.is_some()),
             (
                 "install",
                 "Install",
-                !busy && self.os != 2 && raesir_backend::actions::can_install(&game.source),
+                !busy
+                    && self.library_scope() != 2
+                    && raesir_backend::actions::can_install(&game.source),
             ),
             ("store", "View in store", game.source.store_page.is_some()),
             (
