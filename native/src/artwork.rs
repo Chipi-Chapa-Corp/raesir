@@ -14,6 +14,7 @@ use std::{
     },
 };
 
+const CARD_CACHE_VERSION: &str = "finished-card-v7-footer-256";
 const DOWNLOADS: usize = 12;
 const PREFETCH_DOWNLOADS: usize = 6;
 const MAX_DOWNLOADS: usize = 24;
@@ -260,7 +261,11 @@ fn request_prioritized(
     if this.artwork_attempted.contains(&game.source.key) {
         return;
     }
-    let lane = if prepared(&this.backend.cache, &cache_key) {
+    let lane = if prepared(
+        &this.backend.cache,
+        &cache_key,
+        raesir_backend::artwork::fallback_applies(&game.source),
+    ) {
         Lane::Disk
     } else {
         Lane::Download
@@ -403,7 +408,10 @@ fn apply(this: &mut Launcher, index: usize, ready: Ready, cx: &mut Context<Launc
 
 fn key(game: &LibraryGame) -> String {
     let mut hash = DefaultHasher::new();
-    ("finished-card-v5-256", &game.key, &game.cover).hash(&mut hash);
+    (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
+    if let Some(tag) = raesir_backend::artwork::cache_tag(game) {
+        tag.hash(&mut hash);
+    }
     if let Some(path) = &game.cover
         && let Ok(metadata) = fs::metadata(path)
     {
@@ -415,13 +423,20 @@ fn key(game: &LibraryGame) -> String {
 fn paths(cache: &Path, key: &str) -> (PathBuf, PathBuf) {
     let root = cache.join("thumbnails");
     (
-        root.join(format!("{key}-v5.jpg")),
-        root.join(format!("{key}-v5-card.png")),
+        root.join(format!("{key}-v7.jpg")),
+        root.join(format!("{key}-v7-card.png")),
     )
 }
-fn prepared(cache: &Path, key: &str) -> bool {
+fn prepared(cache: &Path, key: &str, community: bool) -> bool {
     let (poster, card) = paths(cache, key);
-    poster.is_file() && card.is_file()
+    poster.is_file()
+        && card.is_file()
+        && (!community
+            || fs::metadata(&poster)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < std::time::Duration::from_secs(86_400)))
 }
 fn render(mut pixels: image_codec::RgbaImage) -> Arc<RenderImage> {
     for pixel in pixels.chunks_exact_mut(4) {
@@ -443,7 +458,11 @@ fn ready(
     }
 }
 fn load_cached(cache: &Path, game: &LibraryGame) -> Result<Ready, String> {
-    let (poster, card) = paths(cache, &key(game));
+    let key = key(game);
+    if !prepared(cache, &key, raesir_backend::artwork::fallback_applies(game)) {
+        return Err("Thumbnail needs refreshing".into());
+    }
+    let (poster, card) = paths(cache, &key);
     let image = image_codec::open(&poster).map_err(|e| e.to_string())?;
     let card = image_codec::open(card)
         .map_err(|e| e.to_string())?
@@ -623,13 +642,15 @@ mod tests {
     }
 
     #[test]
-    fn finished_card_disk_cache_preserves_fade_and_loads_without_original_or_network() {
+    fn finished_card_disk_cache_preserves_faded_blur_and_loads_without_original_or_network() {
         let dir = tempfile::tempdir().unwrap();
         let mut game = raesir_backend::catalog::entry("steam", "42", "Fixture", vec![], "fixture");
         game.cover = Some("https://unreachable.invalid/portrait.jpg".into());
         let pixels =
             image_codec::RgbaImage::from_pixel(64, 96, image_codec::Rgba([15, 60, 130, 255]));
         let card = card_pixels(&pixels);
+        assert_eq!(card.get_pixel(0, 0)[3], 255);
+        assert_eq!(card.get_pixel(0, card.height() - 1)[3], 0);
         let (poster, card_path) = paths(dir.path(), &key(&game));
         atomic_image(
             &poster,
@@ -652,6 +673,32 @@ mod tests {
             fs::metadata(card_path).unwrap().modified().unwrap(),
             modified
         );
-        assert!(prepared(dir.path(), &key(&game)));
+        assert!(prepared(dir.path(), &key(&game), false));
+    }
+
+    #[test]
+    fn community_art_invalidates_old_thumbnails_and_retries_fallbacks_after_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = raesir_backend::catalog::entry("steam", "319510", "FNAF", vec![], "fixture");
+        let mut hash = DefaultHasher::new();
+        (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
+        let old_key = format!("{:016x}", hash.finish());
+        let new_key = key(&game);
+        assert_ne!(old_key, new_key);
+        let (poster, card) = paths(dir.path(), &new_key);
+        fs::create_dir_all(poster.parent().unwrap()).unwrap();
+        fs::write(&poster, b"prepared poster").unwrap();
+        fs::write(&card, b"prepared card").unwrap();
+        assert!(prepared(dir.path(), &new_key, true));
+        assert!(!prepared(dir.path(), &old_key, false));
+        let yesterday = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        fs::File::options()
+            .write(true)
+            .open(poster)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(yesterday))
+            .unwrap();
+        assert!(!prepared(dir.path(), &new_key, true));
+        assert!(prepared(dir.path(), &new_key, false));
     }
 }

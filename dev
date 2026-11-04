@@ -6,18 +6,52 @@ if ! command -v dx >/dev/null; then
     exit 127
 fi
 
+for tool in python3 flock setsid; do
+    command -v "$tool" >/dev/null || { echo "Missing development tool: $tool" >&2; exit 127; }
+done
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+mkdir -p -- "$target_dir"
+target_dir="$(cd -- "$target_dir" && pwd)"
+exec 9>"$target_dir/.dev.lock"
+if ! flock -n 9; then
+    echo '[dev] Another ./dev session is already running. Use its terminal to rebuild or quit.' >&2
+    exit 1
+fi
+python3 scripts/prune-target.py --check-session
+
 dev_pid=
+cache_pid=
+prune_cache() {
+    python3 scripts/prune-target.py --target "$target_dir" || true
+}
 stop() {
     if [[ -n "$dev_pid" ]]; then
-        kill -INT "$dev_pid" 2>/dev/null || true
+        # Background commands can inherit SIGINT as ignored. Give this server
+        # its own process group, and stop only that group on restart/exit.
+        kill -TERM -- "-$dev_pid" 2>/dev/null || true
+        for ((attempt = 0; attempt < 50; attempt++)); do
+            kill -0 -- "-$dev_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$dev_pid" 2>/dev/null || true
         wait "$dev_pid" || true
         dev_pid=
     fi
+    if [[ -n "$cache_pid" ]]; then
+        kill -TERM "$cache_pid" 2>/dev/null || true
+        wait "$cache_pid" || true
+        cache_pid=
+    fi
+    prune_cache
 }
 start() {
-    dx serve --desktop --renderer native --hot-patch --interactive false \
-        --package raesir --features hot-reload "$@" &
+    prune_cache
+    setsid dx serve --desktop --renderer native --hot-patch --interactive false \
+        --session-cache-dir "$target_dir/dx-session" \
+        --package raesir --features hot-reload "$@" 9>&- &
     dev_pid=$!
+    python3 scripts/prune-target.py --target "$target_dir" --watch "$dev_pid" 9>&- &
+    cache_pid=$!
 }
 trap stop EXIT
 trap 'exit 130' INT

@@ -396,6 +396,7 @@ impl Launcher {
         let menu_key = key.clone();
         let details_key = key.clone();
         let title = g.title.clone();
+        let has_cover = g.card_poster.is_some();
 
         div()
             .id(("card", i))
@@ -411,7 +412,11 @@ impl Launcher {
             .flex_col()
             .rounded(rems(0.8))
             .overflow_hidden()
-            .bg(rgba(0x101010a6))
+            .bg(if has_cover {
+                rgba(0x101010a6)
+            } else {
+                rgba(0x101010e6)
+            })
             .on_hover(cx.listener(move |this, entered, _, cx| this.hover(i, *entered, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -429,7 +434,6 @@ impl Launcher {
                     .flex_none()
                     .rounded_t(rems(0.8))
                     .overflow_hidden()
-                    .when(g.poster.is_none(), |d| d.bg(rgba(0x101010b3)))
                     .when_some(g.card_poster.clone(), |d, poster| {
                         d.child(
                             img(poster)
@@ -518,7 +522,7 @@ impl Launcher {
                             )
                         },
                     )
-                    .when(g.poster.is_none(), |d| {
+                    .when(!has_cover, |d| {
                         d.child(
                             div()
                                 .absolute()
@@ -529,11 +533,12 @@ impl Launcher {
                                 }))
                                 .left(rems(0.85))
                                 .right(rems(0.75))
-                                .text_size(rems(1.125))
+                                .text_size(rems(1.2))
+                                .line_height(rems(1.5))
                                 .text_center()
-                                .font_weight(FontWeight::BOLD)
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0xf2f8f3))
-                                .child(title.to_uppercase()),
+                                .child(title.clone()),
                         )
                     })
                     .when(installed_here, |d| {
@@ -627,23 +632,27 @@ impl Launcher {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .text_center()
-                            .whitespace_normal()
-                            .max_h(rems(2.9))
-                            .overflow_hidden()
-                            .line_height(rems(1.45))
-                            .text_size(rems(1.125))
-                            .text_color(if installed_here {
-                                rgb(0xe0eae4)
-                            } else {
-                                rgb(0xa9b5b0)
-                            })
-                            .child(title),
-                    ),
+                    // Keep row geometry stable as artwork loads; coverless
+                    // cards show their title once inside the placeholder.
+                    .when(has_cover, |d| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_center()
+                                .whitespace_normal()
+                                .max_h(rems(2.9))
+                                .overflow_hidden()
+                                .line_height(rems(1.45))
+                                .text_size(rems(1.125))
+                                .text_color(if installed_here {
+                                    rgb(0xe0eae4)
+                                } else {
+                                    rgb(0xa9b5b0)
+                                })
+                                .child(title),
+                        )
+                    }),
             )
     }
 }
@@ -739,7 +748,11 @@ impl Render for Launcher {
             .relative()
             .size_full()
             .overflow_hidden()
-            .font_family("sans-serif")
+            .font_family(if cfg!(windows) {
+                "Segoe UI"
+            } else {
+                "Adwaita Sans"
+            })
             .text_size(rems(1.125))
             .text_color(rgb(0xf0f8f3))
             .track_focus(&self.focus)

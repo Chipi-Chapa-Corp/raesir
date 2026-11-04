@@ -10,6 +10,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+mod portraits;
+pub use portraits::{cache_tag, fallback_applies};
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Artwork {
     pub path: String,
@@ -61,6 +64,14 @@ pub fn fetch_cancelable(
     root: &Path,
     cancel: &AtomicBool,
 ) -> Result<Artwork, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Artwork request superseded".into());
+    }
+    if fallback_applies(game)
+        && let Some(art) = portraits::fetch(game, root, cancel)
+    {
+        return Ok(art);
+    }
     if cancel.load(Ordering::Relaxed) {
         return Err("Artwork request superseded".into());
     }
@@ -143,7 +154,7 @@ pub fn fetch_cancelable(
         if cancel.load(Ordering::Relaxed) {
             return Err("Artwork request superseded".into());
         }
-        if let Ok(bytes) = image(http, &url, cancel) {
+        if let Ok(bytes) = image(&url, cancel) {
             return save(root, &key, &bytes, title.clone());
         }
     }
@@ -156,13 +167,13 @@ pub fn fetch_cancelable(
         _ => None,
     };
     if let Some(url) = provider_cover
-        && let Ok(bytes) = image(http, &url, cancel)
+        && let Ok(bytes) = image(&url, cancel)
     {
         return save(root, &key, &bytes, None);
     }
     if game.store == "steam"
         && let Some(url) = steam_portrait(http, &game.id)
-        && let Ok(bytes) = image(http, &url, cancel)
+        && let Ok(bytes) = image(&url, cancel)
     {
         return save(root, &key, &bytes, None);
     }
@@ -170,7 +181,6 @@ pub fn fetch_cancelable(
     if game.store == "steam"
         && game.id.bytes().all(|b| b.is_ascii_digit())
         && let Ok(bytes) = image(
-            http,
             &format!(
                 "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg",
                 game.id
@@ -192,7 +202,7 @@ pub fn fetch_cancelable(
             .get(&game.id)
             .and_then(|v| v.pointer("/data/header_image"))
             .and_then(Value::as_str)
-        && let Ok(bytes) = image(http, url, cancel)
+        && let Ok(bytes) = image(url, cancel)
     {
         return save(root, &key, &bytes, None);
     }
@@ -219,7 +229,7 @@ pub fn fetch_cancelable(
     {
         let url =
             format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg");
-        if let Ok(bytes) = image(http, &url, cancel) {
+        if let Ok(bytes) = image(&url, cancel) {
             return save(root, &key, &bytes, None);
         }
     }
@@ -299,11 +309,7 @@ fn thumbnail_url(url: &str) -> Result<reqwest::Url, String> {
     Ok(parsed)
 }
 
-fn image(
-    _http: &reqwest::blocking::Client,
-    url: &str,
-    cancel: &AtomicBool,
-) -> Result<Vec<u8>, String> {
+fn image(url: &str, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("Artwork request superseded".into());
     }
@@ -341,6 +347,16 @@ fn image(
 /// Dropping a timed-out polling reference keeps the request alive; dropping the
 /// owned future when cancelled aborts the connection, including a pending send.
 fn remote_image(url: reqwest::Url, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+    remote_bytes(url, cancel, 6 * 1024 * 1024)
+}
+
+fn remote_json(url: &str, cancel: &AtomicBool) -> Result<Value, String> {
+    let url = reqwest::Url::parse(url).map_err(|_| "Invalid artwork metadata URL")?;
+    let bytes = remote_bytes(url, cancel, 4 * 1024 * 1024)?;
+    serde_json::from_slice(&bytes).map_err(|_| "Artwork metadata is invalid".into())
+}
+
+fn remote_bytes(url: reqwest::Url, cancel: &AtomicBool, limit: usize) -> Result<Vec<u8>, String> {
     struct Transport {
         runtime: tokio::runtime::Runtime,
         client: reqwest::Client,
@@ -363,9 +379,8 @@ fn remote_image(url: reqwest::Url, cancel: &AtomicBool) -> Result<Vec<u8>, Strin
     let http = HTTP.as_ref().map_err(Clone::clone)?;
     http.runtime.block_on(async {
         let mut request = Box::pin(async {
-            let mut response = http
-                .client
-                .get(url)
+            let request = http.client.get(url);
+            let mut response = request
                 .send()
                 .await
                 .and_then(|r| r.error_for_status())
@@ -377,8 +392,8 @@ fn remote_image(url: reqwest::Url, cancel: &AtomicBool) -> Result<Vec<u8>, Strin
                 .map_err(|_| "Cover could not be read")?
             {
                 bytes.extend_from_slice(&chunk);
-                if bytes.len() > 6 * 1024 * 1024 {
-                    break;
+                if bytes.len() > limit {
+                    return Err("Artwork response is too large".into());
                 }
             }
             Ok(bytes)
@@ -414,6 +429,28 @@ fn save(root: &Path, key: &str, bytes: &[u8], title: Option<String>) -> Result<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artwork_metadata_requests_need_no_authentication() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/metadata", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /metadata HTTP/1.1\r\n"));
+            assert!(!request.to_lowercase().contains("authorization:"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"success\":true}").unwrap();
+        });
+        let data = remote_json(&url, &AtomicBool::new(false)).unwrap();
+        assert_eq!(data["success"], true);
+        server.join().unwrap();
+    }
 
     #[test]
     fn obsolete_request_aborts_while_waiting_for_http_headers() {
@@ -478,7 +515,7 @@ mod tests {
     fn local_cover_takes_priority_over_download_and_missing_caches() {
         let dir = tempfile::tempdir().unwrap();
         let local = dir.path().join("library_600x900.jpg");
-        fs::write(&local, b"local portrait").unwrap();
+        fs::write(&local, b"\xff\xd8\xfflocal portrait").unwrap();
         let mut game = catalog::entry("steam", "3527290", "PEAK", vec![], "steam");
         game.cover = Some(local.to_string_lossy().into_owned());
         let key = stem(&game);

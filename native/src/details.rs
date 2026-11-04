@@ -137,7 +137,15 @@ fn bubble() -> Div {
         .py(rems(0.75))
         .gap(rems(0.6))
 }
-fn store_icon(store: &str) -> &'static str {
+fn client_icon(client: &str, store: &str) -> &'static str {
+    match client {
+        "Xbox" => return "xbox",
+        "Steam" => return "steam",
+        "EA app" | "Origin" => return "ea",
+        "Ubisoft Connect" => return "ubisoft",
+        "Epic" => return "epic",
+        _ => {}
+    }
     match store {
         "steam" => "steam",
         "epic" => "epic",
@@ -1146,7 +1154,7 @@ impl Render for DetailsPage {
             .id("details-client")
             .cursor_pointer()
             .hover(|s| s.bg(rgba(0x303030b3)))
-            .child(icon(store_icon(&self.game.store)))
+            .child(icon(client_icon(&self.game.client, &self.game.store)))
             .child(self.game.client.clone());
         let client_label = format!("Open in {} library", self.game.client);
         title = title.child(

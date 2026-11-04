@@ -41,6 +41,32 @@ On supported Linux Steam builds, Install downloads new games to Steam's main loc
 
 For live UI development, install `dioxus-cli` 0.7.10 once, then run `./dev`. Saved UI changes patch the running window. Press **r** or **R** in the terminal for a full rebuild and restart, including after closing the app. Use this after changes to initialization or state layout.
 
+`./dev` allows one server per workspace and stops its process group on restart or
+exit. It automatically maintains `target/` at startup, shutdown, and once a minute:
+two recent hot-reload dependency archives and two incremental variants per crate
+are retained, and old temporary LLVM bitcode is removed. A 16 GiB cache budget
+evicts older inactive build profiles when needed. Active builds, running binaries,
+and hot reload's reusable dependencies are preserved, so the budget can temporarily
+be exceeded while builds are active. Preview maintenance with
+`python3 scripts/prune-target.py --dry-run` or run it immediately with `--force`.
+
+## Cover artwork
+
+Raesir uses official store artwork first. For Steam games with missing portraits or
+Steam's generated banner with blurred padding, it automatically checks
+[PCGamingWiki](https://www.pcgamingwiki.com/wiki/PCGamingWiki:API) by exact Steam app ID.
+If that has no suitable portrait, it checks public [LaunchBox Games Database](https://gamesdb.launchbox-app.com/)
+pages and verifies the exact Steam app ID before selecting a front cover.
+This uses public, key-free lookups: no account, API key, or configuration is needed.
+Designed official portraits and explicit custom covers keep priority. Wide banners
+from the fallback source are rejected.
+
+The fallback uses card-sized thumbnails, the existing bounded, cancellable artwork
+workers, and a rate limit for wiki lookups. Downloaded portraits and finished card
+thumbnails are cached for offline use. Failed lookups are cooled down and keep the
+existing official artwork. Existing Steam thumbnails refresh automatically, with
+no manual cache deletion.
+
 ## Games on another OS
 
 Raesir can read libraries on accessible Windows and Linux partitions. On Linux, mount banners offer read-only access with approval through your desktop. Partitions mounted by Raesir are unmounted when you close it.
