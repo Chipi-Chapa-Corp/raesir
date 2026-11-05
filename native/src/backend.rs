@@ -597,6 +597,30 @@ impl Backend {
         Ok((snapshot, self.refresh_mods()?))
     }
 
+    pub fn import_nexus_mod(
+        &self,
+        game: &LibraryGame,
+        url: &str,
+        archive: &Path,
+        folder: &str,
+    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+        self.ready()?;
+        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+            return Err("Mod changes are disabled in this fixture profile".into());
+        }
+        let snapshot = self.mod_manager.import_nexus(game, url, archive, folder)?;
+        Ok((snapshot, self.refresh_mods()?))
+    }
+
+    pub fn mod_files(
+        &self,
+        game: &LibraryGame,
+        id: &str,
+    ) -> Result<Vec<raesir_backend::mods::ModFile>, String> {
+        self.ready()?;
+        self.mod_manager.mod_files(game, id)
+    }
+
     pub fn edit_mod_profile(
         &self,
         game: &LibraryGame,

@@ -20,7 +20,7 @@ impl Manager {
         game: &LibraryGame,
         extra_args: &[String],
         mode: LaunchMode,
-        lease: fs::File,
+        lease: GameLease,
     ) -> Result<LaunchTask, String> {
         let slug = community(game).ok_or("Unknown mod community")?;
         let appid: u32 = game.id.parse().map_err(|_| "Invalid Steam app ID")?;
@@ -178,7 +178,8 @@ impl Manager {
     }
 }
 
-pub(super) fn restore_session(staged: &Path) -> Result<(), String> {
+pub(crate) fn restore_session(staged: &Path) -> Result<(), String> {
+    crate::mods::noita::restore_session(staged)?;
     let file = staged.join("steam.json");
     let options = (|| {
         if file.exists() {

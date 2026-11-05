@@ -172,8 +172,11 @@ impl DetailsPage {
         page.stats_loading = false;
         page._mod_subscription = browser.map(|browser| {
             cx.observe(&browser, |this, browser, cx| {
-                if let Some(context) = &this.mod_context {
+                if let Some(context) = &mut this.mod_context {
                     this.poster = browser.read(cx).mod_poster(&context.id);
+                    if let Some(version) = browser.read(cx).mod_version(&context.id) {
+                        context.version = version;
+                    }
                 }
                 cx.notify();
             })
@@ -1345,7 +1348,7 @@ impl Render for DetailsPage {
                 },
             );
         } else {
-            title = title.child(bubble().child(icon("mods")).child("Thunderstore"));
+            title = title.child(bubble().child(icon("mods")).child(self.game.client.clone()));
         }
         if self.game.mods.is_some() {
             let owner = self.owner.clone();

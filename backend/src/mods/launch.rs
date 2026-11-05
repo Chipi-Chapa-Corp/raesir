@@ -9,9 +9,19 @@ use std::{
 use thunderstore_engine::profile::launch::{
     self, HostOs, LaunchContext, LaunchMode, Runtime, StorePlatform,
 };
-mod steam_launch;
+pub(super) mod steam_launch;
 
-pub struct LaunchTask(std::sync::mpsc::Receiver<Result<(), String>>);
+pub struct LaunchTask(pub(super) std::sync::mpsc::Receiver<Result<(), String>>);
+
+pub(super) struct GameLease(fs::File);
+
+impl Drop for GameLease {
+    fn drop(&mut self) {
+        // A concurrent fork may briefly inherit this open-file description
+        // before CLOEXEC runs. Explicit unlock releases our lease immediately.
+        let _ = self.0.unlock();
+    }
+}
 
 impl LaunchTask {
     pub fn poll(&self) -> Option<Result<(), String>> {
@@ -47,7 +57,7 @@ struct Receipt {
 }
 
 impl Manager {
-    pub(super) fn game_lease(&self, dir: &Path) -> Result<fs::File, String> {
+    pub(super) fn game_lease(&self, dir: &Path) -> Result<GameLease, String> {
         fs::create_dir_all(&self.leases).map_err(|e| e.to_string())?;
         let key = hash(dir.to_string_lossy().as_bytes());
         let file = fs::OpenOptions::new()
@@ -62,7 +72,7 @@ impl Manager {
                 "Another Raesir session is using this game, or its mod lock is unavailable: {e}"
             )
         })?;
-        Ok(file)
+        Ok(GameLease(file))
     }
 
     /// Recover only our own receipts, leaving a running game and any externally
@@ -82,14 +92,16 @@ impl Manager {
                 continue;
             }
             let staged = entry.path();
-            let dir = ["receipt.json", "steam.json"].into_iter().find_map(|file| {
-                let bytes = fs::read(staged.join(file)).ok()?;
-                let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-                value["game_dir"]
-                    .as_str()
-                    .filter(|p| !p.is_empty())
-                    .map(PathBuf::from)
-            });
+            let dir = ["receipt.json", "steam.json", "noita.json"]
+                .into_iter()
+                .find_map(|file| {
+                    let bytes = fs::read(staged.join(file)).ok()?;
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+                    value["game_dir"]
+                        .as_str()
+                        .filter(|p| !p.is_empty())
+                        .map(PathBuf::from)
+                });
             let Some(dir) = dir else {
                 continue;
             };
@@ -113,6 +125,9 @@ impl Manager {
     }
 
     pub fn vanilla_args(&self, game: &LibraryGame) -> Result<Vec<String>, String> {
+        if recipes::for_game(game).is_some() {
+            return Ok(Vec::new());
+        }
         let Some(slug) = community(game) else {
             return Ok(Vec::new());
         };
@@ -234,6 +249,9 @@ impl Manager {
         game: &LibraryGame,
         extra_args: &[String],
     ) -> Result<LaunchTask, String> {
+        if recipes::for_game(game).is_some() {
+            return self.launch_noita(report, game, extra_args);
+        }
         self.launch_game(report, game, extra_args, LaunchMode::Modded)
     }
 
@@ -372,10 +390,15 @@ impl Manager {
     /// silently turn the ordinary Play action into a modded launch.
     pub fn restore_for_game(&self, game: &LibraryGame) -> Result<(), String> {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let noita = recipes::for_game(game).is_some();
         for installation in game.installations.iter().filter(|i| i.os == Os::host()) {
             if let Ok(dir) = Path::new(&installation.path).canonicalize() {
                 let staged = self.stage_dir(&dir);
-                if staged.join("receipt.json").exists() || staged.join("steam.json").exists() {
+                if noita
+                    || staged.join("receipt.json").exists()
+                    || staged.join("steam.json").exists()
+                    || staged.join("noita.json").exists()
+                {
                     let _lease = self.game_lease(&dir)?;
                     if game_running(&dir)
                         || self
@@ -387,7 +410,7 @@ impl Manager {
                         return Err("Close the modded game before starting another launch".into());
                     }
                     if let Err(error) = steam_launch::restore_session(&staged) {
-                        if staged.join("receipt.json").exists() {
+                        if noita || staged.join("receipt.json").exists() {
                             return Err(error);
                         }
                         // A stopped Steam client can defer option cleanup. The
@@ -395,13 +418,16 @@ impl Manager {
                         // original game files have already been restored.
                         eprintln!("Steam launch-option cleanup deferred: {error}");
                     }
+                    if noita {
+                        super::noita::disable_for_vanilla(installation)?;
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn stage_dir(&self, game_dir: &Path) -> PathBuf {
+    pub(super) fn stage_dir(&self, game_dir: &Path) -> PathBuf {
         self.data
             .join("staged")
             .join(hash(game_dir.to_string_lossy().as_bytes()))
@@ -425,6 +451,17 @@ impl Manager {
         if files.is_empty() {
             return Ok(());
         }
+        self.stage_mirror(profile, game_dir, mirror.path(), &files, receipt_dir)
+    }
+
+    pub(super) fn stage_mirror(
+        &self,
+        profile: &Path,
+        game_dir: &Path,
+        mirror: &Path,
+        files: &[PathBuf],
+        receipt_dir: &Path,
+    ) -> Result<(), String> {
         fs::create_dir_all(receipt_dir).map_err(|e| e.to_string())?;
         let mut receipt = Receipt {
             generation: std::time::SystemTime::now()
@@ -435,16 +472,13 @@ impl Manager {
             profile: profile.into(),
             files: Vec::new(),
         };
-        for source in &files {
+        for source in files {
             let relative = source
-                .strip_prefix(mirror.path())
+                .strip_prefix(mirror)
                 .map_err(|e| e.to_string())?
                 .to_path_buf();
             let destination = safe_destination(game_dir, &relative)?;
-            if relative
-                .file_name()
-                .is_some_and(|n| n == "doorstop_config.ini")
-            {
+            if relative == Path::new("doorstop_config.ini") {
                 // External Steam launches remain vanilla if Raesir is interrupted.
                 // The engine's explicit per-launch argument enables Doorstop.
                 let text = fs::read_to_string(source).map_err(|e| e.to_string())?;
@@ -485,7 +519,10 @@ impl Manager {
     }
 }
 
-fn capture_log(mut stream: impl Read + Send + 'static, log: Arc<Mutex<(fs::File, usize)>>) {
+pub(super) fn capture_log(
+    mut stream: impl Read + Send + 'static,
+    log: Arc<Mutex<(fs::File, usize)>>,
+) {
     use std::io::Write;
     std::thread::spawn(move || {
         let mut bytes = [0_u8; 8192];
@@ -552,7 +589,7 @@ fn safe_destination(root: &Path, relative: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn atomic_copy(source: &Path, target: &Path) -> Result<(), String> {
+pub(super) fn atomic_copy(source: &Path, target: &Path) -> Result<(), String> {
     let parent = target.parent().ok_or("Loader file has no parent")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
@@ -654,8 +691,10 @@ mod tests {
         let game = root.path().join("game");
         let lease = first.game_lease(&game).unwrap();
         assert!(second.game_lease(&game).is_err());
+        let inherited = lease.0.try_clone().unwrap();
         drop(lease);
         assert!(second.game_lease(&game).is_ok());
+        drop(inherited);
     }
 
     #[test]

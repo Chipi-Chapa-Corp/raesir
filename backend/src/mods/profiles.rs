@@ -90,9 +90,13 @@ impl Manager {
                     .unwrap_or_else(|| self.profile_root(community, &p.id).join("empty"));
                 // Browsing remains conservative if metadata is unreadable;
                 // mutations report the error instead of guessing.
-                let installed = dependencies::Reasons::read(&path)
-                    .unwrap_or_default()
-                    .installed(modlist::read(&path).unwrap_or_default());
+                let installed = if recipes::by_id(community).is_some() {
+                    super::noita::installed(&path).unwrap_or_default()
+                } else {
+                    dependencies::Reasons::read(&path)
+                        .unwrap_or_default()
+                        .installed(modlist::read(&path).unwrap_or_default())
+                };
                 Profile {
                     active: p.id == registry.selected,
                     id: p.id,
@@ -198,11 +202,21 @@ impl Manager {
         }
         self.save_registry(slug, &registry)?;
         if let Some(path) = revisions {
+            if let Some(storage) = path.parent() {
+                let runtime = storage.join("runtime");
+                if runtime.is_dir() {
+                    fs::remove_dir_all(runtime).map_err(|e| e.to_string())?;
+                }
+            }
             fs::remove_dir_all(path)
                 .map_err(|e| format!("Profile deleted, but its files could not be removed: {e}"))?;
         }
         if id == "raesir" {
             let _ = fs::remove_file(self.data.join(slug).join("current.json"));
+            let runtime = self.data.join(slug).join("runtime");
+            if runtime.is_dir() {
+                fs::remove_dir_all(runtime).map_err(|e| e.to_string())?;
+            }
         } else {
             layout::delete(&self.data, slug, id).map_err(|e| e.to_string())?;
         }
@@ -212,7 +226,7 @@ impl Manager {
     pub(super) fn modification_lease(
         &self,
         game: &LibraryGame,
-    ) -> Result<Option<fs::File>, String> {
+    ) -> Result<Option<launch::GameLease>, String> {
         let install = game.installations.iter().find(|i| {
             i.os == crate::model::Os::host() && matches!(i.state.as_str(), "installed" | "external")
         });

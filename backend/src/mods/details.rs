@@ -4,6 +4,9 @@ use std::io::Read;
 
 impl Manager {
     pub fn details(&self, game: &LibraryGame, id: &str) -> Result<Details, String> {
+        if recipes::for_game(game).is_some() {
+            return self.noita_details(game, id);
+        }
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let (index, _) = self.catalog(slug, false)?;
         let package = index

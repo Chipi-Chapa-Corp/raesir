@@ -3,6 +3,9 @@ use thunderstore_engine::profile;
 
 impl Manager {
     pub fn uninstall(&self, game: &LibraryGame, package: &str) -> Result<Snapshot, String> {
+        if recipes::for_game(game).is_some() {
+            return self.noita_uninstall(game, package);
+        }
         if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
             && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none()
         {
@@ -43,6 +46,9 @@ impl Manager {
     /// Install into a new revision and publish its pointer only after the engine
     /// has installed the complete dependency closure.
     pub fn install(&self, game: &LibraryGame, package: &str) -> Result<Snapshot, String> {
+        if recipes::for_game(game).is_some() {
+            return self.noita_install(game, package);
+        }
         if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
             && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none()
         {
@@ -146,7 +152,7 @@ impl Manager {
         Ok(())
     }
 
-    fn prune_revisions(&self, community: &str) {
+    pub(super) fn prune_revisions(&self, community: &str) {
         let current = self.own_path(community);
         let mut in_use = Vec::new();
         for dir in fs::read_dir(self.data.join("staged"))
@@ -210,7 +216,7 @@ pub(super) fn copy_profile(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn commit(root: &Path, pending: tempfile::TempDir) -> Result<(), String> {
+pub(super) fn commit(root: &Path, pending: tempfile::TempDir) -> Result<(), String> {
     let suffix = pending
         .path()
         .file_name()

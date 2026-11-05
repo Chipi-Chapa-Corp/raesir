@@ -62,7 +62,7 @@ def build_lock(profile):
 
 
 def compiler_running(workspace):
-    # DX's thin hot-patches invoke rustc directly, outside Cargo's lock.
+    # Also guard direct compiler/linker invocations outside Cargo's lock.
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue
@@ -97,21 +97,6 @@ def pinned_archives(root):
         except OSError:
             pass
     return pinned
-
-
-def existing_servers(workspace):
-    result = []
-    for proc in Path("/proc").iterdir():
-        if not proc.name.isdigit():
-            continue
-        try:
-            if ((proc / "comm").read_text().strip() == "dx"
-                    and b"serve" in (proc / "cmdline").read_bytes().split(b"\0")
-                    and (proc / "cwd").resolve() == workspace):
-                result.append(int(proc.name))
-        except (OSError, RuntimeError):
-            pass
-    return result
 
 
 def prune(root, *, max_bytes=16 * GIB, dry_run=False, workspace=None):
@@ -188,12 +173,12 @@ def prune(root, *, max_bytes=16 * GIB, dry_run=False, workspace=None):
                         remove(path)
 
     # Bound the overall cache too. Evict inactive build profiles only when the
-    # budget is exceeded; hot reload's reusable host and target deps stay warm.
+    # budget is exceeded; the current incremental debug build stays warm.
     total = size(root) - (removed if dry_run else 0)
     active = running_binaries(root)
     evictable = []
     for profile in all_profiles:
-        if profile.name == "desktop-dev" or any(p.is_relative_to(profile) for p in active):
+        if profile == root / "debug" or any(p.is_relative_to(profile) for p in active):
             continue
         latest = max([profile.stat().st_mtime, *[s.st_mtime for _, s in files(profile)]])
         if now - latest >= GRACE:
@@ -221,42 +206,19 @@ def main():
     parser.add_argument("--target", type=Path, default=Path("target"))
     parser.add_argument("--max-gib", type=float, default=16)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--watch", type=int, help="Maintain caches while this DX process lives")
-    parser.add_argument("--check-session", action="store_true", help="Reject an existing legacy DX server in this workspace")
     parser.add_argument("--force", action="store_true", help="Run even if maintenance just finished")
     args = parser.parse_args()
-    if args.check_session:
-        servers = existing_servers(Path(__file__).resolve().parents[1])
-        if servers:
-            parser.exit(1, "[dev] A DX server is already running for this workspace. Close its ./dev terminal first.\n")
-        return
     if not math.isfinite(args.max_gib) or args.max_gib <= 0:
         parser.error("--max-gib must be positive")
-    if args.watch is not None and args.watch <= 0:
-        parser.error("--watch must be a positive process ID")
-    watch_start = None
-    while True:
-        if args.watch:
-            try:
-                os.kill(args.watch, 0)
-                started = Path(f"/proc/{args.watch}/stat").read_text().rsplit(")", 1)[1].split()[19]
-                if watch_start is not None and started != watch_start:
-                    return
-                watch_start = started
-            except (ProcessLookupError, FileNotFoundError):
-                return
-        try:
-            marker = args.target / ".dev-pruned"
-            recent = marker.exists() and time.time() - marker.stat().st_mtime < 60
-            if args.dry_run or args.force or not recent:
-                prune(args.target, max_bytes=args.max_gib * GIB, dry_run=args.dry_run)
-                if not args.dry_run and (args.target / ".rustc_info.json").is_file():
-                    marker.touch()
-        except OSError as error:
-            print(f"[dev cache] cleanup deferred: {error}", flush=True)
-        if not args.watch:
-            return
-        time.sleep(60)
+    try:
+        marker = args.target / ".dev-pruned"
+        recent = marker.exists() and time.time() - marker.stat().st_mtime < 60
+        if args.dry_run or args.force or not recent:
+            prune(args.target, max_bytes=args.max_gib * GIB, dry_run=args.dry_run)
+            if not args.dry_run and (args.target / ".rustc_info.json").is_file():
+                marker.touch()
+    except OSError as error:
+        print(f"[dev cache] cleanup deferred: {error}", flush=True)
 
 
 if __name__ == "__main__":

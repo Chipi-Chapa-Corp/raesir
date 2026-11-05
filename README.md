@@ -39,18 +39,19 @@ Click a game to see its details. Right-click for game actions. Use **Ctrl + / âˆ
 
 On supported Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Raesir. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; other builds use Steam's own dialogs.
 
-For live UI development, install `dioxus-cli` 0.7.10 once, then run `./dev`. Saved UI changes patch the running window. Press **r** or **R** in the terminal for a full rebuild and restart, including after closing the app. Use this after changes to initialization or state layout.
+For development, run `./dev`. It builds incrementally with optimized UI and image
+processing, then launches Raesir. Close the app or press **Ctrl+C**, then run
+`./dev` again to pick up changes. No watcher or Dioxus CLI is needed.
 
-`./dev` allows one server per workspace and stops its process group on restart or
-exit. It automatically maintains `target/` at startup, shutdown, and once a minute:
-two recent hot-reload dependency archives and two incremental variants per crate
-are retained, and old temporary LLVM bitcode is removed. A 16 GiB cache budget
-evicts older inactive build profiles when needed. Active builds, running binaries,
-and hot reload's reusable dependencies are preserved, so the budget can temporarily
-be exceeded while builds are active. Preview maintenance with
+`./dev` allows one run per workspace and stops its process group on exit. It
+maintains `target/` at startup and shutdown, retaining two incremental variants
+per crate and removing old temporary LLVM bitcode and excess legacy hot-patch
+archives. A 16 GiB cache budget evicts older inactive build profiles when needed.
+Active builds, running binaries, and the current debug profile are preserved, so
+the budget can temporarily be exceeded. Preview maintenance with
 `python3 scripts/prune-target.py --dry-run` or run it immediately with `--force`.
 
-## Thunderstore mods
+## Mods
 
 Supported games have a **Mods** bubble on their details page. Browse a virtualized
 card grid with cached mod icons. The header switches to mod search, profile selection,
@@ -58,6 +59,42 @@ and All / Installed / Not installed filters. Click a card to open its details in
 Raesir and install it with its dependencies. This uses public, key-free Thunderstore APIs and
 [thunderstore-engine](https://github.com/endoze/thunderstore-engine); games match the
 upstream store identifiers rather than title guesses.
+
+Noita also has ModWorkshop browsing, Nexus browser-download imports, and bundled
+recipes from [`backend/data/mod-recipes.json`](backend/data/mod-recipes.json).
+Entangled Worlds is the first recipe. It downloads the mod and the native proxy
+from the same public GitHub release; arbitrary GitHub URLs are not accepted.
+The **Install Mod** card imports an archive downloaded from a Noita Nexus page.
+There is no general local-folder import, and no API keys are required.
+
+Noita archives are validated and installed into profile revisions. ZIP is built
+in; 7z/RAR use the system `libarchive` library. Multiple ModWorkshop files get a
+file-selection popup. Ordinary modded launches use Steam; an Entangled Worlds
+launch opens its proxy, where you host/join a lobby and start Noita. Game mod
+folders and activation settings are staged for the session and restored on exit
+or recovered after an interruption. Existing manual mod-folder conflicts are
+reported before launch. Profiles manage mods; they do not create separate Noita
+world saves.
+
+Noita's normal **Play** explicitly disables all entries in its mod configuration,
+including manually enabled Entangled Worlds and Workshop mods. **Launch modded**
+enables the selected profile for that session and restores the prior disabled
+state on exit. Installed mods and world saves are kept. Close a running modded
+game/proxy before switching modes.
+
+On Linux, Entangled Worlds joins the Steam session that owns Noita. Flatpak Steam
+uses `flatpak enter` on an existing instance; Raesir checks the owning process,
+PID namespace and file access before opening the proxy. It preserves the proxy's
+lobby environment and launches Noita with the recorded Proton tool and the Steam
+runtimes declared by that tool's installed manifests. Missing sessions, runtimes
+or sandbox access report an error and restore staged files. Launch Noita once in
+Steam before using this integration. The Linux Steam bridge requires Python 3 (provided
+by Flatpak Steam's runtime).
+
+Companion settings and multiplayer state stay with the selected profile in
+Steam-accessible storage, including across mod updates. Older settings migrate
+without overwriting an existing destination. Existing recipe installations use
+the current launcher adapter without reinstalling their downloads.
 
 Select mod profiles from the profile menu, with pencil/trash controls on each row.
 The adjacent plus pill creates a profile. Each profile has its own mod set.

@@ -1,4 +1,4 @@
-//! Thunderstore browsing and profiles, backed by the shared mod-manager engine.
+//! Mod catalogs and profiles, with Thunderstore and game-specific installers.
 use crate::model::LibraryGame;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,7 +16,9 @@ mod dependencies;
 mod details;
 mod install;
 mod launch;
+mod noita;
 mod profiles;
+pub mod recipes;
 mod steam;
 pub use launch::LaunchTask;
 pub use steam::helper as steam_helper;
@@ -52,7 +54,7 @@ pub struct Summary {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstalledMod {
-    /// Owner-Name for a published package; local:<uuid> for an unpublished mod.
+    /// Provider-qualified ID; Thunderstore packages use Owner-Name.
     pub id: String,
     pub name: String,
     pub owner: String,
@@ -87,6 +89,18 @@ pub struct Package {
     pub downloads: u64,
     pub deprecated: bool,
     pub categories: Vec<String>,
+    #[serde(default = "thunderstore_source")]
+    pub source: String,
+}
+
+fn thunderstore_source() -> String {
+    "Thunderstore".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModFile {
+    pub id: u64,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,6 +109,10 @@ pub struct Snapshot {
     pub selected: String,
     pub profiles: Vec<Profile>,
     pub packages: Arc<Vec<Package>>,
+    #[serde(default)]
+    pub nexus_url: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 struct Catalog {
@@ -113,6 +131,9 @@ pub struct Manager {
 }
 
 pub fn community(game: &LibraryGame) -> Option<&'static str> {
+    if let Some(recipe) = recipes::for_game(game) {
+        return Some(&recipe.id);
+    }
     ECOSYSTEM
         .games()
         .find(|candidate| {
@@ -207,6 +228,7 @@ impl Manager {
                         .sum(),
                     deprecated: package.is_deprecated.unwrap_or(false),
                     categories: package.categories.clone(),
+                    source: thunderstore_source(),
                 })
             })
             .collect::<Vec<_>>();
@@ -333,7 +355,11 @@ impl Manager {
     pub fn snapshot(&self, game: &LibraryGame, refresh: bool) -> Result<Snapshot, String> {
         let community = community(game).ok_or("Thunderstore does not list this game")?;
         self.registry(community)?;
-        let (_, packages) = self.catalog(community, refresh)?;
+        let (packages, warnings) = if recipes::for_game(game).is_some() {
+            self.noita_catalog(game, refresh)?
+        } else {
+            (self.catalog(community, refresh)?.1, Vec::new())
+        };
         let profiles = self.profiles(community);
         let selected = self
             .selected(community, &profiles)
@@ -344,6 +370,8 @@ impl Manager {
             profiles,
             selected,
             packages,
+            nexus_url: recipes::for_game(game).map(|g| g.nexus.clone()),
+            warnings,
         })
     }
 }

@@ -9,6 +9,7 @@ use gpui_ce_elements::editable_text::{EditableTextState, StringStorage, TextChan
 use raesir_backend::{model::LibraryGame, mods::Snapshot};
 use std::{collections::HashSet, sync::Arc};
 
+mod nexus_ui;
 mod profile_ui;
 mod thumbnails;
 
@@ -23,6 +24,7 @@ struct Row {
     installed: bool,
     search: String,
     icon: String,
+    source: String,
 }
 
 pub struct ModBrowser {
@@ -48,6 +50,9 @@ pub struct ModBrowser {
     details: Option<Entity<crate::details::DetailsPage>>,
     dialog: Option<profile_ui::Dialog>,
     profile_name: Entity<EditableTextState>,
+    nexus_url: Entity<EditableTextState>,
+    nexus_folder: Entity<EditableTextState>,
+    nexus_archive: Option<std::path::PathBuf>,
 }
 
 impl Launcher {
@@ -94,6 +99,9 @@ impl Launcher {
                 details: None,
                 dialog: None,
                 profile_name: cx.new(|cx| EditableTextState::new(StringStorage::default(), cx)),
+                nexus_url: cx.new(|cx| EditableTextState::new(StringStorage::default(), cx)),
+                nexus_folder: cx.new(|cx| EditableTextState::new(StringStorage::default(), cx)),
+                nexus_archive: None,
             }
         });
         page.update(cx, |page, cx| {
@@ -110,7 +118,11 @@ impl Launcher {
 
 impl ModBrowser {
     pub(crate) fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let dismissed = self.dialog.take().is_some()
+        let had_dialog = self.dialog.take().is_some();
+        if had_dialog {
+            self.error = None;
+        }
+        let dismissed = had_dialog
             || std::mem::replace(&mut self.profiles_open, false)
             || self.details.take().is_some();
         if dismissed {
@@ -140,6 +152,13 @@ impl ModBrowser {
             .find(|r| r.id == id)
             .and_then(|r| self.thumbnails.cache.peek(&r.icon))
             .map(|r| r.poster)
+    }
+
+    pub(crate) fn mod_version(&self, id: &str) -> Option<String> {
+        self.all_rows
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.version.clone())
     }
     pub(crate) fn request_mod_change(
         &mut self,
@@ -183,7 +202,11 @@ impl ModBrowser {
             self.error = None;
             cx.notify();
         } else {
-            self.change_mod(id, false, cx);
+            if id.starts_with("modworkshop:") {
+                self.choose_modworkshop_file(id, cx);
+            } else {
+                self.change_mod(id, false, cx);
+            }
         }
     }
 
@@ -204,7 +227,7 @@ impl ModBrowser {
         window.focus(&return_focus, cx);
         let mut source =
             raesir_backend::catalog::entry("thunderstore", &row.id, &row.title, vec![], "mods");
-        source.client = "Thunderstore".into();
+        source.client = row.source;
         let data = raesir_backend::details::Details {
             key: source.key.clone(),
             title: row.title,
@@ -263,7 +286,10 @@ impl ModBrowser {
             this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(snapshot) => this.snapshot = Some(snapshot),
+                    Ok(snapshot) => {
+                        this.error = snapshot.warnings.first().cloned();
+                        this.snapshot = Some(snapshot);
+                    }
                     Err(e) => this.error = Some(e),
                 }
                 this.rebuild_rows(cx);
@@ -297,6 +323,7 @@ impl ModBrowser {
                         .map_or_else(|| p.version.clone(), |m| m.version.clone()),
                     page: Some(p.page.clone()),
                     installed: installed.contains(p.id.as_str()),
+                    source: p.source.clone(),
                 }
             }));
             if let Some(profile) = profile {
@@ -325,6 +352,7 @@ impl ModBrowser {
                                 )
                             }),
                             installed: true,
+                            source: "Thunderstore".into(),
                         }),
                 );
             }
@@ -396,7 +424,11 @@ impl ModBrowser {
         if self.installing.is_some() || self.loading {
             return;
         }
-        self.installing = Some(id.clone());
+        self.installing = Some(if id.starts_with("modworkshop:") {
+            id.split(':').take(2).collect::<Vec<_>>().join(":")
+        } else {
+            id.clone()
+        });
         self.error = None;
         let backend = self.backend.clone();
         let game = self.game.clone();
@@ -495,16 +527,20 @@ impl ModBrowser {
                                 ),
                         )
                     })
-                    .child(div().absolute().inset_0().bg(rgba(0xffffff00)).group_hover(
-                        "mod-card",
-                        |s| {
-                            s.bg(linear_gradient(
-                                180.,
-                                linear_color_stop(rgba(0xffffff16), 0.75),
-                                linear_color_stop(rgba(0xffffff00), 1.),
-                            ))
-                        },
-                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded_t(rems(0.8))
+                            .bg(rgba(0xffffff00))
+                            .group_hover("mod-card", |s| {
+                                s.bg(linear_gradient(
+                                    180.,
+                                    linear_color_stop(rgba(0xffffff16), 0.75),
+                                    linear_color_stop(rgba(0xffffff00), 1.),
+                                ))
+                            }),
+                    )
                     .child(
                         button_shell(("mod-action", i), false)
                             .absolute()
@@ -820,6 +856,11 @@ impl Render for ModBrowser {
         let row_height = (width * (1. - crate::CARD_TITLE_OVERLAP)
             + self.zoom * (crate::CARD_TITLE_HEIGHT + 1.15))
             .ceil();
+        let add_card = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.nexus_url.is_some());
+        let offset = usize::from(add_card);
         let first_row = {
             let scroll = self.scroll.0.borrow();
             scroll.deferred_scroll_to_item.map_or_else(
@@ -832,13 +873,16 @@ impl Render for ModBrowser {
         let (first, after) = if self.loading {
             (0, 0)
         } else {
-            (first_row * columns, (first_row + visible_rows) * columns)
+            (
+                (first_row * columns).saturating_sub(offset),
+                ((first_row + visible_rows) * columns).saturating_sub(offset),
+            )
         };
         self.maintain_thumbnails(first, after, window, cx);
         let this = cx.weak_entity();
         let rows = uniform_list(
             "mods-grid",
-            self.rows.len().div_ceil(columns),
+            (self.rows.len() + offset).div_ceil(columns),
             move |range, _, cx| {
                 this.update(cx, |this, cx| {
                     range
@@ -851,8 +895,15 @@ impl Render for ModBrowser {
                                 .px(rems(1.5))
                                 .pb(rems(1.15))
                                 .children(
-                                    (row * columns..((row + 1) * columns).min(this.rows.len()))
-                                        .map(|i| this.card(i, width, cx)),
+                                    (row * columns
+                                        ..((row + 1) * columns).min(this.rows.len() + offset))
+                                        .map(|i| {
+                                            if add_card && i == 0 {
+                                                this.install_card(width, cx)
+                                            } else {
+                                                this.card(i - offset, width, cx)
+                                            }
+                                        }),
                                 )
                         })
                         .collect::<Vec<_>>()
@@ -873,17 +924,20 @@ impl Render for ModBrowser {
             .flex()
             .flex_col()
             .gap(rems(0.9))
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
-                    pill()
-                        .mx(rems(1.5))
-                        .rounded(rems(1.))
-                        .px(rems(1.))
-                        .py(rems(0.7))
-                        .text_color(rgb(0xffc4ab))
-                        .child(error),
-                )
-            })
+            .when_some(
+                self.error.clone().filter(|_| self.dialog.is_none()),
+                |d, error| {
+                    d.child(
+                        pill()
+                            .mx(rems(1.5))
+                            .rounded(rems(1.))
+                            .px(rems(1.))
+                            .py(rems(0.7))
+                            .text_color(rgb(0xffc4ab))
+                            .child(error),
+                    )
+                },
+            )
             .when(self.loading, |d| {
                 d.child(
                     div()
@@ -894,7 +948,7 @@ impl Render for ModBrowser {
                         .child(spinner("mods-loading", 1.8)),
                 )
             })
-            .when(!self.loading && self.rows.is_empty(), |d| {
+            .when(!self.loading && self.rows.is_empty() && !add_card, |d| {
                 d.child(
                     div()
                         .flex_1()
@@ -904,7 +958,9 @@ impl Render for ModBrowser {
                         .child("No matching mods"),
                 )
             })
-            .when(!self.loading && !self.rows.is_empty(), |d| d.child(rows))
+            .when(!self.loading && (!self.rows.is_empty() || add_card), |d| {
+                d.child(rows)
+            })
             .child(self.header(viewport, cx))
             .when(self.profiles_open, |d| {
                 d.child(self.profile_menu(profile_bounds, cx))

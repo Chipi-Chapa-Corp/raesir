@@ -3,6 +3,11 @@ use crate::details::text_button;
 
 #[derive(Clone)]
 pub(super) enum Dialog {
+    Nexus,
+    Files {
+        id: String,
+        files: Vec<raesir_backend::mods::ModFile>,
+    },
     Create,
     Rename {
         id: String,
@@ -165,6 +170,11 @@ impl ModBrowser {
             return;
         };
         let (operation, id) = match mode {
+            Dialog::Nexus => {
+                self.submit_nexus(cx);
+                return;
+            }
+            Dialog::Files { .. } => return,
             Dialog::Uninstall { id, .. } => {
                 self.dialog = None;
                 self.change_mod(id, true, cx);
@@ -212,7 +222,15 @@ impl ModBrowser {
         let Some(mode) = &self.dialog else {
             return div().into_any_element();
         };
+        if matches!(mode, Dialog::Nexus) {
+            return self.nexus_dialog(cx);
+        }
+        if let Dialog::Files { id, files } = mode {
+            return self.modworkshop_files_dialog(id, files, cx);
+        }
         let (heading, note, action, editing, destructive) = match mode {
+            Dialog::Nexus => unreachable!(),
+            Dialog::Files { .. } => unreachable!(),
             Dialog::Create => (
                 "New profile".to_owned(),
                 String::new(),

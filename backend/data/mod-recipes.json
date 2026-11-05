@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "noita",
+      "steam": "881100",
+      "installer": "noita",
+      "modworkshop": "noita",
+      "nexus": "https://www.nexusmods.com/noita/mods/",
+      "mods": [
+        {
+          "id": "entangled-worlds",
+          "name": "Noita Entangled Worlds",
+          "icon": "https://raw.githubusercontent.com/IntQuant/noita_entangled_worlds/master/noita_proxy/assets/noita_ew_logo_sq.webp",
+          "description": "Online cooperative multiplayer for Noita. A modded launch opens the matching native networking proxy. Host or join a lobby there, then start Noita from the proxy.",
+          "categories": ["Multiplayer"],
+          "repository": "IntQuant/noita_entangled_worlds",
+          "mod_asset": "quant.ew.zip",
+          "folder": "quant.ew",
+          "companions": {
+            "linux": {
+              "launcher": "steam_proton",
+              "asset": "noita_proxy-linux.zip",
+              "executable": "noita_proxy.x86_64",
+              "arguments": ["--exe-path", "{game.executable}", "--settings-path", "{profile.config}", "--save-state-path", "{profile.state}"]
+            },
+            "windows": {
+              "asset": "noita_proxy-win.zip",
+              "executable": "noita_proxy.exe",
+              "arguments": ["--exe-path", "{game.executable}", "--settings-path", "{profile.config}", "--save-state-path", "{profile.state}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -81,14 +81,14 @@ class CacheTests(unittest.TestCase):
         cache.prune(self.root)
         self.assertEqual(len(list((profile / "incremental").iterdir())), 2)
 
-    def test_quota_evicts_inactive_profile_but_keeps_lock_hot_reload_and_running_app(self):
-        hot = self.profile()
-        self.old(hot / "deps/library.rlib")
-        inactive = self.profile("release")
+    def test_quota_evicts_legacy_profile_but_keeps_lock_debug_and_running_app(self):
+        debug = self.profile("debug")
+        self.old(debug / "deps/library.rlib")
+        inactive = self.profile("desktop-dev")
         self.old(inactive / "deps/library.rlib")
-        active = self.profile("debug")
+        active = self.profile("release")
         binary = self.old(active / "raesir")
-        for profile in (hot, inactive, active):
+        for profile in (debug, inactive, active):
             for path, _ in cache.files(profile):
                 os.utime(path, (time.time() - 900,) * 2)
             os.utime(profile, (time.time() - 900,) * 2)
@@ -97,7 +97,7 @@ class CacheTests(unittest.TestCase):
         self.assertTrue((inactive / ".cargo-lock").exists())
         self.assertFalse((inactive / "deps").exists())
         self.assertTrue(binary.exists())
-        self.assertTrue((hot / "deps/library.rlib").exists())
+        self.assertTrue((debug / "deps/library.rlib").exists())
 
     def test_symlinked_profiles_and_non_target_directories_are_untouched(self):
         external = Path(self.temp.name) / "external"
@@ -112,15 +112,15 @@ class CacheTests(unittest.TestCase):
 
 
 class DevTests(unittest.TestCase):
-    def test_one_server_per_workspace_and_exit_reaps_its_process_group(self):
+    def test_one_run_per_workspace_and_exit_reaps_its_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            stub = root / "dx"
+            stub = root / "cargo"
             stub.write_text('''#!/usr/bin/env python3
 import os, signal, subprocess, sys, time
 from pathlib import Path
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-Path(os.environ["DX_TEST_PIDS"]).write_text(f"{os.getpid()} {child.pid}")
+Path(os.environ["DEV_TEST_PIDS"]).write_text(f"{os.getpid()} {child.pid}")
 def stop(*_):
     child.terminate()
     child.wait()
@@ -130,7 +130,7 @@ while True: time.sleep(0.1)
 ''')
             stub.chmod(0o755)
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
-                CARGO_TARGET_DIR=str(root / "target"), DX_TEST_PIDS=str(root / "pids"))
+                CARGO_TARGET_DIR=str(root / "target"), DEV_TEST_PIDS=str(root / "pids"))
             source = Path(__file__).resolve().parents[1]
             repo = root / "workspace"
             (repo / "scripts").mkdir(parents=True)
