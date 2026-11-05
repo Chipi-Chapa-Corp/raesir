@@ -29,6 +29,7 @@ mod views;
 use header::{Header, HeaderState, button_shell, pill};
 use icons::{icon, system_icon};
 
+mod mods;
 mod smooth_scroll;
 use smooth_scroll::SmoothWheel;
 #[cfg(feature = "benchmark")]
@@ -37,6 +38,7 @@ mod benchmark;
 const STORES: [&str; 6] = ["steam", "epic", "ea", "ubisoft", "xbox", "wargaming"];
 const CARD_TITLE_HEIGHT: f32 = 4.;
 const CARD_TITLE_OVERLAP: f32 = 0.08;
+const CARD_POSTER_RATIO: f32 = 1.5;
 
 struct Launcher {
     backend: Arc<backend::Backend>,
@@ -52,10 +54,12 @@ struct Launcher {
     pending_action: Option<String>,
     steam_operations: HashMap<String, raesir_backend::steam_control::Progress>,
     steam_watching: bool,
+    mods_watching: bool,
     downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     downloads_open: bool,
     game_menu: Option<(String, Point<Pixels>)>,
     details: Option<Entity<details::DetailsPage>>,
+    mods: Option<Entity<mods::ModBrowser>>,
     confirm: Option<String>,
     artwork_pending: HashMap<String, artwork::Job>,
     artwork_attempted: HashSet<String>,
@@ -153,10 +157,12 @@ impl Launcher {
             pending_action: None,
             steam_operations: HashMap::new(),
             steam_watching: false,
+            mods_watching: false,
             downloads_bounds,
             downloads_open: false,
             game_menu: None,
             details: None,
+            mods: None,
             confirm: None,
             artwork_pending: HashMap::new(),
             artwork_attempted: HashSet::new(),
@@ -245,6 +251,7 @@ impl Launcher {
 
     fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.details.is_some()
+            || self.mods.is_some()
             || self.menu
             || self.game_menu.is_some()
             || self.confirm.is_some()
@@ -366,6 +373,7 @@ impl Launcher {
         let installed = g.installed(scope, self.host);
         let installed_here = installed == 1;
         let playable = installed_here && g.source.launch.is_some();
+        let modded = playable && g.source.mods.as_ref().is_some_and(|m| m.launchable);
         let installable = scope != 2 && raesir_backend::actions::can_install(&g.source);
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
@@ -393,6 +401,7 @@ impl Launcher {
         let duplicate_systems = g.duplicate_systems(self.host);
         let key = g.key.clone();
         let uninstall_key = key.clone();
+        let modded_key = key.clone();
         let menu_key = key.clone();
         let details_key = key.clone();
         let title = g.title.clone();
@@ -430,7 +439,7 @@ impl Launcher {
                     .id(("poster", i))
                     .relative()
                     .w_full()
-                    .h(px(width * 1.5))
+                    .h(px(width * CARD_POSTER_RATIO))
                     .flex_none()
                     .rounded_t(rems(0.8))
                     .overflow_hidden()
@@ -545,7 +554,8 @@ impl Launcher {
                         d.child(
                             div()
                                 .absolute()
-                                .bottom(px(self.zoom * 1.1 + width * 1.5 * CARD_TITLE_OVERLAP))
+                                .bottom(px(self.zoom * 1.1
+                                    + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
                                 .left(rems(0.8))
                                 .size(rems(0.3))
                                 .rounded_full()
@@ -559,8 +569,15 @@ impl Launcher {
                                 button_shell(("uninstall", i), false)
                                     .child(icon("trash").text_color(rgb(0xf0f0f0)))
                                     .absolute()
-                                    .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
-                                    .right(rems(if playable { 3.2 } else { 0.55 }))
+                                    .bottom(px(self.zoom * 0.55
+                                        + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
+                                    .right(rems(if modded {
+                                        5.85
+                                    } else if playable {
+                                        3.2
+                                    } else {
+                                        0.55
+                                    }))
                                     .bg(rgba(0x101010b8))
                                     .hover(|s| s.bg(rgba(0x303030e6)))
                                     .tooltip(|_, cx| {
@@ -576,6 +593,28 @@ impl Launcher {
                             )
                         },
                     )
+                    .when(modded && working.is_none(), |d| {
+                        d.child(
+                            button_shell(("launch-modded", i), false)
+                                .child(icon("mods").text_color(rgb(0xf0f0f0)))
+                                .absolute()
+                                .bottom(px(self.zoom * 0.55
+                                    + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
+                                .right(rems(3.2))
+                                .bg(rgba(0x101010b8))
+                                .hover(|s| s.bg(rgba(0x303030e6)))
+                                .tooltip(|_, cx| {
+                                    cx.new(|_| {
+                                        crate::library::ActionTooltip("Launch modded".into())
+                                    })
+                                    .into()
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.action(modded_key.to_string(), "launch-modded", cx);
+                                })),
+                        )
+                    })
                     .when(playable || installable || working.is_some(), |d| {
                         d.child(
                             button_shell(("action", i), false)
@@ -597,7 +636,8 @@ impl Launcher {
                                 .text_color(rgb(0x202020))
                                 .text_size(rems(1.125))
                                 .absolute()
-                                .bottom(px(self.zoom * 0.55 + width * 1.5 * CARD_TITLE_OVERLAP))
+                                .bottom(px(self.zoom * 0.55
+                                    + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
                                 .right(rems(0.55))
                                 .bg(rgba(0xdcece4f2))
                                 .hover(|s| s.bg(rgba(0xf0f8f3ff)))
@@ -625,7 +665,7 @@ impl Launcher {
             .child(
                 div()
                     .h(rems(CARD_TITLE_HEIGHT))
-                    .mt(px(-width * 1.5 * CARD_TITLE_OVERLAP))
+                    .mt(px(-width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
                     .w_full()
                     .flex_none()
                     .px(rems(0.65))
@@ -685,7 +725,7 @@ impl Render for Launcher {
             .floor()
             .max(2.) as usize;
         let width = (viewport - self.zoom * (3. + 1.25 * (columns - 1) as f32)) / columns as f32;
-        let row_height = (width * 1.5 * (1. - CARD_TITLE_OVERLAP)
+        let row_height = (width * CARD_POSTER_RATIO * (1. - CARD_TITLE_OVERLAP)
             + self.zoom * (CARD_TITLE_HEIGHT + 1.15))
             .ceil();
         if self.details.is_none()
@@ -757,6 +797,25 @@ impl Render for Launcher {
             .text_color(rgb(0xf0f8f3))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                if this.mods.is_some() && (this.menu || this.downloads_open) {
+                    this.menu = false;
+                    this.downloads_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                if this.mods.as_ref().is_some_and(|page| {
+                    page.update(cx, |page, cx| page.dismiss_overlay(window, cx))
+                }) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.mods.take().is_some() {
+                    window.focus(&this.focus, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.dismiss_details(window, cx) {
                     cx.stop_propagation();
                     cx.notify();
@@ -784,6 +843,10 @@ impl Render for Launcher {
                 }
                 if key.modifiers.control {
                     if key.key == "f" {
+                        if let Some(mods) = &this.mods {
+                            mods.update(cx, |mods, cx| mods.focus_search(window, cx));
+                            return;
+                        }
                         this.details = None;
                         window.focus(&this.search.focus_handle(cx), cx);
                         return;
@@ -801,6 +864,25 @@ impl Render for Launcher {
                     return;
                 }
                 if key.key == "escape" {
+                    if this.mods.is_some() && (this.menu || this.downloads_open) {
+                        this.menu = false;
+                        this.downloads_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    if this.mods.as_ref().is_some_and(|page| {
+                        page.update(cx, |page, cx| page.dismiss_overlay(window, cx))
+                    }) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.mods.take().is_some() {
+                        window.focus(&this.focus, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
                     if this.downloads_open {
                         this.downloads_open = false;
                         cx.stop_propagation();
@@ -865,7 +947,10 @@ impl Render for Launcher {
                 },
             )
             .when(self.details.is_none(), |d| d.child(self.header.clone()))
-            .when_some(self.details.clone(), |d, page| d.child(page))
+            .when(self.mods.is_none(), |d| {
+                d.when_some(self.details.clone(), |d, page| d.child(page))
+            })
+            .when_some(self.mods.clone(), |d, mods| d.child(mods))
             .child(
                 div()
                     .absolute()
@@ -874,7 +959,7 @@ impl Render for Launcher {
                     .h(rems(0.5))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
             )
-            .when(self.details.is_some(), |d| {
+            .when(self.details.is_some() && self.mods.is_none(), |d| {
                 d.when_some(self.download_summary(), |d, label| {
                     d.child(
                         downloads::queue_pill(
@@ -957,6 +1042,14 @@ fn main() {
             appid,
             &args[3].to_string_lossy(),
             std::path::Path::new(&args[5]),
+        );
+        return;
+    }
+    if args.len() == 5 && args[1] == "--steam-mods" {
+        raesir_backend::mods::steam_helper(
+            std::path::Path::new(&args[2]),
+            std::path::Path::new(&args[3]),
+            std::path::Path::new(&args[4]),
         );
         return;
     }

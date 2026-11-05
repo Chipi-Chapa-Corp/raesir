@@ -1,5 +1,8 @@
 Additional filter icons:
 
+- `lucide/puzzle.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/puzzle.svg), ISC, used for mod browsing and modded launch.
+- `lucide/pencil.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/pencil.svg), ISC, used to rename mod profiles.
+
 - `adwaita/wallet-symbolic.svg`: GNOME Icon Development Kit, distributed by
   [Relm4 Icons 0.9.0](https://crates.io/crates/relm4-icons/0.9.0), CC0 (public domain).
   Fill color adjusted to match the existing symbolic icons.

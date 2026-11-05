@@ -82,6 +82,7 @@ pub fn entry(
         uninstall: None,
         source: source.into(),
         is_game: None,
+        mods: None,
     }
 }
 

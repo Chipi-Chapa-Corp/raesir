@@ -50,6 +50,35 @@ and hot reload's reusable dependencies are preserved, so the budget can temporar
 be exceeded while builds are active. Preview maintenance with
 `python3 scripts/prune-target.py --dry-run` or run it immediately with `--force`.
 
+## Thunderstore mods
+
+Supported games have a **Mods** bubble on their details page. Browse a virtualized
+card grid with cached mod icons. The header switches to mod search, profile selection,
+and All / Installed / Not installed filters. Click a card to open its details inside
+Raesir and install it with its dependencies. This uses public, key-free Thunderstore APIs and
+[thunderstore-engine](https://github.com/endoze/thunderstore-engine); games match the
+upstream store identifiers rather than title guesses.
+
+Select mod profiles from the profile menu, with pencil/trash controls on each row.
+The adjacent plus pill creates a profile. Each profile has its own mod set.
+Mod cards keep square icons and open a details page inside Raesir, using the same
+layout as game pages. **Launch modded** appears beside Play
+on the details page and library cards when a local installation has enabled mods.
+Steam’s normal Play explicitly disables the loader. Installs publish a complete profile
+revision only after all dependencies succeed, and retain the previous revision.
+Raesir records direct installs separately from automatic dependencies in each
+profile revision. Uninstall confirmation lists automatic dependencies that are
+no longer needed and removes them together. Shared dependencies, dependencies
+needed by disabled mods, and direct installs stay installed. Older installs with
+no recorded reason are kept rather than guessed to be automatic.
+
+On Linux, modded Steam launches use the running Steam client's runtime. Temporary
+launch options preserve existing settings and are restored after exit; loader files
+staged beside the game are backed up and restored, with recovery on the next scan
+after an interruption. Steam client interfaces have compatibility checks;
+unsupported builds leave the game unlaunched. Flatpak Steam profiles stay within Steam's accessible
+data directory without expanding its sandbox permissions.
+
 ## Cover artwork
 
 Raesir uses official store artwork first. For Steam games with missing portraits or

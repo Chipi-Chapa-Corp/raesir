@@ -12,6 +12,7 @@ pub mod game_pass;
 pub mod inventory;
 pub mod linux_support;
 pub mod model;
+pub mod mods;
 pub mod mount;
 pub mod owned;
 pub mod platform;

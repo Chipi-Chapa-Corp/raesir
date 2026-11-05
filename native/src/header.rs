@@ -41,6 +41,18 @@ pub fn pill() -> Div {
         })
 }
 
+pub fn bar() -> Div {
+    div()
+        .absolute()
+        .top(rems(0.7))
+        .left(rems(1.1))
+        .right(rems(1.1))
+        .h(rems(2.9))
+        .flex()
+        .items_start()
+        .justify_between()
+}
+
 pub fn spinner(id: &'static str, size: f32) -> AnyElement {
     spinner_colored(id, size, 0xf0f0f0)
 }
@@ -184,15 +196,7 @@ impl Render for Header {
             .min((right - search_width).max(left));
         let search_focus = self.search.focus_handle(cx);
         let search_active = search_focus.is_focused(window);
-        div()
-            .absolute()
-            .top(rems(0.7))
-            .left(rems(1.1))
-            .right(rems(1.1))
-            .h(rems(2.9))
-            .flex()
-            .items_start()
-            .justify_between()
+        bar()
             .child(
                 div()
                     .flex()

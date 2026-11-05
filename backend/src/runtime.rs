@@ -19,11 +19,7 @@ pub fn wine(prefix: &Location, exe: &Path, args: Vec<String>) -> Option<GameActi
             .ancestors()
             .find(|p| p.file_name().is_some_and(|s| s == "steamapps"))
     {
-        steam_root = platform::local_sources()
-            .into_iter()
-            .map(|s| PathBuf::from(s.path))
-            .find(|p| p.join("linux64/steamclient.so").is_file())
-            .or_else(|| apps.parent().map(Path::to_path_buf));
+        steam_root = steam_client_root(apps);
         proton = remembered_proton(&prefix.path).or_else(|| {
             discovery::children(&apps.join("common"))
                 .into_iter()
@@ -116,6 +112,27 @@ pub fn wine(prefix: &Location, exe: &Path, args: Vec<String>) -> Option<GameActi
         env.insert("WINEPREFIX".into(), prefix.path.to_string_lossy().into());
     }
     Some(action)
+}
+
+pub(crate) fn steam_client_root(apps: &Path) -> Option<PathBuf> {
+    let canonical_apps = apps.canonicalize().ok()?;
+    apps.parent()
+        .filter(|p| p.join("linux64/steamclient.so").is_file())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            platform::local_sources()
+                .into_iter()
+                .map(|s| PathBuf::from(s.path))
+                .find(|p| {
+                    crate::steam_control::libraries(p)
+                        .iter()
+                        .any(|(_, library)| {
+                            library.join("steamapps").canonicalize().ok().as_ref()
+                                == Some(&canonical_apps)
+                        })
+                })
+        })
+        .or_else(|| apps.parent().map(Path::to_path_buf))
 }
 
 pub fn matches(prefix: &Location, game: &LibraryGame, report: &Report) -> bool {

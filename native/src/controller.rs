@@ -21,7 +21,7 @@ impl Launcher {
         }));
     }
 
-    fn apply_report(&mut self, report: Arc<Report>, cx: &mut Context<Self>) {
+    pub(crate) fn apply_report(&mut self, report: Arc<Report>, cx: &mut Context<Self>) {
         if self.closing {
             return;
         }
@@ -230,7 +230,7 @@ impl Launcher {
         if self.closing || self.pending_action.is_some() {
             return;
         }
-        if matches!(kind, "launch" | "install" | "uninstall")
+        if matches!(kind, "launch" | "launch-modded" | "install" | "uninstall")
             && self
                 .steam_operations
                 .get(&key)
@@ -283,6 +283,7 @@ impl Launcher {
                 .spawn(async move { backend.action(&key, kind) })
                 .await;
             let refresh = result.is_ok() && kind == "uninstall" && steam_operation.is_none();
+            let modded = result.is_ok() && kind == "launch-modded";
             this.update(cx, |this, cx| {
                 this.pending_action = None;
                 if steam_operation.is_some() {
@@ -295,6 +296,9 @@ impl Launcher {
                         Ok(message) if !message.starts_with("Sent to ") => this.notice(message, cx),
                         _ => {}
                     }
+                }
+                if modded {
+                    this.watch_modded(cx);
                 }
                 cx.notify();
             })
@@ -316,6 +320,42 @@ impl Launcher {
                 page.library_changed(&self.games, progress, cx)
             });
         }
+    }
+
+    fn watch_modded(&mut self, cx: &mut Context<Self>) {
+        if self.mods_watching || self.closing {
+            return;
+        }
+        self.mods_watching = true;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let refresh = backend.clone();
+            if let Ok(report) = cx
+                .background_executor()
+                .spawn(async move { refresh.refresh_mods() })
+                .await
+            {
+                this.update(cx, |this, cx| this.apply_report(report, cx))
+                    .ok();
+            }
+            loop {
+                cx.background_executor().timer(millis(1000)).await;
+                let (active, errors) = backend.mod_launch_progress();
+                let keep = this
+                    .update(cx, |this, cx| {
+                        for error in errors {
+                            this.notice(error, cx);
+                        }
+                        this.mods_watching = active && !this.closing;
+                        this.mods_watching
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn watch_steam(&mut self, cx: &mut Context<Self>) {

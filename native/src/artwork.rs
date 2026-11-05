@@ -67,14 +67,18 @@ pub struct Cache {
 }
 
 impl Cache {
-    fn get(&mut self, key: &str) -> Option<Ready> {
+    pub(crate) fn peek(&self, key: &str) -> Option<Ready> {
+        self.entries.get(key).cloned()
+    }
+
+    pub(crate) fn get(&mut self, key: &str) -> Option<Ready> {
         let ready = self.entries.get(key)?.clone();
         self.recent.retain(|item| item != key);
         self.recent.push_back(key.to_owned());
         self.memory_hits += 1;
         Some(ready)
     }
-    fn insert(&mut self, key: String, ready: Ready) {
+    pub(crate) fn insert(&mut self, key: String, ready: Ready) {
         if let Some(old) = self.entries.remove(&key) {
             self.retire(old);
         }
@@ -84,7 +88,7 @@ impl Cache {
         self.recent.push_back(key);
         self.trim_to(HOT_BYTES);
     }
-    fn trim_to(&mut self, budget: usize) {
+    pub(crate) fn trim_to(&mut self, budget: usize) {
         while self.bytes > budget {
             let Some(key) = self.recent.pop_front() else {
                 break;
@@ -99,7 +103,7 @@ impl Cache {
         self.retired
             .extend([ready.poster, ready.card, ready.background]);
     }
-    fn release_textures(&mut self, window: &mut Window) {
+    pub(crate) fn release_textures(&mut self, window: &mut Window) {
         self.retired.retain(|image| {
             if Arc::strong_count(image) > 1 {
                 return true;
@@ -107,6 +111,27 @@ impl Cache {
             let _ = window.drop_image(image.clone());
             false
         });
+    }
+}
+
+pub(crate) fn load_cancelable(
+    backend: &Backend,
+    game: &LibraryGame,
+    cancel: &AtomicBool,
+) -> Result<Ready, String> {
+    let (ready, persist) = prepare(backend, game, cancel)?;
+    if let Some(persist) = persist {
+        queue_persist(persist);
+    }
+    Ok(ready)
+}
+
+impl Cache {
+    pub(crate) fn clear(&mut self, window: &mut Window) {
+        self.trim_to(0);
+        for image in self.retired.drain(..) {
+            let _ = window.drop_image(image);
+        }
     }
 }
 

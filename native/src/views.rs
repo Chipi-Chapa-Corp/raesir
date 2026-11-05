@@ -2,7 +2,10 @@ use crate::{Launcher, header::pill};
 use gpui::{prelude::*, *};
 use raesir_backend::model::Os;
 
-fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+pub(crate) fn text_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
     div()
         .id(id)
         .px(rems(1.))
@@ -27,7 +30,7 @@ impl Launcher {
             .child(
                 div()
                     .w_full()
-                    .h(px(width * 1.5))
+                    .h(px(width * crate::CARD_POSTER_RATIO))
                     .flex_none()
                     .rounded_t(rems(0.8))
                     .bg(rgba(0xffffff1a)),
@@ -36,7 +39,9 @@ impl Launcher {
                 div()
                     .w_full()
                     .h(rems(crate::CARD_TITLE_HEIGHT))
-                    .mt(px(-width * 1.5 * crate::CARD_TITLE_OVERLAP))
+                    .mt(px(-width
+                        * crate::CARD_POSTER_RATIO
+                        * crate::CARD_TITLE_OVERLAP))
                     .flex_none()
                     .flex()
                     .items_center()

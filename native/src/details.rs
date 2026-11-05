@@ -25,6 +25,8 @@ const REVIEW_FILTERS: [[&str; 3]; 2] = [
 
 pub struct DetailsPage {
     game: LibraryGame,
+    mod_context: Option<ModContext>,
+    _mod_subscription: Option<Subscription>,
     steam_progress: Option<raesir_backend::steam_control::Progress>,
     poster: Option<Arc<RenderImage>>,
     backdrop: Entity<crate::backdrop::Backdrop>,
@@ -71,7 +73,188 @@ pub struct DetailsPage {
     frame_pending: bool,
     cleanup_registered: bool,
 }
-fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+
+#[derive(Clone)]
+pub(crate) struct ModContext {
+    pub browser: WeakEntity<crate::mods::ModBrowser>,
+    pub id: String,
+    pub version: String,
+}
+
+impl DetailsPage {
+    fn new(
+        source: LibraryGame,
+        poster: Option<Arc<RenderImage>>,
+        backdrop: Entity<crate::backdrop::Backdrop>,
+        backend: Arc<Backend>,
+        owner: WeakEntity<Launcher>,
+        return_focus: FocusHandle,
+        steam_progress: Option<raesir_backend::steam_control::Progress>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            game: source,
+            steam_progress,
+            poster,
+            backdrop,
+            backdrop_source: String::new(),
+            backdrop_ready: false,
+            backdrop_task: None,
+            backend,
+            owner,
+            data: None,
+            loading: true,
+            error: None,
+            task: None,
+            stats: None,
+            stats_task: None,
+            stats_loading: true,
+            achievements_open: false,
+            hidden_achievements_expanded: false,
+            achievement_rows: ListState::new(0, ListAlignment::Top, px(200.)),
+            achievement_order: Vec::new(),
+            achievement_preview_slots: 1,
+            achievement_focus: cx.focus_handle(),
+            achievement_wheel: SmoothWheel::default(),
+            achievement_frame_pending: false,
+            images: HashMap::new(),
+            pending: HashSet::new(),
+            failed: HashSet::new(),
+            animations: HashMap::new(),
+            selected: 0,
+            reviews_visible: 4,
+            player: None,
+            player_events: None,
+            fullscreen: false,
+            scroll: ScrollHandle::new(),
+            media_scroll: ScrollHandle::new(),
+            strip_bounds: Rc::new(Cell::new(Bounds::default())),
+            about_expanded: false,
+            review_date: 0,
+            review_rating: 0,
+            filter_menu: None,
+            filter_bounds: std::array::from_fn(|_| Rc::new(Cell::new(Bounds::default()))),
+            filter_focus: cx.focus_handle(),
+            return_focus,
+            wheel: SmoothWheel::default(),
+            frame_pending: false,
+            cleanup_registered: false,
+            mod_context: None,
+            _mod_subscription: None,
+        }
+    }
+
+    pub(crate) fn for_mod(
+        source: LibraryGame,
+        data: Details,
+        poster: Option<Arc<RenderImage>>,
+        backdrop: Entity<crate::backdrop::Backdrop>,
+        backend: Arc<Backend>,
+        owner: WeakEntity<Launcher>,
+        return_focus: FocusHandle,
+        context: ModContext,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let browser = context.browser.upgrade();
+        let mut page = Self::new(
+            source,
+            poster,
+            backdrop,
+            backend,
+            owner,
+            return_focus,
+            None,
+            cx,
+        );
+        page.mod_context = Some(context);
+        page.data = Some(Arc::new(data));
+        page.loading = false;
+        page.stats_loading = false;
+        page._mod_subscription = browser.map(|browser| {
+            cx.observe(&browser, |this, browser, cx| {
+                if let Some(context) = &this.mod_context {
+                    this.poster = browser.read(cx).mod_poster(&context.id);
+                }
+                cx.notify();
+            })
+        });
+        page
+    }
+
+    pub(crate) fn load_mod(&mut self, game: LibraryGame, id: String, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        self.loading = true;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { backend.mod_details(&game, &id) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(data) => this.data = Some(Arc::new(data)),
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn mod_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(context) = &self.mod_context else {
+            return div().into_any_element();
+        };
+        let Some(browser) = context.browser.upgrade() else {
+            return div().into_any_element();
+        };
+        let (installed, busy, error) = browser.read(cx).mod_status(&context.id);
+        let id = context.id.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(rems(0.65))
+            .child(bubble().child(format!("Version {}", context.version)))
+            .child(if busy {
+                crate::header::button_shell("details-mod-busy", false)
+                    .size(rems(3.3))
+                    .bg(rgba(0x101010b8))
+                    .child(spinner("mod-page-install", 1.25))
+                    .into_any_element()
+            } else {
+                action_button(
+                    "details-mod-action",
+                    if installed { "trash" } else { "install" },
+                    if installed {
+                        "Uninstall"
+                    } else {
+                        "Install mod and dependencies"
+                    },
+                )
+                .size(rems(3.3))
+                .on_click(move |_, _, cx| {
+                    browser.update(cx, |browser, cx| {
+                        browser.request_mod_change(id.clone(), installed, cx)
+                    });
+                })
+                .into_any_element()
+            })
+            .when_some(error, |d, error| {
+                d.child(
+                    div()
+                        .text_size(rems(0.95))
+                        .text_color(rgb(0xe6c58d))
+                        .child(error),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+pub(crate) fn text_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
     div()
         .id(id)
         .rounded_full()
@@ -352,53 +535,18 @@ impl Launcher {
             backdrop.update(cx, |backdrop, cx| backdrop.retarget(image, cx));
         }
         let return_focus = self.focus.clone();
-        let page = cx.new(|cx| DetailsPage {
-            game: source,
-            steam_progress: self.display_progress(key),
-            poster,
-            backdrop,
-            backdrop_source: String::new(),
-            backdrop_ready: false,
-            backdrop_task: None,
-            backend,
-            owner,
-            data: None,
-            loading: true,
-            error: None,
-            task: None,
-            stats: None,
-            stats_task: None,
-            stats_loading: true,
-            achievements_open: false,
-            hidden_achievements_expanded: false,
-            achievement_rows: ListState::new(0, ListAlignment::Top, px(200.)),
-            achievement_order: Vec::new(),
-            achievement_preview_slots: 1,
-            achievement_focus: cx.focus_handle(),
-            achievement_wheel: SmoothWheel::default(),
-            achievement_frame_pending: false,
-            images: HashMap::new(),
-            pending: HashSet::new(),
-            failed: HashSet::new(),
-            animations: HashMap::new(),
-            selected: 0,
-            reviews_visible: 4,
-            player: None,
-            player_events: None,
-            fullscreen: false,
-            scroll: ScrollHandle::new(),
-            media_scroll: ScrollHandle::new(),
-            strip_bounds: Rc::new(Cell::new(Bounds::default())),
-            about_expanded: false,
-            review_date: 0,
-            review_rating: 0,
-            filter_menu: None,
-            filter_bounds: std::array::from_fn(|_| Rc::new(Cell::new(Bounds::default()))),
-            filter_focus: cx.focus_handle(),
-            return_focus,
-            wheel: SmoothWheel::default(),
-            frame_pending: false,
-            cleanup_registered: false,
+        let steam_progress = self.display_progress(key);
+        let page = cx.new(|cx| {
+            DetailsPage::new(
+                source,
+                poster,
+                backdrop,
+                backend,
+                owner,
+                return_focus,
+                steam_progress,
+                cx,
+            )
         });
         page.update(cx, |page, cx| {
             page.load(cx);
@@ -1059,14 +1207,28 @@ impl Render for DetailsPage {
         let key = self.game.key.clone();
         let store_key = key.clone();
         let library_key = key.clone();
+        let mod_back = self
+            .mod_context
+            .as_ref()
+            .map(|context| context.browser.clone());
         let back = pill()
             .id("details-back")
             .gap(rems(0.4))
             .px(rems(0.65))
             .cursor_pointer()
             .child(icon("back"))
-            .child("Library")
-            .on_click(move |_, _, cx| {
+            .child(if mod_back.is_some() {
+                "Mods"
+            } else {
+                "Library"
+            })
+            .on_click(move |_, window, cx| {
+                if let Some(browser) = &mod_back {
+                    browser
+                        .update(cx, |browser, cx| browser.close_mod_details(window, cx))
+                        .ok();
+                    return;
+                }
                 owner
                     .update(cx, |this, cx| {
                         this.details = None;
@@ -1106,7 +1268,7 @@ impl Render for DetailsPage {
             div()
                 .relative()
                 .w(rems(12.))
-                .h(rems(18.))
+                .h(rems(if self.mod_context.is_some() { 12. } else { 18. }))
                 .flex_none()
                 .rounded(rems(1.4))
                 .bg(rgba(0x101010b3))
@@ -1150,35 +1312,58 @@ impl Render for DetailsPage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(self.game.title.clone()),
             );
-        let platform = bubble()
-            .id("details-client")
-            .cursor_pointer()
-            .hover(|s| s.bg(rgba(0x303030b3)))
-            .child(icon(client_icon(&self.game.client, &self.game.store)))
-            .child(self.game.client.clone());
-        let client_label = format!("Open in {} library", self.game.client);
-        title = title.child(
-            if self
-                .game
-                .client_os
-                .contains(&raesir_backend::model::Os::host())
-            {
-                platform
-                    .tooltip(move |_, cx| cx.new(|_| DetailTooltip(client_label.clone())).into())
-                    .on_click(move |_, _, cx| {
-                        library_owner
-                            .update(cx, |this, cx| {
-                                this.action(library_key.clone(), "library", cx)
-                            })
-                            .ok();
+        if self.mod_context.is_none() {
+            let platform = bubble()
+                .id("details-client")
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(0x303030b3)))
+                .child(icon(client_icon(&self.game.client, &self.game.store)))
+                .child(self.game.client.clone());
+            let client_label = format!("Open in {} library", self.game.client);
+            title = title.child(
+                if self
+                    .game
+                    .client_os
+                    .contains(&raesir_backend::model::Os::host())
+                {
+                    platform
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| DetailTooltip(client_label.clone())).into()
+                        })
+                        .on_click(move |_, _, cx| {
+                            library_owner
+                                .update(cx, |this, cx| {
+                                    this.action(library_key.clone(), "library", cx)
+                                })
+                                .ok();
+                        })
+                } else {
+                    platform.opacity(0.6).cursor_default().tooltip(|_, cx| {
+                        cx.new(|_| DetailTooltip("Client library is on another OS".into()))
+                            .into()
                     })
-            } else {
-                platform.opacity(0.6).cursor_default().tooltip(|_, cx| {
-                    cx.new(|_| DetailTooltip("Client library is on another OS".into()))
-                        .into()
-                })
-            },
-        );
+                },
+            );
+        } else {
+            title = title.child(bubble().child(icon("mods")).child("Thunderstore"));
+        }
+        if self.game.mods.is_some() {
+            let owner = self.owner.clone();
+            let key = self.game.key.clone();
+            title = title.child(
+                bubble()
+                    .id("details-mods")
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(0x303030b3)))
+                    .child(icon("mods"))
+                    .child("Mods")
+                    .on_click(move |_, window, cx| {
+                        owner
+                            .update(cx, |owner, cx| owner.open_mods(&key, window, cx))
+                            .ok();
+                    }),
+            );
+        }
         let store_url = info.as_ref().and_then(|v| v.store_url.clone());
         if self.game.store_page.is_some() || store_url.is_some() {
             title = title.child(
@@ -1197,81 +1382,102 @@ impl Render for DetailsPage {
                     }),
             );
         }
-        let installable = raesir_backend::actions::can_install(&self.game);
-        let working = self
-            .steam_progress
-            .as_ref()
-            .filter(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
-        let primary_action = if installable { "install" } else { "launch" };
-        let primary_tip = working.map(|p| p.label()).unwrap_or_else(|| {
-            if installable {
-                self.game
-                    .install
-                    .as_ref()
-                    .and_then(|a| a.note.clone())
-                    .unwrap_or_else(|| "Install".into())
-            } else {
-                "Play".into()
-            }
-        });
-        let uninstall_owner = self.owner.clone();
-        let uninstall_key = self.game.key.clone();
-        if raesir_backend::catalog::local(&self.game.installations)
-            && self.game.uninstall.is_some()
-            && working.is_none()
-        {
-            title = title.child(
-                action_button("details-uninstall", "trash", "Uninstall")
-                    .size(rems(3.3))
-                    .on_click(move |_, _, cx| {
-                        uninstall_owner
-                            .update(cx, |this, cx| {
-                                this.action(uninstall_key.clone(), "uninstall", cx)
-                            })
-                            .ok();
-                    }),
-            );
-        }
-        title = title.when(
-            installable || self.game.launch.is_some() || working.is_some(),
-            |d| {
-                d.child(
-                    crate::header::button_shell("details-primary-action", false)
+        if self.mod_context.is_none() {
+            let installable = raesir_backend::actions::can_install(&self.game);
+            let working = self
+                .steam_progress
+                .as_ref()
+                .filter(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+            let primary_action = if installable { "install" } else { "launch" };
+            let primary_tip = working.map(|p| p.label()).unwrap_or_else(|| {
+                if installable {
+                    self.game
+                        .install
+                        .as_ref()
+                        .and_then(|a| a.note.clone())
+                        .unwrap_or_else(|| "Install".into())
+                } else {
+                    "Play".into()
+                }
+            });
+            let uninstall_owner = self.owner.clone();
+            let uninstall_key = self.game.key.clone();
+            if raesir_backend::catalog::local(&self.game.installations)
+                && self.game.uninstall.is_some()
+                && working.is_none()
+            {
+                title = title.child(
+                    action_button("details-uninstall", "trash", "Uninstall")
                         .size(rems(3.3))
-                        .bg(rgba(0x101010b8))
-                        .hover(|s| s.bg(rgba(0x303030b3)))
-                        .child(if working.is_some() {
-                            spinner("details-install-spin", 1.25).into_any_element()
-                        } else {
-                            icon(if installable { "install" } else { "play" })
-                                .text_color(rgb(0xf0f8f3))
-                                .into_any_element()
-                        })
-                        .tooltip(move |_, cx| cx.new(|_| DetailTooltip(primary_tip.clone())).into())
-                        .when_some(
-                            working
-                                .map(crate::downloads::button_label)
-                                .filter(|s| !s.is_empty()),
-                            |d, label| d.w_auto().px(rems(1.)).gap(rems(0.5)).child(label),
-                        )
                         .on_click(move |_, _, cx| {
-                            action_owner
+                            uninstall_owner
                                 .update(cx, |this, cx| {
-                                    if this.display_progress(&key).is_some_and(|p| {
-                                        p.active()
-                                            && p.operation
-                                                == raesir_backend::steam_control::Operation::Install
-                                    }) {
-                                        this.toggle_downloads(cx);
-                                    } else {
-                                        this.action(key.clone(), primary_action, cx);
-                                    }
+                                    this.action(uninstall_key.clone(), "uninstall", cx)
                                 })
                                 .ok();
                         }),
-                )
-            },
-        );
+                );
+            }
+            title = title.when(
+                installable || self.game.launch.is_some() || working.is_some(),
+                |d| {
+                    d.child(
+                        crate::header::button_shell("details-primary-action", false)
+                            .size(rems(3.3))
+                            .bg(rgba(0x101010b8))
+                            .hover(|s| s.bg(rgba(0x303030b3)))
+                            .child(if working.is_some() {
+                                spinner("details-install-spin", 1.25).into_any_element()
+                            } else {
+                                icon(if installable { "install" } else { "play" })
+                                    .text_color(rgb(0xf0f8f3))
+                                    .into_any_element()
+                            })
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| DetailTooltip(primary_tip.clone())).into()
+                            })
+                            .when_some(
+                                working
+                                    .map(crate::downloads::button_label)
+                                    .filter(|s| !s.is_empty()),
+                                |d, label| d.w_auto().px(rems(1.)).gap(rems(0.5)).child(label),
+                            )
+                            .on_click(move |_, _, cx| {
+                                action_owner
+                                    .update(cx, |this, cx| {
+                                        if this.display_progress(&key).is_some_and(|p| {
+                                            p.active()
+                                            && p.operation
+                                                == raesir_backend::steam_control::Operation::Install
+                                        }) {
+                                            this.toggle_downloads(cx);
+                                        } else {
+                                            this.action(key.clone(), primary_action, cx);
+                                        }
+                                    })
+                                    .ok();
+                            }),
+                    )
+                },
+            );
+            if working.is_none() && self.game.mods.as_ref().is_some_and(|m| m.launchable) {
+                let owner = self.owner.clone();
+                let key = self.game.key.clone();
+                title = title.child(
+                    action_button("details-launch-modded", "mods", "Launch modded")
+                        .size(rems(3.3))
+                        .on_click(move |_, _, cx| {
+                            owner
+                                .update(cx, |this, cx| {
+                                    this.action(key.clone(), "launch-modded", cx)
+                                })
+                                .ok();
+                        }),
+                );
+            }
+        } else {
+            title = title.child(self.mod_actions(cx));
+        }
         meta = meta.child(title);
         if let Some(error) = self.steam_progress.as_ref().and_then(|p| p.error) {
             meta = meta.child(
@@ -1421,8 +1627,11 @@ impl Render for DetailsPage {
                     })),
                 ),
             );
-            body = body.child(self.gallery(data, window, cx));
-            body =
+            if self.mod_context.is_none() || !data.media.is_empty() {
+                body = body.child(self.gallery(data, window, cx));
+            }
+            if self.mod_context.is_none() || !data.requirements.is_empty() {
+                body =
                 body.child(
                     panel()
                         .child(heading("System requirements"))
@@ -1483,88 +1692,91 @@ impl Render for DetailsPage {
                                 }),
                         ),
                 );
-            let since =
-                raesir_backend::details::review_cutoff([0, 30, 365][self.review_date as usize]);
-            let recommendation = match self.review_rating {
-                1 => Some(true),
-                2 => Some(false),
-                _ => None,
-            };
-            let matching = data
-                .reviews
-                .iter()
-                .filter(|r| r.matches_filters(&since, recommendation))
-                .collect::<Vec<_>>();
-            let mut reviews = div()
-                .flex()
-                .flex_col()
-                .gap(rems(0.9))
-                .child(self.review_controls(cx));
-            if matching.is_empty() {
-                reviews = reviews.child(panel().child(muted(if data.reviews.is_empty() {
-                    "No written player reviews are available from this store for this edition."
-                } else {
-                    "No reviews match these filters."
-                })));
             }
-            reviews = reviews
-                .children(matching.iter().take(self.reviews_visible).map(|r| {
-                    let mut footer = Vec::new();
-                    if !r.date.is_empty() {
-                        footer.push(r.date.clone());
-                    }
-                    if let Some(hours) = r.hours.filter(|n| n.is_finite() && *n >= 0.) {
-                        let value = format!("{hours:.1}");
-                        footer.push(format!("{} hours played", value.trim_end_matches(".0")));
-                    }
-                    if !r.platform.is_empty() {
-                        footer.push(r.platform.clone());
-                    }
-                    panel()
-                        .p(rems(1.25))
-                        .gap(rems(0.65))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(rems(0.65))
-                                .when_some(r.recommended(), |d, good| {
-                                    d.child(
-                                        icon(if good { "thumb-up" } else { "thumb-down" })
-                                            .text_color(rgb(if good {
-                                                0x65d69a
-                                            } else {
-                                                0xf4787b
-                                            })),
-                                    )
-                                })
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child(
-                                    if r.author.is_empty() {
-                                        "Player".into()
-                                    } else {
-                                        r.author.clone()
-                                    },
-                                )),
+            if self.mod_context.is_none() || !data.reviews.is_empty() {
+                let since =
+                    raesir_backend::details::review_cutoff([0, 30, 365][self.review_date as usize]);
+                let recommendation = match self.review_rating {
+                    1 => Some(true),
+                    2 => Some(false),
+                    _ => None,
+                };
+                let matching = data
+                    .reviews
+                    .iter()
+                    .filter(|r| r.matches_filters(&since, recommendation))
+                    .collect::<Vec<_>>();
+                let mut reviews = div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(0.9))
+                    .child(self.review_controls(cx));
+                if matching.is_empty() {
+                    reviews = reviews.child(panel().child(muted(if data.reviews.is_empty() {
+                        "No written player reviews are available from this store for this edition."
+                    } else {
+                        "No reviews match these filters."
+                    })));
+                }
+                reviews = reviews
+                    .children(matching.iter().take(self.reviews_visible).map(|r| {
+                        let mut footer = Vec::new();
+                        if !r.date.is_empty() {
+                            footer.push(r.date.clone());
+                        }
+                        if let Some(hours) = r.hours.filter(|n| n.is_finite() && *n >= 0.) {
+                            let value = format!("{hours:.1}");
+                            footer.push(format!("{} hours played", value.trim_end_matches(".0")));
+                        }
+                        if !r.platform.is_empty() {
+                            footer.push(r.platform.clone());
+                        }
+                        panel()
+                            .p(rems(1.25))
+                            .gap(rems(0.65))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(rems(0.65))
+                                    .when_some(r.recommended(), |d, good| {
+                                        d.child(
+                                            icon(if good { "thumb-up" } else { "thumb-down" })
+                                                .text_color(rgb(if good {
+                                                    0x65d69a
+                                                } else {
+                                                    0xf4787b
+                                                })),
+                                        )
+                                    })
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).child(
+                                        if r.author.is_empty() {
+                                            "Player".into()
+                                        } else {
+                                            r.author.clone()
+                                        },
+                                    )),
+                            )
+                            .child(review_paragraph(if r.title.is_empty() {
+                                r.text.clone()
+                            } else {
+                                format!("{}\n{}", r.title, r.text)
+                            }))
+                            .when(!footer.is_empty(), |d| d.child(muted(footer.join(" · "))))
+                    }))
+                    .when(matching.len() > self.reviews_visible, |d| {
+                        d.child(
+                            text_button("more-reviews", "Show more reviews")
+                                .self_start()
+                                .child(icon("more"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.reviews_visible += 4;
+                                    cx.notify();
+                                })),
                         )
-                        .child(review_paragraph(if r.title.is_empty() {
-                            r.text.clone()
-                        } else {
-                            format!("{}\n{}", r.title, r.text)
-                        }))
-                        .when(!footer.is_empty(), |d| d.child(muted(footer.join(" · "))))
-                }))
-                .when(matching.len() > self.reviews_visible, |d| {
-                    d.child(
-                        text_button("more-reviews", "Show more reviews")
-                            .self_start()
-                            .child(icon("more"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reviews_visible += 4;
-                                cx.notify();
-                            })),
-                    )
-                });
-            body = body.child(reviews);
+                    });
+                body = body.child(reviews);
+            }
         } else if self.loading {
             body = body.child(content_skeleton());
         }

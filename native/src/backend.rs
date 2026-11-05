@@ -17,6 +17,8 @@ use std::{
 pub struct Backend {
     pub data: PathBuf,
     pub cache: PathBuf,
+    mod_manager: raesir_backend::mods::Manager,
+    mod_launches: Mutex<Vec<raesir_backend::mods::LaunchTask>>,
     fixture: Option<PathBuf>,
     report: RwLock<Option<Arc<Report>>>,
     achievement_icons: Mutex<HashMap<String, Arc<gpui::RenderImage>>>,
@@ -57,21 +59,26 @@ fn merge_steam_progress(live: Option<Progress>, disk: Progress) -> Progress {
 
 impl Backend {
     pub fn new() -> Arc<Self> {
+        let data = std::env::var_os("RAESIR_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::data_dir()
+                    .expect("user data directory")
+                    .join("dev.raesir.launcher")
+            });
+        let cache = std::env::var_os("RAESIR_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::cache_dir()
+                    .expect("user cache directory")
+                    .join("dev.raesir.launcher")
+            });
+        let mod_manager = raesir_backend::mods::Manager::new(&data, &cache);
         Arc::new(Self {
-            data: std::env::var_os("RAESIR_DATA_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    dirs::data_dir()
-                        .expect("user data directory")
-                        .join("dev.raesir.launcher")
-                }),
-            cache: std::env::var_os("RAESIR_CACHE_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    dirs::cache_dir()
-                        .expect("user cache directory")
-                        .join("dev.raesir.launcher")
-                }),
+            data,
+            cache,
+            mod_manager,
+            mod_launches: Mutex::new(Vec::new()),
             fixture: std::env::var_os("RAESIR_LIBRARY_FIXTURE").map(PathBuf::from),
             report: RwLock::new(None),
             achievement_icons: Mutex::new(HashMap::new()),
@@ -99,7 +106,11 @@ impl Backend {
 
     fn set(&self, mut report: Report) -> Arc<Report> {
         if self.fixture.is_none() {
+            report.warnings.extend(self.mod_manager.recover_staging());
             self.steam_actions(&mut report);
+        }
+        for game in &mut report.catalog {
+            game.mods = self.mod_manager.summary(game);
         }
         let mut current = self.report.write().unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = current.as_ref() {
@@ -232,7 +243,10 @@ impl Backend {
 
     pub fn action(&self, key: &str, kind: &str) -> Result<String, String> {
         self.ready()?;
-        if self.fixture.is_some() {
+        if self.fixture.is_some()
+            && !(matches!(kind, "launch" | "launch-modded")
+                && raesir_backend::mods::diagnostic_launch_enabled())
+        {
             return Err("Client actions are disabled in the fixture profile".into());
         }
         let report = self
@@ -241,6 +255,40 @@ impl Backend {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or("Library is still loading")?;
+        if matches!(kind, "launch" | "launch-modded") {
+            let game = report
+                .catalog
+                .iter()
+                .find(|g| g.key == key)
+                .ok_or("Game is no longer in the library")?;
+            let test_args =
+                if self.fixture.is_some() && raesir_backend::mods::diagnostic_launch_enabled() {
+                    mod_test_args()?
+                } else {
+                    Vec::new()
+                };
+            if kind == "launch-modded"
+                || self.fixture.is_some() && raesir_backend::mods::diagnostic_launch_enabled()
+            {
+                let launch = if kind == "launch-modded" {
+                    self.mod_manager.launch_modded(&report, game, &test_args)?
+                } else {
+                    self.mod_manager.launch_vanilla(&report, game, &test_args)?
+                };
+                self.mod_launches
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(launch);
+                return Ok("Sent to modded game".into());
+            }
+            self.mod_manager.restore_for_game(game)?;
+            if game.store == "steam" {
+                let args = self.mod_manager.vanilla_args(game)?;
+                if !args.is_empty() {
+                    return actions::launch_with_args(&report, key, &args);
+                }
+            }
+        }
         let action = actions::resolve(&report, key, kind)?;
         if let ActionTarget::Steam {
             root,
@@ -478,6 +526,106 @@ impl Backend {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|_, job| job.progress.phase != Phase::Complete);
+    }
+
+    pub fn mod_catalog(
+        &self,
+        game: &LibraryGame,
+        refresh: bool,
+    ) -> Result<raesir_backend::mods::Snapshot, String> {
+        self.ready()?;
+        self.mod_manager.snapshot(game, refresh)
+    }
+
+    pub fn mod_launch_progress(&self) -> (bool, Vec<String>) {
+        let mut jobs = self.mod_launches.lock().unwrap_or_else(|e| e.into_inner());
+        let mut errors = Vec::new();
+        jobs.retain(|job| match job.poll() {
+            None => true,
+            Some(result) => {
+                if let Err(error) = result {
+                    errors.push(error);
+                }
+                false
+            }
+        });
+        (!jobs.is_empty(), errors)
+    }
+
+    pub fn install_mod(
+        &self,
+        game: &LibraryGame,
+        package: &str,
+    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+        self.ready()?;
+        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+            return Err("Mod installation is disabled in this fixture profile".into());
+        }
+        let snapshot = self.mod_manager.install(game, package)?;
+        Ok((snapshot, self.refresh_mods()?))
+    }
+
+    pub fn choose_mod_profile(
+        &self,
+        game: &LibraryGame,
+        profile: &str,
+    ) -> Result<Arc<Report>, String> {
+        self.ready()?;
+        self.mod_manager.select(game, profile)?;
+        self.refresh_mods()
+    }
+
+    pub fn mod_details(
+        &self,
+        game: &LibraryGame,
+        package: &str,
+    ) -> Result<raesir_backend::details::Details, String> {
+        self.ready()?;
+        self.mod_manager.details(game, package)
+    }
+
+    pub fn uninstall_mod(
+        &self,
+        game: &LibraryGame,
+        package: &str,
+    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+        self.ready()?;
+        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+            return Err("Mod changes are disabled in this fixture profile".into());
+        }
+        let snapshot = self.mod_manager.uninstall(game, package)?;
+        Ok((snapshot, self.refresh_mods()?))
+    }
+
+    pub fn edit_mod_profile(
+        &self,
+        game: &LibraryGame,
+        operation: &str,
+        id: &str,
+        name: &str,
+    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+        self.ready()?;
+        match operation {
+            "create" => self.mod_manager.create_profile(game, name)?,
+            "rename" => self.mod_manager.rename_profile(game, id, name)?,
+            "delete" => self.mod_manager.delete_profile(game, id)?,
+            _ => return Err("Unknown profile action".into()),
+        }
+        Ok((
+            self.mod_manager.snapshot(game, false)?,
+            self.refresh_mods()?,
+        ))
+    }
+
+    pub fn refresh_mods(&self) -> Result<Arc<Report>, String> {
+        self.ready()?;
+        let report = self
+            .report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or("Library is not ready")?;
+        Ok(self.set((*report).clone()))
     }
 
     pub fn artwork_cancelable(
@@ -741,6 +889,14 @@ impl Backend {
     }
 }
 
+fn mod_test_args() -> Result<Vec<String>, String> {
+    // The fixture passes a JSON argv array, avoiding another shell parser.
+    std::env::var("RAESIR_MODS_TEST_ARGS").map_or_else(
+        |_| Ok(Vec::new()),
+        |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +943,7 @@ mod tests {
         let mut backend = Arc::try_unwrap(Backend::new()).ok().unwrap();
         backend.data = dir.join("data");
         backend.cache = dir.join("cache");
+        backend.mod_manager = raesir_backend::mods::Manager::new(&backend.data, &backend.cache);
         let path = dir.join("library.json");
         std::fs::write(
             &path,

@@ -131,6 +131,8 @@ pub struct LibraryGame {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_game: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mods: Option<crate::mods::Summary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

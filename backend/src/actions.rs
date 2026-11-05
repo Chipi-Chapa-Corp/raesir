@@ -9,6 +9,51 @@ pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String>
         .unwrap_or_else(|| format!("Sent to {}", action.client)))
 }
 
+/// Preserve Steam's normal client routing while explicitly disabling a loader
+/// for Play when mods were found in a separate profile or the game directory.
+pub fn launch_with_args(report: &Report, key: &str, args: &[String]) -> Result<String, String> {
+    let mut action = resolve(report, key, "launch")?;
+    let game = report
+        .catalog
+        .iter()
+        .find(|g| g.key == key)
+        .ok_or("Game is no longer in the library")?;
+    if game.store != "steam" || !matches!(action.target, ActionTarget::Url { .. }) {
+        return Err("This client does not support launch arguments".into());
+    }
+    action.target = if cfg!(windows) {
+        let installation = game
+            .installations
+            .iter()
+            .find(|i| i.os == Os::host() && matches!(i.state.as_str(), "installed" | "external"))
+            .ok_or("This game is not installed on this OS")?;
+        let root = crate::runtime::steam_client_root(std::path::Path::new(&installation.library))
+            .ok_or("Could not find Steam")?;
+        let exe = root.join("steam.exe");
+        if !exe.is_file() {
+            return Err("Could not find Steam's executable".into());
+        }
+        let mut argv = vec!["-applaunch".into(), game.id.clone()];
+        argv.extend_from_slice(args);
+        crate::catalog::command("Steam", exe.to_string_lossy().into_owned(), argv).target
+    } else {
+        ActionTarget::Url {
+            url: steam_launch_url(&game.id, args)?,
+        }
+    };
+    dispatch(&action.target)?;
+    Ok("Sent to Steam".into())
+}
+
+fn steam_launch_url(id: &str, args: &[String]) -> Result<String, String> {
+    let args = shlex::try_join(args.iter().map(String::as_str)).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "steam://run/{}//{}/",
+        crate::catalog::encode(id),
+        crate::catalog::encode(&args)
+    ))
+}
+
 pub fn resolve(report: &Report, key: &str, kind: &str) -> Result<GameAction, String> {
     if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
@@ -326,6 +371,26 @@ pub fn support(project: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_launch_url_preserves_argument_boundaries_and_url_delimiters() {
+        let args = vec![
+            "--doorstop-enabled".into(),
+            "false".into(),
+            "path with spaces;and?query#fragment".into(),
+            "quote'and\"literal".into(),
+        ];
+        let url = steam_launch_url("42", &args).unwrap();
+        let encoded = url
+            .strip_prefix("steam://run/42//")
+            .unwrap()
+            .strip_suffix('/')
+            .unwrap();
+        let parsed =
+            reqwest::Url::parse(&format!("https://example.invalid/?argv={encoded}")).unwrap();
+        let decoded = parsed.query_pairs().next().unwrap().1.into_owned();
+        assert_eq!(shlex::split(&decoded).unwrap(), args);
+    }
 
     #[test]
     fn native_steam_action_must_match_the_selected_game_and_operation() {
