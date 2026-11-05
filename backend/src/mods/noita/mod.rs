@@ -8,6 +8,7 @@ mod providers;
 mod session;
 #[cfg(target_os = "linux")]
 mod steam_companion;
+mod updates;
 pub(crate) use session::{disable_for_vanilla, restore_session};
 #[cfg(test)]
 mod tests;
@@ -20,6 +21,21 @@ struct Entry {
     folders: Vec<String>,
     unsafe_mod: bool,
     companion: Option<InstalledTool>,
+    #[serde(default)]
+    source_file: Option<SourceFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SourceFile {
+    id: u64,
+    name: String,
+    kind: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    mod_type: String,
+    revision: String,
+    url: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,69 +112,48 @@ impl Manager {
     pub(super) fn noita_install(&self, game: &LibraryGame, id: &str) -> Result<Snapshot, String> {
         allowed()?;
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let _lease = self.modification_lease(game)?;
         let definition = recipes::for_game(game).ok_or("Unsupported game")?;
-        let (package, path, folder, companion) = if let Some(id) = id.strip_prefix("recipe:") {
-            let recipe = definition
-                .mods
-                .iter()
-                .find(|r| r.id == id)
-                .ok_or("Unknown bundled recipe")?;
-            self.download_recipe(recipe)?
-        } else if let Some(id) = id.strip_prefix("modworkshop:") {
-            let (id, file) = match id.split_once(':') {
-                Some((id, file)) => (
-                    id,
-                    Some(
-                        file.parse::<u64>()
-                            .map_err(|_| "Invalid ModWorkshop file identifier")?,
+        let (package, path, folder, companion, source_file) =
+            if let Some(id) = id.strip_prefix("recipe:") {
+                let recipe = definition
+                    .mods
+                    .iter()
+                    .find(|r| r.id == id)
+                    .ok_or("Unknown bundled recipe")?;
+                self.download_recipe(recipe)?
+            } else if let Some(id) = id.strip_prefix("modworkshop:") {
+                let (id, file) = match id.split_once(':') {
+                    Some((id, file)) => (
+                        id,
+                        Some(
+                            file.parse::<u64>()
+                                .map_err(|_| "Invalid ModWorkshop file identifier")?,
+                        ),
                     ),
-                ),
-                None => (id, None),
+                    None => (id, None),
+                };
+                self.download_modworkshop(definition, id, file)?
+            } else {
+                return Err("Use the Nexus import flow for browser downloads".into());
             };
-            self.download_modworkshop(definition, id, file)?
-        } else {
-            return Err("Use the Nexus import flow for browser downloads".into());
-        };
         let pending = self.noita_pending(game)?;
         let mut entries = read(pending.path())?;
-        let mut entry = unpack_mod(&path, pending.path(), package, &folder, &entries)?;
-        if let Some((archive, executable, arguments)) = companion {
-            let tool = pending
-                .path()
-                .join("tools")
-                .join(&entry.package.id.replace(':', "-"));
-            if tool.exists() {
-                fs::remove_dir_all(&tool).map_err(|e| e.to_string())?;
-            }
-            archive::extract(&archive, &tool)?;
-            let exe = tool.join(&executable);
-            if !exe.is_file() {
-                return Err("The companion archive is missing its declared executable".into());
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))
-                    .map_err(|e| e.to_string())?;
-            }
-            entry.companion = Some(InstalledTool {
-                executable: exe
-                    .strip_prefix(pending.path())
-                    .map_err(|e| e.to_string())?
-                    .to_string_lossy()
-                    .into(),
-                arguments,
-            });
-        }
-        entries.retain(|e| e.package.id != entry.package.id);
-        entries.push(entry);
+        apply_download(
+            pending.path(),
+            &mut entries,
+            (package, path, folder, companion, source_file),
+        )?;
         self.noita_commit(game, pending, &entries)
     }
 
     pub(super) fn noita_uninstall(&self, game: &LibraryGame, id: &str) -> Result<Snapshot, String> {
         allowed()?;
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let _lease = self.modification_lease(game)?;
         let pending = self.noita_pending(game)?;
         let mut entries = read(pending.path())?;
@@ -201,6 +196,8 @@ impl Manager {
             return Err("Choose the archive downloaded from Nexus".into());
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let _lease = self.modification_lease(game)?;
         let pending = self.noita_pending(game)?;
         let mut entries = read(pending.path())?;
@@ -222,6 +219,71 @@ impl Manager {
         entries.push(entry);
         self.noita_commit(game, pending, &entries)
     }
+}
+
+fn apply_download(
+    pending: &Path,
+    entries: &mut Vec<Entry>,
+    download: providers::Download,
+) -> Result<(), String> {
+    let (package, path, folder, companion, source_file) = download;
+    if let Some(old) = entries.iter().find(|e| e.package.id == package.id) {
+        for folder in &old.folders {
+            if !recipes::safe_name(folder)
+                || entries
+                    .iter()
+                    .any(|e| e.package.id != package.id && e.folders.contains(folder))
+            {
+                return Err("Invalid or shared mod folder in the existing profile".into());
+            }
+            let directory = archive::destination(pending, &Path::new("mods").join(folder))?;
+            if directory.exists() {
+                fs::remove_dir_all(directory).map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some(tool) = &old.companion {
+            let executable = archive::destination(pending, Path::new(&tool.executable))?;
+            let directory = executable.parent().ok_or("Invalid companion directory")?;
+            if !directory.starts_with(pending.join("tools")) {
+                return Err("Invalid companion directory".into());
+            }
+            if directory.exists() {
+                fs::remove_dir_all(directory).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    let mut entry = unpack_mod(&path, pending, package, &folder, entries)?;
+    entry.source_file = source_file;
+    if let Some((archive, executable, arguments)) = companion {
+        let tool = pending
+            .join("tools")
+            .join(entry.package.id.replace(':', "-"));
+        if tool.exists() {
+            fs::remove_dir_all(&tool).map_err(|e| e.to_string())?;
+        }
+        archive::extract(&archive, &tool)?;
+        let exe = tool.join(executable);
+        if !exe.is_file() {
+            return Err("The companion archive is missing its declared executable".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))
+                .map_err(|e| e.to_string())?;
+        }
+        entry.companion = Some(InstalledTool {
+            executable: exe
+                .strip_prefix(pending)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into(),
+            arguments,
+        });
+    }
+    entries.retain(|e| e.package.id != entry.package.id);
+    entries.push(entry);
+    Ok(())
 }
 
 fn nexus_id(url: &str, definition: &recipes::Game) -> Result<String, String> {
@@ -348,5 +410,6 @@ fn unpack_mod(
         folders,
         unsafe_mod,
         companion: None,
+        source_file: None,
     })
 }

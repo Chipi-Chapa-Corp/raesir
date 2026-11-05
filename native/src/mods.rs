@@ -300,6 +300,41 @@ impl ModBrowser {
         cx.notify();
     }
 
+    pub(crate) fn refresh_after_updates(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.installing.is_some() || self.dialog.is_some() {
+            return;
+        }
+        let backend = self.backend.clone();
+        let game = self.game.clone();
+        let selected = self.snapshot.as_ref().map(|s| s.selected.clone());
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { backend.mod_catalog(&game, false) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.loading
+                    || this.installing.is_some()
+                    || this.dialog.is_some()
+                    || this.snapshot.as_ref().map(|s| s.selected.clone()) != selected
+                {
+                    return;
+                }
+                if let Ok(snapshot) = snapshot {
+                    let top = this.scroll.0.borrow().base_handle.offset();
+                    this.error = snapshot.warnings.first().cloned();
+                    this.snapshot = Some(snapshot);
+                    this.rebuild_rows(cx);
+                    let mut scroll = this.scroll.0.borrow_mut();
+                    scroll.deferred_scroll_to_item = None;
+                    scroll.base_handle.set_offset(top);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let mut rows = Vec::new();
         if let Some(snapshot) = &self.snapshot {

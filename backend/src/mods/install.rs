@@ -12,6 +12,8 @@ impl Manager {
             return Err("Mod changes are disabled in this diagnostic profile".into());
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let _lease = self.modification_lease(game)?;
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let profiles = self.profiles(slug);
@@ -55,6 +57,8 @@ impl Manager {
             return Err("Mod installation is disabled in this diagnostic profile".into());
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let _lease = game
             .installations
             .iter()
@@ -153,14 +157,18 @@ impl Manager {
     }
 
     pub(super) fn prune_revisions(&self, community: &str) {
-        let current = self.own_path(community);
+        self.prune_profile_revisions(community, &self.selected_id(community));
+    }
+
+    pub(super) fn prune_profile_revisions(&self, community: &str, id: &str) {
+        let current = self.own_profile_path(community, id);
         let mut in_use = Vec::new();
         for dir in fs::read_dir(self.data.join("staged"))
             .into_iter()
             .flatten()
             .flatten()
         {
-            for file in ["receipt.json", "steam.json"] {
+            for file in ["receipt.json", "steam.json", "noita.json"] {
                 if let Ok(bytes) = fs::read(dir.path().join(file))
                     && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
                     && let Some(profile) = value["profile"].as_str()

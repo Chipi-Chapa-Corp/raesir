@@ -537,6 +537,43 @@ impl Backend {
         self.mod_manager.snapshot(game, refresh)
     }
 
+    pub fn mod_auto_updates_enabled(&self) -> bool {
+        let test = cfg!(debug_assertions)
+            && std::env::var_os("RAESIR_MODS_TEST_UPDATES").is_some_and(|v| v == "1");
+        (self.fixture.is_none() || test)
+            && (std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() || test)
+    }
+
+    pub fn auto_update_mods(
+        &self,
+        startup: bool,
+    ) -> Result<Option<(raesir_backend::mods::UpdateReport, Option<Arc<Report>>)>, String> {
+        self.ready()?;
+        if !self.mod_auto_updates_enabled() {
+            return Ok(None);
+        }
+        let Some(report) = self
+            .report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return Ok(None);
+        };
+        let result = self
+            .mod_manager
+            .auto_update(&report.catalog, startup, &self.closing)?;
+        if self.closing.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let report = if result.updated.is_empty() {
+            None
+        } else {
+            Some(self.refresh_mods()?)
+        };
+        Ok(Some((result, report)))
+    }
+
     pub fn mod_launch_progress(&self) -> (bool, Vec<String>) {
         let mut jobs = self.mod_launches.lock().unwrap_or_else(|e| e.into_inner());
         let mut errors = Vec::new();

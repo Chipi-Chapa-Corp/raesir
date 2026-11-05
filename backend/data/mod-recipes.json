@@ -11,10 +11,10 @@
         {
           "id": "entangled-worlds",
           "name": "Noita Entangled Worlds",
-          "icon": "https://raw.githubusercontent.com/IntQuant/noita_entangled_worlds/master/noita_proxy/assets/noita_ew_logo_sq.webp",
+          "icon": "https://raw.githubusercontent.com/ExposedCat/noita_entangled_worlds/master/noita_proxy/assets/noita_ew_logo_sq.webp",
           "description": "Online cooperative multiplayer for Noita. A modded launch opens the matching native networking proxy. Host or join a lobby there, then start Noita from the proxy.",
           "categories": ["Multiplayer"],
-          "repository": "IntQuant/noita_entangled_worlds",
+          "repository": "ExposedCat/noita_entangled_worlds",
           "mod_asset": "quant.ew.zip",
           "folder": "quant.ew",
           "companions": {

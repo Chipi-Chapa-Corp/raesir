@@ -2,15 +2,15 @@ use super::*;
 use thunderstore_engine::profile::layout;
 
 #[derive(Clone, Serialize, Deserialize)]
-struct NamedProfile {
-    id: String,
-    name: String,
+pub(super) struct NamedProfile {
+    pub(super) id: String,
+    pub(super) name: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Registry {
     selected: String,
-    profiles: Vec<NamedProfile>,
+    pub(super) profiles: Vec<NamedProfile>,
 }
 
 impl Default for Registry {
@@ -116,6 +116,8 @@ impl Manager {
 
     pub fn select(&self, game: &LibraryGame, id: &str) -> Result<(), String> {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let mut registry = self.registry(slug)?;
         if !registry.profiles.iter().any(|p| p.id == id) {
@@ -127,6 +129,8 @@ impl Manager {
 
     pub fn create_profile(&self, game: &LibraryGame, name: &str) -> Result<(), String> {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let name = valid_name(name)?;
         let mut registry = self.registry(slug)?;
@@ -162,6 +166,8 @@ impl Manager {
 
     pub fn rename_profile(&self, game: &LibraryGame, id: &str, name: &str) -> Result<(), String> {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let name = valid_name(name)?;
         let mut registry = self.registry(slug)?;
@@ -184,6 +190,8 @@ impl Manager {
 
     pub fn delete_profile(&self, game: &LibraryGame, id: &str) -> Result<(), String> {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease =
+            self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let mut registry = self.registry(slug)?;
         if !registry.profiles.iter().any(|p| p.id == id) {
@@ -221,6 +229,12 @@ impl Manager {
             layout::delete(&self.data, slug, id).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    pub(super) fn profile_lease(&self, slug: &str) -> Result<launch::GameLease, String> {
+        fs::create_dir_all(&self.data).map_err(|e| e.to_string())?;
+        let root = self.data.canonicalize().map_err(|e| e.to_string())?;
+        self.game_lease(&root.join(slug).join(".profile-mutation"))
     }
 
     pub(super) fn modification_lease(

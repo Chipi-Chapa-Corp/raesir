@@ -58,6 +58,7 @@ impl Launcher {
             })
             .collect();
         self.report = Some(report);
+        self.start_mod_updates(cx);
         self.steam_operations = self.backend.current_steam_progress();
         self.update_steam_details(cx);
         self.watch_steam(cx);
@@ -320,6 +321,82 @@ impl Launcher {
                 page.library_changed(&self.games, progress, cx)
             });
         }
+    }
+
+    fn start_mod_updates(&mut self, cx: &mut Context<Self>) {
+        if self.mod_update_task.is_some()
+            || self.closing
+            || !self.backend.mod_auto_updates_enabled()
+        {
+            return;
+        }
+        let backend = self.backend.clone();
+        self.mod_update_task = Some(cx.spawn(async move |this, cx| {
+            let mut startup = true;
+            loop {
+                let worker = backend.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { worker.auto_update_mods(startup) })
+                    .await;
+                startup = false;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if this.closing {
+                            return false;
+                        }
+                        match result {
+                            Ok(Some((result, report))) => {
+                                let changed = !result.updated.is_empty();
+                                if let Some(report) = report {
+                                    this.apply_report(report, cx);
+                                }
+                                let issue = result
+                                    .issues
+                                    .iter()
+                                    .find(|i| i.kind != "deferred")
+                                    .map(|i| i.message.clone());
+                                if changed {
+                                    this.notice(
+                                        format!("{} mod updates installed", result.updated.len()),
+                                        cx,
+                                    );
+                                } else if let Some(issue) = issue
+                                    .as_ref()
+                                    .filter(|i| this.mod_update_notice.as_ref() != Some(i))
+                                {
+                                    this.notice(issue.clone(), cx);
+                                }
+                                if issue.is_some() {
+                                    this.mod_update_notice = issue;
+                                }
+                                if (changed || !result.issues.is_empty())
+                                    && let Some(page) = &this.mods
+                                {
+                                    page.update(cx, |page, cx| page.refresh_after_updates(cx));
+                                }
+                            }
+                            Err(error) => {
+                                if this.mod_update_notice.as_ref() != Some(&error) {
+                                    this.notice(format!("Mod updates: {error}"), cx);
+                                }
+                                this.mod_update_notice = Some(error);
+                            }
+                            _ => {}
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+                // Per-profile timestamps enforce hourly checks. A light timer
+                // retries busy profiles soon after the game/proxy exits.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+            }
+        }));
     }
 
     fn watch_modded(&mut self, cx: &mut Context<Self>) {

@@ -67,6 +67,20 @@ from the same public GitHub release; arbitrary GitHub URLs are not accepted.
 The **Install Mod** card imports an archive downloaded from a Noita Nexus page.
 There is no general local-folder import, and no API keys are required.
 
+Installed mods are checked automatically at startup and hourly while Raesir is
+open, across all Raesir profiles, including inactive profiles and games currently
+uninstalled. Thunderstore, ModWorkshop and bundled recipes update in the
+background. ModWorkshop retains the chosen file variant; old installs with an
+ambiguous variant ask you to choose their file once. Nexus imports continue to
+require a browser download and re-import, and are reported as manual updates.
+
+Updates preserve disabled mods, dependency install reasons, profile selection,
+and companion settings. Downloads do not block Play. A running game or proxy
+defers its update until it closes, with a retry each minute. Failed downloads
+retry after fifteen minutes and keep the current revision. Changes made to a
+profile while an update downloads also defer publication. Update results appear
+in notifications and the mod browser.
+
 Noita archives are validated and installed into profile revisions. ZIP is built
 in; 7z/RAR use the system `libarchive` library. Multiple ModWorkshop files get a
 file-selection popup. Ordinary modded launches use Steam; an Entangled Worlds

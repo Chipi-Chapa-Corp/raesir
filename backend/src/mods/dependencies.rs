@@ -43,6 +43,24 @@ impl Reasons {
         self.automatic.remove(requested);
     }
 
+    pub(super) fn record_update(
+        &mut self,
+        before: &[modlist::ProfileMod],
+        after: &[modlist::ProfileMod],
+    ) {
+        let old = before
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<HashSet<_>>();
+        self.automatic
+            .retain(|id| after.iter().any(|m| &m.name == id));
+        for entry in after {
+            if entry.online_source && !old.contains(entry.name.as_str()) {
+                self.automatic.insert(entry.name.clone());
+            }
+        }
+    }
+
     pub(super) fn forget(&mut self, mods: &[InstalledMod]) {
         for m in mods {
             self.automatic.remove(&m.id);

@@ -8,7 +8,11 @@ A recipe selects exact filenames from a public GitHub release and a Noita mod
 folder. The adapter validates `mod.xml` and stages the archive into that folder.
 `categories` is optional. `companions` is optional for ordinary mod archives;
 when present, its OS entries select an asset, executable and argument array.
-The mod and companion always use the same release tag.
+The mod and companion always use the same release tag. Entangled Worlds targets
+`ExposedCat/noita_entangled_worlds`; its releases must provide `quant.ew.zip`,
+`noita_proxy-linux.zip` and `noita_proxy-win.zip`. A repository change triggers
+an update for existing installations even when the release tag is unchanged.
+Until a complete release is available, the installed revision is kept.
 
 An optional `icon` HTTPS URL supplies the card artwork through the shared
 thumbnail downloader and disk cache. Entangled Worlds uses the square logo from

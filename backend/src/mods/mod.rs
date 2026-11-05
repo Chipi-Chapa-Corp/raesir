@@ -20,8 +20,10 @@ mod noita;
 mod profiles;
 pub mod recipes;
 mod steam;
+mod updates;
 pub use launch::LaunchTask;
 pub use steam::helper as steam_helper;
+pub use updates::{UpdateIssue, UpdateReport};
 
 static ECOSYSTEM: LazyLock<Ecosystem> = LazyLock::new(Ecosystem::bundled);
 
@@ -196,11 +198,12 @@ impl Manager {
             return Err("Mod networking is disabled in this diagnostic profile".into());
         }
         let client = self.client(community)?;
-        let index = Arc::new(
-            runtime()
-                .block_on(client.get_manifest())
-                .map_err(|e| e.to_string())?,
-        );
+        let manifest = if refresh {
+            runtime().block_on(client.refresh_index())
+        } else {
+            runtime().block_on(client.get_manifest())
+        };
+        let index = Arc::new(manifest.map_err(|e| e.to_string())?);
         let mut packages = (0..index.len())
             .filter_map(|i| {
                 let package = index.get_package_at(i)?;
@@ -304,7 +307,11 @@ impl Manager {
 
     fn revisions_dir(&self, game: &LibraryGame) -> Result<PathBuf, String> {
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
-        let id = self.selected_id(slug);
+        self.revisions_dir_for(game, &self.selected_id(slug))
+    }
+
+    fn revisions_dir_for(&self, game: &LibraryGame, id: &str) -> Result<PathBuf, String> {
+        let slug = community(game).ok_or("Unsupported mod community")?;
         // Flatpak Steam cannot read another application's private data directory.
         // Keep its profiles inside its own data root, without broadening sandbox
         // permissions or copying plugins into the game's installation.
@@ -355,11 +362,12 @@ impl Manager {
     pub fn snapshot(&self, game: &LibraryGame, refresh: bool) -> Result<Snapshot, String> {
         let community = community(game).ok_or("Thunderstore does not list this game")?;
         self.registry(community)?;
-        let (packages, warnings) = if recipes::for_game(game).is_some() {
+        let (packages, mut warnings) = if recipes::for_game(game).is_some() {
             self.noita_catalog(game, refresh)?
         } else {
             (self.catalog(community, refresh)?.1, Vec::new())
         };
+        warnings.extend(self.update_warnings(game));
         let profiles = self.profiles(community);
         let selected = self
             .selected(community, &profiles)

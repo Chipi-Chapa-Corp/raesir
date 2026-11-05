@@ -677,6 +677,7 @@ mod tests {
                 package,
                 folders: vec!["testmod".into()],
                 unsafe_mod: true,
+                source_file: None,
                 companion: Some(InstalledTool {
                     executable: "tools/test/proxy".into(),
                     arguments: vec![

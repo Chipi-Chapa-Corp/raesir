@@ -1,5 +1,12 @@
 use super::*;
 type CompanionDownload = Option<(PathBuf, String, Vec<String>)>;
+pub(super) type Download = (
+    Package,
+    PathBuf,
+    String,
+    CompanionDownload,
+    Option<SourceFile>,
+);
 
 fn http() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
@@ -11,7 +18,15 @@ fn http() -> Result<reqwest::blocking::Client, String> {
 }
 
 impl Manager {
-    fn provider_json(&self, url: &str, refresh: bool) -> Result<Value, String> {
+    pub(super) fn provider_json(&self, url: &str, refresh: bool) -> Result<Value, String> {
+        self.provider_json_inner(url, refresh, true)
+    }
+
+    pub(in crate::mods) fn refresh_provider_json(&self, url: &str) -> Result<Value, String> {
+        self.provider_json_inner(url, true, false)
+    }
+
+    fn provider_json_inner(&self, url: &str, refresh: bool, stale: bool) -> Result<Value, String> {
         let path = self
             .cache
             .join("providers")
@@ -52,17 +67,32 @@ impl Manager {
             crate::storage::write_json(&path, &value)?;
             Ok(value)
         };
-        fetch().or_else(|error| cached().ok_or(error))
+        fetch().or_else(|error| {
+            if stale {
+                cached().ok_or(error)
+            } else {
+                Err(error)
+            }
+        })
     }
 
     fn download(&self, url: &str) -> Result<PathBuf, String> {
+        self.download_versioned(url, "")
+    }
+
+    fn download_versioned(&self, url: &str, revision: &str) -> Result<PathBuf, String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
         if parsed.scheme() != "https" {
             return Err("Mod downloads require HTTPS".into());
         }
         let root = self.cache.join("downloads");
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        let path = root.join(launch::hash(url.as_bytes()));
+        let identity = if revision.is_empty() {
+            url.to_owned()
+        } else {
+            format!("{url}\n{revision}")
+        };
+        let path = root.join(launch::hash(identity.as_bytes()));
         if path.is_file() {
             return Ok(path);
         }
@@ -151,10 +181,7 @@ impl Manager {
         Ok((Arc::new(packages), warnings))
     }
 
-    pub(super) fn download_recipe(
-        &self,
-        recipe: &recipes::Recipe,
-    ) -> Result<(Package, PathBuf, String, CompanionDownload), String> {
+    pub(super) fn download_recipe(&self, recipe: &recipes::Recipe) -> Result<Download, String> {
         let host = if cfg!(target_os = "linux") {
             "linux"
         } else if cfg!(target_os = "windows") {
@@ -198,7 +225,7 @@ impl Manager {
             .as_str()
             .ok_or("Release is missing its version")?
             .into();
-        Ok((package, mod_path, recipe.folder.clone(), tool))
+        Ok((package, mod_path, recipe.folder.clone(), tool, None))
     }
 
     pub(super) fn download_modworkshop(
@@ -206,7 +233,7 @@ impl Manager {
         game: &recipes::Game,
         id: &str,
         selected_file: Option<u64>,
-    ) -> Result<(Package, PathBuf, String, CompanionDownload), String> {
+    ) -> Result<Download, String> {
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
             return Err("Invalid ModWorkshop identifier".into());
         }
@@ -250,7 +277,22 @@ impl Manager {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("File {}", file["id"]));
         let folder = file["name"].as_str().unwrap_or("").to_owned();
-        Ok((package, self.download(url)?, folder, None))
+        let source = SourceFile {
+            id: file["id"].as_u64().ok_or("Missing file ID")?,
+            name: file["name"].as_str().unwrap_or("").into(),
+            kind: file["type"].as_str().unwrap_or("").into(),
+            label: file["label"].as_str().unwrap_or("").into(),
+            mod_type: file["mod_type"].as_str().unwrap_or("").into(),
+            revision: file["updated_at"].as_str().unwrap_or("").into(),
+            url: url.into(),
+        };
+        Ok((
+            package,
+            self.download_versioned(url, &source.revision)?,
+            folder,
+            None,
+            Some(source),
+        ))
     }
 
     pub fn mod_files(&self, game: &LibraryGame, id: &str) -> Result<Vec<ModFile>, String> {
@@ -316,7 +358,11 @@ impl Manager {
         if let Some(path) = self.own_path(&definition.id)
             && let Some(entry) = read(&path)?.into_iter().find(|e| e.package.id == id)
         {
-            package = Some(entry.package);
+            if let Some(current) = package.as_mut() {
+                current.version = entry.package.version;
+            } else {
+                package = Some(entry.package);
+            }
         }
         let p = package.ok_or("This mod is no longer available")?;
         let markdown = markdown.unwrap_or_else(|| p.description.clone());
