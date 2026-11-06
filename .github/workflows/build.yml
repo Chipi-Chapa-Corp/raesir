@@ -1,0 +1,260 @@
+name: Build distributables
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libssl-dev dbus-daemon
+
+      - name: Check package and tag versions
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, tomllib, xml.etree.ElementTree as ET
+          with open('native/Cargo.toml', 'rb') as source:
+              version = tomllib.load(source)['package']['version']
+          metadata = ET.parse('build/dev.raesir.launcher.metainfo.xml')
+          assert metadata.find('releases/release').get('version') == version, 'Update the AppStream release version to match native/Cargo.toml'
+          if os.environ['REF'].startswith('refs/tags/v'):
+              assert os.environ['REF_NAME'] == f'v{version}', f'Tag must match native/Cargo.toml version v{version}'
+          PY
+
+      - name: Test backend
+        run: cargo test --locked --package raesir-backend --lib
+
+  windows:
+    name: Windows x64
+    needs: validate
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-rust
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-dav1d
+            mingw-w64-ucrt-x86_64-mpv
+            mingw-w64-ucrt-x86_64-libarchive
+            mingw-w64-ucrt-x86_64-nsis
+
+      - name: Build and verify NSIS installer
+        run: ./scripts/package-windows.sh
+
+      - name: Verify installation
+        shell: pwsh
+        run: |
+          $installer = Join-Path $PWD 'dist/raesir-windows-x64-setup.exe'
+          if (-not (Test-Path $installer)) { throw 'Windows installer was not produced.' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Raesir-install'
+          $process = Start-Process $installer -ArgumentList '/S', "/D=$installDir" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          foreach ($file in 'raesir.exe', 'archive.dll', 'LICENSE', 'Uninstall.exe') {
+            if (-not (Test-Path (Join-Path $installDir $file))) { throw "Missing installed file: $file" }
+          }
+          $output = Join-Path $env:RUNNER_TEMP 'raesir-version.txt'
+          $process = Start-Process (Join-Path $installDir 'raesir.exe') -ArgumentList '--version' -Wait -PassThru -RedirectStandardOutput $output
+          if ($process.ExitCode -ne 0 -or (Get-Content $output) -notmatch '^Raesir \d+\.\d+\.\d+') {
+            throw 'Installed executable did not start correctly.'
+          }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: raesir-windows-x64
+          path: dist/raesir-windows-x64-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+
+  linux:
+    name: Linux x64 Flatpak
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install Flatpak tooling and SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes appstream desktop-file-utils flatpak flatpak-builder ostree
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --assumeyes --noninteractive flathub \
+            org.freedesktop.Platform//25.08 \
+            org.freedesktop.Sdk//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Validate desktop metadata
+        run: |
+          appstreamcli validate --strict --explain build/dev.raesir.launcher.metainfo.xml
+          desktop-file-validate build/dev.raesir.launcher.desktop
+
+      - name: Build Flatpak bundle
+        run: ./scripts/package-flatpak.sh
+
+      - name: Build Flatpak update repository
+        run: ./scripts/package-flatpak-repository.sh
+
+      - name: Verify artifact
+        run: |
+          test -f dist/raesir-linux-x64.flatpak
+          test -f dist/raesir.flatpakrepo
+          test -f dist/flatpak-pages/flatpak/summary
+          test -f dist/flatpak-pages/flatpak/raesir.flatpakref
+          flatpak remote-add --user --no-gpg-verify raesir-build \
+            "file://${GITHUB_WORKSPACE}/dist/flatpak-pages/flatpak"
+          flatpak remote-info --user raesir-build dev.raesir.launcher
+          flatpak install --user --assumeyes --noninteractive --no-deps raesir-build dev.raesir.launcher
+          app_location="$(flatpak info --user --show-location dev.raesir.launcher)"
+          cmp LICENSE "${app_location}/files/share/licenses/dev.raesir.launcher/LICENSE"
+          # No windows, accounts, or game clients are opened by these checks.
+          flatpak run --command=sh dev.raesir.launcher -ec '
+            raesir --version
+            linkage="$(ldd /app/bin/raesir /app/lib/libmpv.so.2)"
+            if printf "%s\n" "$linkage" | grep "not found"; then exit 1; fi
+            test -f /usr/lib/x86_64-linux-gnu/libarchive.so.13
+            test -x /app/bin/flatpak
+          '
+
+      - name: Upload Flatpak artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: raesir-linux-x64
+          path: |
+            dist/raesir-linux-x64.flatpak
+            dist/raesir.flatpakrepo
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Flatpak repository for GitHub Pages
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist/flatpak-pages
+
+  flatpak-pages:
+    name: Publish Flatpak repository
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy Flatpak repository
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, flatpak-pages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download distributables
+        uses: actions/download-artifact@v8
+        with:
+          path: release-artifacts
+          pattern: raesir-*
+          merge-multiple: true
+
+      - name: Verify release contents
+        run: |
+          test -f release-artifacts/raesir-windows-x64-setup.exe
+          test -f release-artifacts/raesir-linux-x64.flatpak
+          test -f release-artifacts/raesir.flatpakrepo
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
+            exit 0
+          fi
+          prerelease_args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+            --generate-notes --title "Raesir ${GITHUB_REF_NAME#v}" "${prerelease_args[@]}"

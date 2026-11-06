@@ -1017,6 +1017,10 @@ impl Render for Launcher {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 2 && matches!(args[1].to_str(), Some("--version" | "-V")) {
+        println!("Raesir {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     #[cfg(feature = "benchmark")]
     if args.len() == 3 && args[1] == "--artwork-probe" {
         let backend = backend::Backend::new();

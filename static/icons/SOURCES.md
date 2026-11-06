@@ -1,5 +1,9 @@
 Additional filter icons:
 
+- `adwaita/input-gaming-symbolic.svg`: GNOME Adwaita Icon Theme, also reused as
+  `build/icon.svg` and rasterized for distributables. See `adwaita/COPYING` for
+  its license and attribution.
+
 - `lucide/puzzle.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/puzzle.svg), ISC, used for mod browsing and modded launch.
 - `lucide/pencil.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/pencil.svg), ISC, used to rename mod profiles.
 

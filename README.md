@@ -29,6 +29,11 @@ Wargaming support reads Game Center's registered installations on Windows, mount
 
 ## Run
 
+Pushes to `main` build a Windows installer and a Linux Flatpak in GitHub Actions.
+Download them from the **Build distributables** run's artifacts. Version tags also
+publish GitHub releases and the Flatpak update repository, following Sele's
+release flow. See [packaging instructions](build/README.md) for local builds.
+
 From the project folder, with Rust installed:
 
 ```sh

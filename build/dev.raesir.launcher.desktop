@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Raesir
+Comment=One library for your games
+Exec=raesir
+Icon=dev.raesir.launcher
+Terminal=false
+Categories=Game;
+Keywords=games;launcher;Steam;mods;
+StartupWMClass=dev.raesir.launcher

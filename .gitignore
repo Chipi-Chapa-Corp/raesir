@@ -1,5 +1,7 @@
 .DS_Store
 /target/
+/dist/
+/.flatpak-builder/
 __pycache__/
 .env
 .env.*

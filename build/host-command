@@ -1,0 +1,3 @@
+#!/bin/sh
+# Game clients live on the host. Preserve arguments, including paths with spaces.
+exec /usr/bin/flatpak-spawn --host "$(basename "$0")" "$@"

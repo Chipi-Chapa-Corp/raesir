@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.raesir.launcher</id>
+  <name>Raesir</name>
+  <summary>One library for your games across launchers</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="com.chipichapa"><name>Chipi Chapa Corp</name></developer>
+  <description>
+    <p>Raesir brings your game libraries together, with search, artwork, game details,
+    and actions through your existing game clients. Browse and manage supported
+    mods with separate profiles for each game.</p>
+    <p>Keep your game clients installed and signed in. Raesir uses host command
+    execution and filesystem access to discover libraries, start clients, and
+    install mods, including games managed by Flatpak Steam.</p>
+  </description>
+  <launchable type="desktop-id">dev.raesir.launcher.desktop</launchable>
+  <provides><binary>raesir</binary></provides>
+  <url type="homepage">https://github.com/Chipi-Chapa-Corp/raesir</url>
+  <url type="bugtracker">https://github.com/Chipi-Chapa-Corp/raesir/issues</url>
+  <url type="vcs-browser">https://github.com/Chipi-Chapa-Corp/raesir</url>
+  <categories><category>Game</category></categories>
+  <keywords><keyword>games</keyword><keyword>launcher</keyword><keyword>mods</keyword></keywords>
+  <supports><control>keyboard</control><control>pointing</control></supports>
+  <content_rating type="oars-1.1" />
+  <releases><release version="0.1.0" date="2026-11-06" /></releases>
+</component>
