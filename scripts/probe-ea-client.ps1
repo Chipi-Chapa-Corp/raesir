@@ -12,7 +12,8 @@ if (-not (Test-Path $exe)) { throw 'EA client was not installed' }
 # so it receives the interface flags on its first process invocation.
 Get-Process EADesktop -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep 2
-$client = Start-Process $exe -ArgumentList '--webDebugEnabled','--webDebugPort=9394' -PassThru
+$env:QTWEBENGINE_REMOTE_DEBUGGING = '9394'
+$client = Start-Process $exe -ArgumentList '--webDebugEnabled','--webDebugPort','9394','--remote-debugging-port=9394' -PassThru
 function WebSocketMessage($Socket, $Value) {
     $bytes = [Text.Encoding]::UTF8.GetBytes(($Value | ConvertTo-Json -Depth 30 -Compress))
     $Socket.SendAsync([ArraySegment[byte]]$bytes,[Net.WebSockets.WebSocketMessageType]::Text,$true,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
@@ -37,6 +38,8 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
     }
     if ($results.port9394) { break }
 }
+$owners = @(Get-Process EADesktop,EACefSubProcess -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -in $owners } | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json | Out-File probe-results/listeners.json
 $results | ConvertTo-Json | Out-File probe-results/ports.json
 if ($results.port4695) {
     $socket = [Net.WebSockets.ClientWebSocket]::new()
@@ -68,7 +71,7 @@ if (-not $results.port4695 -and -not $results.port9394) {
     $logs = Join-Path $env:ProgramData 'EA Desktop/Logs'
     if (Test-Path $logs) {
         Get-ChildItem $logs -Filter EADesktop.log | ForEach-Object {
-            Get-Content $_.FullName | Select-String 'FATAL|Command line|Version:|startup.*error' | ForEach-Object { $_.Line } | Out-File probe-results/startup.txt
+            Get-Content $_.FullName | Select-String 'FATAL|Command line|Version:|startup.*error|[Ee][Rr][Rr][Oo][Rr]|webDebug|[Dd]ebug.*port|[Uu]nrecognized.*option' | ForEach-Object { $_.Line } | Out-File probe-results/startup.txt
         }
     }
     throw 'EA interface did not become available'
