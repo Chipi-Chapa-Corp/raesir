@@ -1,0 +1,19 @@
+name: Probe native client interfaces
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ea:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Inspect the EA client interface without an account
+        shell: pwsh
+        run: ./scripts/probe-ea-client.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ea-client-interface
+          path: probe-results
