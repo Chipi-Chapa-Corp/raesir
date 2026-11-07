@@ -7,10 +7,10 @@ import subprocess
 import sys
 
 destination = pathlib.Path(sys.argv[1])
-target = subprocess.check_output(["rustc", "-vV"], text=True).split("host: ")[1].splitlines()[0]
+target = subprocess.check_output(["rustc", "-vV"], encoding="utf-8").split("host: ")[1].splitlines()[0]
 metadata = json.loads(subprocess.check_output([
     "cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target,
-], text=True))
+], encoding="utf-8"))
 resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
 for package in metadata["packages"]:
     if package["id"] not in resolved or package["source"] is None:
