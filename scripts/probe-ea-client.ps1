@@ -53,6 +53,7 @@ if ($results.port4695) {
     $socket.Dispose()
 }
 if ($results.port9394) {
+    Start-Sleep 10
     $pages = Invoke-RestMethod 'http://127.0.0.1:9394/json/list'
     $index = 0
     foreach ($page in $pages) {
@@ -62,6 +63,9 @@ if ($results.port9394) {
         $expression = 'JSON.stringify({url:location.origin+location.pathname,hasChannel:!!window.webchannel,hasQt:typeof qt,hasTransport:typeof qt!=="undefined"&&!!qt.webChannelTransport,bridgeNames:Object.getOwnPropertyNames(window).filter(k=>/channel|bridge|native|gamesmanager/i.test(k)),objects:window.webchannel?Object.fromEntries(Object.entries(window.webchannel.objects).map(([k,v])=>[k,{methods:Object.keys(v).filter(p=>typeof v[p]==="function"),enums:Object.fromEntries(Object.entries(v).filter(([p,x])=>x&&typeof x==="object"&&Object.values(x).every(y=>typeof y==="number")))}])):{}})'
         $response = WebSocketMessage $socket @{id=1;method='Runtime.evaluate';params=@{expression=$expression;returnByValue=$true;awaitPromise=$true}}
         $response | ConvertTo-Json -Depth 30 | Out-File "probe-results/page-$index.json"
+        $expression = '(async()=>{if(typeof qt==="undefined"||!qt.webChannelTransport)return {available:false};const t=qt.webChannelTransport,old=t.onmessage;return await new Promise(resolve=>{const finish=v=>{t.onmessage=old;resolve(v)};const timer=setTimeout(()=>finish({timeout:true}),4000);t.onmessage=e=>{const v=typeof e.data==="string"?JSON.parse(e.data):e.data;if(v.type===10&&v.id===987654){clearTimeout(timer);finish(Object.fromEntries(Object.entries(v.data).map(([k,x])=>[k,{methods:x.methods,signals:x.signals,enums:x.enums}])))}else if(old)old(e)};t.send(JSON.stringify({type:3,id:987654}))})})()'
+        $response = WebSocketMessage $socket @{id=2;method='Runtime.evaluate';params=@{expression=$expression;returnByValue=$true;awaitPromise=$true}}
+        $response | ConvertTo-Json -Depth 30 | Out-File "probe-results/schema-$index.json"
         $socket.Dispose()
         $index++
     }
