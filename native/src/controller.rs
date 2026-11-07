@@ -502,7 +502,8 @@ impl Launcher {
     pub(crate) fn watch_downloads(&mut self, cx: &mut Context<Self>) {
         if self.downloads_watching
             || self.closing
-            || !self.download_operations.values().any(|p| p.active())
+            || !(self.download_operations.values().any(|p| p.active())
+                || self.backend.watch_client_downloads())
         {
             return;
         }
@@ -556,8 +557,9 @@ impl Launcher {
                 // clears the flag, so a newly queued job always has a watcher.
                 let active = this
                     .update(cx, |this, _| {
-                        let active =
-                            !this.closing && this.download_operations.values().any(|p| p.active());
+                        let active = !this.closing
+                            && (this.download_operations.values().any(|p| p.active())
+                                || this.backend.watch_client_downloads());
                         if !active {
                             this.downloads_watching = false;
                         }

@@ -66,6 +66,21 @@ workers retain progress across Raesir restarts, continue after Raesir closes,
 and coordinate with mod/game leases. A transfer is complete only after the
 client exits successfully and commits its expected installation version.
 
+EA app and Ubisoft Connect expose their native download queues to Raesir on
+Windows and in discovered Linux Wine/Proton profiles, including configured
+Lutris and Bottles runners. Downloads started in either client also appear in
+Raesir. Progress, Pause/Resume, and available game updates use the same cards,
+game pages, and Downloads popup as other transfers. Ubisoft's pause control
+belongs to its active queue, so queued cards cannot pause another game.
+Native installation dialogs still handle directories, languages, and licenses.
+
+Raesir enables the clients' loopback interfaces when opening them and verifies
+the owning executable and prefix before connecting. If a client was already
+running without that interface, quit it once and reopen it through Raesir;
+Raesir never force-restarts it or interrupts its downloads. Keep the clients
+signed in. Unsupported interfaces fail explicitly rather than fabricating
+progress or working controls. No API keys or copied credentials are needed.
+
 Clients without verified direct controls continue to handle their own install
 dialogs. Raesir tracks those requested installs in Downloads until their
 installation metadata confirms completion, and offers **Open in game client**.

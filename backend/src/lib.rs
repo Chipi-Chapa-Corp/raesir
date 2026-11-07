@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod artwork;
 pub mod catalog;
 pub mod client_control;
+pub mod client_downloads;
 pub mod details;
 pub mod discovery;
 pub mod downloads;

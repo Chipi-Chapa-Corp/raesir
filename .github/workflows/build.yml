@@ -55,6 +55,9 @@ jobs:
               assert os.environ['REF_NAME'] == f'v{version}', f'Tag must match native/Cargo.toml version v{version}'
           PY
 
+      - name: Test EA and Ubisoft adapters
+        run: node --test backend/tests/client-downloads.test.cjs
+
       - name: Test backend
         run: cargo test --locked --package raesir-backend --lib
 
@@ -94,6 +97,9 @@ jobs:
             mingw-w64-ucrt-x86_64-mpv
             mingw-w64-ucrt-x86_64-libarchive
             mingw-w64-ucrt-x86_64-nsis
+
+      - name: Test Windows client download peer verification
+        run: cargo test --locked --package raesir-backend client_downloads::peer::tests
 
       - name: Build and verify NSIS installer
         run: ./scripts/package-windows.sh

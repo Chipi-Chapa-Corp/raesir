@@ -33,6 +33,7 @@ pub struct Backend {
     steam_bridge: Mutex<Option<(String, std::time::SystemTime, bool)>>,
     epic: epic_online::Manager,
     downloads: raesir_backend::downloads::Manager,
+    client_downloads: raesir_backend::client_downloads::Manager,
     handoffs: Mutex<HashMap<String, Progress>>,
     handoffs_loaded: OnceLock<()>,
     handoff_scan: Mutex<std::time::Instant>,
@@ -80,6 +81,7 @@ impl Backend {
             });
         let mod_manager = raesir_backend::mods::Manager::new(&data, &cache);
         let downloads = raesir_backend::downloads::Manager::new(&data);
+        let client_downloads = raesir_backend::client_downloads::Manager::new(&data);
         Arc::new(Self {
             data,
             cache,
@@ -99,6 +101,7 @@ impl Backend {
             steam_bridge: Default::default(),
             epic: Default::default(),
             downloads,
+            client_downloads,
             handoffs: Default::default(),
             handoffs_loaded: OnceLock::new(),
             handoff_scan: Mutex::new(std::time::Instant::now()),
@@ -312,6 +315,12 @@ impl Backend {
             return Ok("Update started".into());
         }
         let action = actions::resolve(&report, key, kind)?;
+        if kind == "install"
+            && self.fixture.is_none()
+            && self.client_downloads.install(&report, key)?
+        {
+            return Ok("Installation sent to the game client".into());
+        }
         if kind == "install"
             && let Some(game) = report.catalog.iter().find(|g| g.key == key)
             && let Some(request) = raesir_backend::downloads::install_request(&report, game)
@@ -559,16 +568,36 @@ impl Backend {
         }
     }
 
+    pub fn watch_client_downloads(&self) -> bool {
+        self.fixture.is_none() && self.client_downloads.observing()
+    }
+
     pub fn download_progress(&self) -> HashMap<String, Progress> {
         if self.fixture.is_none() {
             self.downloads.advance_queue();
+            if let Some(report) = self
+                .report
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                self.client_downloads.refresh(&report, false, false);
+                if self.automatic_game_updates() {
+                    self.client_downloads.automatic(&report);
+                }
+            }
         }
         let observing = self
             .handoffs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .any(Progress::active);
+            .any(Progress::active)
+            || self
+                .client_downloads
+                .snapshot()
+                .values()
+                .any(Progress::active);
         let due = {
             let mut last = self.handoff_scan.lock().unwrap_or_else(|e| e.into_inner());
             let due = observing && last.elapsed().as_secs() >= 5;
@@ -635,6 +664,15 @@ impl Backend {
         use steam_control::Error;
         if self.ready().is_err() || self.fixture.is_some() {
             return Err(Error::Unavailable.message().into());
+        }
+        if let Some(report) = self
+            .report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            && self.client_downloads.control(&report, key, resume)?
+        {
+            return Ok(());
         }
         if self.downloads.request(key).is_some() {
             return self.downloads.control(key, resume);
@@ -710,6 +748,7 @@ impl Backend {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
         );
+        progress.extend(self.client_downloads.snapshot());
         if self.fixture.is_some()
             && let Ok(bytes) = std::fs::read(self.data.join("download-progress.json"))
             && let Ok(fixture) = serde_json::from_slice::<HashMap<String, Progress>>(&bytes)
@@ -721,6 +760,7 @@ impl Backend {
 
     pub fn finish_download_jobs(&self) {
         self.downloads.finish();
+        self.client_downloads.finish();
         self.handoffs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -777,6 +817,10 @@ impl Backend {
         };
         self.steam_actions(&mut (*report).clone());
         let mut errors = self.downloads.check_updates(&report, force);
+        errors.extend(
+            self.client_downloads
+                .refresh(&report, true, self.automatic_game_updates()),
+        );
         if self.automatic_game_updates() {
             for (key, progress) in self.current_download_progress() {
                 if progress.operation == Operation::Update && progress.phase == Phase::Available {
@@ -1267,6 +1311,7 @@ mod tests {
         backend.cache = dir.join("cache");
         backend.mod_manager = raesir_backend::mods::Manager::new(&backend.data, &backend.cache);
         backend.downloads = raesir_backend::downloads::Manager::new(&backend.data);
+        backend.client_downloads = raesir_backend::client_downloads::Manager::new(&backend.data);
         let path = dir.join("library.json");
         std::fs::write(
             &path,
