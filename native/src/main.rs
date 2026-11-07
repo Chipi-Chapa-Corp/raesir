@@ -52,13 +52,16 @@ struct Launcher {
     _activation: Subscription,
     last_refresh: Instant,
     pending_action: Option<String>,
-    steam_operations: HashMap<String, raesir_backend::steam_control::Progress>,
-    steam_watching: bool,
+    download_operations: HashMap<String, raesir_backend::steam_control::Progress>,
+    downloads_watching: bool,
     mods_watching: bool,
     mod_update_task: Option<Task<()>>,
+    game_update_task: Option<Task<()>>,
+    game_update_notice: Option<String>,
     mod_update_notice: Option<String>,
     downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     downloads_open: bool,
+    downloads_visible: HashSet<String>,
     game_menu: Option<(String, Point<Pixels>)>,
     details: Option<Entity<details::DetailsPage>>,
     mods: Option<Entity<mods::ModBrowser>>,
@@ -157,13 +160,16 @@ impl Launcher {
             _activation: activation,
             last_refresh: Instant::now(),
             pending_action: None,
-            steam_operations: HashMap::new(),
-            steam_watching: false,
+            download_operations: HashMap::new(),
+            downloads_watching: false,
             mods_watching: false,
             mod_update_task: None,
+            game_update_task: None,
+            game_update_notice: None,
             mod_update_notice: None,
             downloads_bounds,
             downloads_open: false,
+            downloads_visible: HashSet::new(),
             game_menu: None,
             details: None,
             mods: None,
@@ -257,6 +263,7 @@ impl Launcher {
         if self.details.is_some()
             || self.mods.is_some()
             || self.menu
+            || self.downloads_open
             || self.game_menu.is_some()
             || self.confirm.is_some()
             || self.closing
@@ -381,13 +388,11 @@ impl Launcher {
         let installable = scope != 2 && raesir_backend::actions::can_install(&g.source);
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
-        let working = progress
-            .as_ref()
-            .filter(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+        let working = progress.as_ref().filter(|p| p.blocks_play());
         let error = progress.as_ref().and_then(|p| p.error);
         let action_tip = error.map(|e| e.message().to_owned()).or_else(|| {
             if let Some(progress) = working {
-                Some(progress.label())
+                Some(downloads::button_tip(progress))
             } else if installable {
                 Some(
                     g.source
@@ -622,8 +627,10 @@ impl Launcher {
                     .when(playable || installable || working.is_some(), |d| {
                         d.child(
                             button_shell(("action", i), false)
-                                .child(if working.is_some() {
-                                    header::spinner_colored("install-spin", 1.25, 0x202020)
+                                .child(if let Some(progress) = working {
+                                    icon(downloads::button_icon(progress))
+                                        .text_color(rgb(0x202020))
+                                        .into_any_element()
                                 } else {
                                     icon(if playable { "play" } else { "install" })
                                         .text_color(rgb(0x202020))
@@ -653,13 +660,7 @@ impl Launcher {
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    if this.display_progress(&key).is_some_and(|p| {
-                                        p.active()
-                                            && p.operation
-                                                == raesir_backend::steam_control::Operation::Install
-                                    }) {
-                                        this.toggle_downloads(cx);
-                                    } else {
+                                    if !this.primary_download_action(&key, cx) {
                                         this.action(key.to_string(), action, cx);
                                     }
                                 })),
@@ -703,6 +704,9 @@ impl Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.downloads_open {
+            self.downloads_visible.clear();
+        }
         let viewport = f32::from(window.viewport_size().width);
         self.viewport_height = f32::from(window.viewport_size().height);
         let header_state = HeaderState {
@@ -978,7 +982,7 @@ impl Render for Launcher {
                     )
                 })
             })
-            .when(self.menu, |d| d.child(self.settings()))
+            .when(self.menu, |d| d.child(self.settings(cx)))
             .when(self.downloads_open, |d| d.child(self.download_popup(cx)))
             .when(self.game_menu.is_some(), |d| d.child(self.game_actions(cx)))
             .when(self.confirm.is_some(), |d| {
@@ -1017,6 +1021,10 @@ impl Render for Launcher {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 3 && args[1] == "--download-worker" {
+        raesir_backend::downloads::run_worker(std::path::Path::new(&args[2]));
+        return;
+    }
     if args.len() == 2 && matches!(args[1].to_str(), Some("--version" | "-V")) {
         println!("Raesir {}", env!("CARGO_PKG_VERSION"));
         return;

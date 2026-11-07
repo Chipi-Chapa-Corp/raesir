@@ -32,6 +32,11 @@ pub struct Backend {
     steam_jobs: Mutex<HashMap<String, SteamJob>>,
     steam_bridge: Mutex<Option<(String, std::time::SystemTime, bool)>>,
     epic: epic_online::Manager,
+    downloads: raesir_backend::downloads::Manager,
+    handoffs: Mutex<HashMap<String, Progress>>,
+    handoffs_loaded: OnceLock<()>,
+    handoff_scan: Mutex<std::time::Instant>,
+    game_checking: AtomicBool,
     mounts: mount::Manager,
 }
 
@@ -44,7 +49,7 @@ struct SteamJob {
     started: std::time::Instant,
 }
 
-fn merge_steam_progress(live: Option<Progress>, disk: Progress) -> Progress {
+fn merge_download_progress(live: Option<Progress>, disk: Progress) -> Progress {
     let mut progress = live.unwrap_or_else(|| disk.clone());
     // Completion also requires Steam's committed manifest and payload.
     if progress.phase == Phase::Complete && disk.phase != Phase::Complete {
@@ -74,6 +79,7 @@ impl Backend {
                     .join("dev.raesir.launcher")
             });
         let mod_manager = raesir_backend::mods::Manager::new(&data, &cache);
+        let downloads = raesir_backend::downloads::Manager::new(&data);
         Arc::new(Self {
             data,
             cache,
@@ -92,6 +98,11 @@ impl Backend {
             steam_jobs: Default::default(),
             steam_bridge: Default::default(),
             epic: Default::default(),
+            downloads,
+            handoffs: Default::default(),
+            handoffs_loaded: OnceLock::new(),
+            handoff_scan: Mutex::new(std::time::Instant::now()),
+            game_checking: AtomicBool::new(false),
             mounts: Default::default(),
         })
     }
@@ -108,6 +119,7 @@ impl Backend {
         if self.fixture.is_none() {
             report.warnings.extend(self.mod_manager.recover_staging());
             self.steam_actions(&mut report);
+            self.observe_handoffs(&report);
         }
         for game in &mut report.catalog {
             game.mods = self.mod_manager.summary(game);
@@ -289,7 +301,24 @@ impl Backend {
                 }
             }
         }
+        if kind == "update" {
+            let progress = self
+                .current_download_progress()
+                .remove(key)
+                .filter(|p| p.operation == Operation::Update && !matches!(p.phase, Phase::Complete))
+                .ok_or("This game has no available update")?;
+            let _ = progress;
+            self.control_download(key, true)?;
+            return Ok("Update started".into());
+        }
         let action = actions::resolve(&report, key, kind)?;
+        if kind == "install"
+            && let Some(game) = report.catalog.iter().find(|g| g.key == key)
+            && let Some(request) = raesir_backend::downloads::install_request(&report, game)
+        {
+            self.downloads.start(request)?;
+            return Ok("Download started".into());
+        }
         if let ActionTarget::Steam {
             root,
             appid,
@@ -329,7 +358,88 @@ impl Backend {
                 .map(|_| "Sent to Steam".into())
                 .map_err(|error| error.message().into());
         }
-        actions::perform(&report, key, kind)
+        if kind == "install"
+            && let Some(game) = report
+                .catalog
+                .iter()
+                .find(|g| g.key == key && g.store == "steam")
+        {
+            if let Some(client) = self.steam.status().clients.first() {
+                self.steam.preserve(&client.root);
+            }
+            let result = actions::perform(&report, key, kind)?;
+            if let Some(client) = self.steam.status().clients.first() {
+                let mut progress = Progress::starting(Operation::Install);
+                progress.controllable = false;
+                self.steam_jobs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        key.into(),
+                        SteamJob {
+                            root: client.root.clone(),
+                            library: PathBuf::from(&client.root),
+                            appid: game.id.parse().unwrap_or(0),
+                            progress,
+                            started: std::time::Instant::now(),
+                        },
+                    );
+            }
+            return Ok(result);
+        }
+        let result = actions::perform(&report, key, kind)?;
+        if kind == "install"
+            && let Some(game) = report.catalog.iter().find(|g| g.key == key)
+        {
+            let mut progress = Progress::starting(Operation::Install);
+            progress.phase = Phase::Queued;
+            progress.controllable = false;
+            progress.detail = Some(format!("Continue installing in {}", game.client));
+            self.handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.into(), progress);
+            self.save_handoffs();
+        }
+        Ok(result)
+    }
+
+    fn save_handoffs(&self) {
+        let handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = storage::write_json(&self.data.join("client-downloads.json"), &*handoffs);
+    }
+
+    fn observe_handoffs(&self, report: &Report) {
+        self.handoffs_loaded.get_or_init(|| {
+            if let Ok(bytes) = std::fs::read(self.data.join("client-downloads.json"))
+                && let Ok(saved) = serde_json::from_slice::<HashMap<String, Progress>>(&bytes)
+            {
+                *self.handoffs.lock().unwrap_or_else(|e| e.into_inner()) = saved;
+            }
+        });
+        {
+            let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
+            for (key, progress) in handoffs.iter_mut().filter(|(_, p)| p.active()) {
+                if let Some(game) = report.catalog.iter().find(|g| &g.key == key) {
+                    if raesir_backend::catalog::local(&game.installations) {
+                        progress.phase = Phase::Complete;
+                        progress.percent = Some(100);
+                        progress.detail = None;
+                    } else if game
+                        .installations
+                        .iter()
+                        .any(|i| i.os == Os::host() && i.state == "incomplete")
+                    {
+                        progress.phase = Phase::Installing;
+                        progress.detail = Some(format!("Installation managed by {}", game.client));
+                    }
+                } else {
+                    progress.phase = Phase::Failed;
+                    progress.detail = Some("Game is no longer in this library".into());
+                }
+            }
+        }
+        self.save_handoffs();
     }
 
     fn steam_actions(&self, report: &mut Report) {
@@ -409,13 +519,28 @@ impl Backend {
             }
             // Adopt downloads already in progress, including after restarting
             // Raesir. A missing payload by itself is not a download operation.
-            if !local && !jobs.contains_key(&game.key) {
-                let progress =
-                    steam_control::progress(Path::new(&client.root), appid, Operation::Install);
+            if !jobs.contains_key(&game.key)
+                || jobs
+                    .get(&game.key)
+                    .is_some_and(|job| job.progress.phase == Phase::Available)
+            {
+                let operation = if steam_control::installed_payload(Path::new(&client.root), appid)
+                {
+                    Operation::Update
+                } else {
+                    Operation::Install
+                };
+                let progress = steam_control::progress(Path::new(&client.root), appid, operation);
                 if matches!(
                     progress.phase,
-                    Phase::Queued | Phase::Downloading | Phase::Installing | Phase::Paused
+                    Phase::Available
+                        | Phase::Queued
+                        | Phase::Downloading
+                        | Phase::Installing
+                        | Phase::Paused
                 ) {
+                    let mut progress = progress;
+                    progress.controllable = bridge;
                     jobs.insert(
                         game.key.clone(),
                         SteamJob {
@@ -427,12 +552,34 @@ impl Backend {
                             started: std::time::Instant::now(),
                         },
                     );
+                } else if progress.phase == Phase::Complete {
+                    jobs.remove(&game.key);
                 }
             }
         }
     }
 
-    pub fn steam_progress(&self) -> HashMap<String, Progress> {
+    pub fn download_progress(&self) -> HashMap<String, Progress> {
+        if self.fixture.is_none() {
+            self.downloads.advance_queue();
+        }
+        let observing = self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(Progress::active);
+        let due = {
+            let mut last = self.handoff_scan.lock().unwrap_or_else(|e| e.into_inner());
+            let due = observing && last.elapsed().as_secs() >= 5;
+            if due {
+                *last = std::time::Instant::now();
+            }
+            due
+        };
+        if due {
+            let _ = self.scan();
+        }
         // Never hold the job lock across client IPC: the UI reads this cache.
         let pending: Vec<_> = self
             .steam_jobs
@@ -443,20 +590,31 @@ impl Backend {
             .map(|(key, job)| (key.clone(), job.clone()))
             .collect();
         for (key, snapshot) in pending {
+            let library = if snapshot.progress.phase == Phase::Starting {
+                steam_control::app_library(Path::new(&snapshot.root), snapshot.appid)
+                    .unwrap_or_else(|| snapshot.library.clone())
+            } else {
+                snapshot.library.clone()
+            };
             let disk = steam_control::progress_in_library(
-                &snapshot.library,
+                &library,
                 snapshot.appid,
                 snapshot.progress.operation,
             );
-            let live = if snapshot.progress.operation == Operation::Install {
+            let live = if snapshot.progress.operation.downloads() && snapshot.progress.controllable
+            {
                 self.steam
                     .control(&snapshot.root, snapshot.appid, "status")
                     .ok()
-                    .map(|status| status.progress(Operation::Install))
+                    .map(|status| status.progress(snapshot.progress.operation))
             } else {
                 None
             };
-            let mut progress = merge_steam_progress(live, disk);
+            let mut progress = merge_download_progress(live, disk);
+            progress.controllable = snapshot.progress.controllable;
+            if progress.phase == Phase::Available && snapshot.progress.phase == Phase::Starting {
+                progress.phase = Phase::Starting;
+            }
             if progress.phase == Phase::Starting && snapshot.started.elapsed().as_secs() > 60 {
                 progress.phase = Phase::Failed;
                 progress.error = Some(steam_control::Error::Rejected);
@@ -467,24 +625,49 @@ impl Backend {
             {
                 progress.error = progress.error.or(job.progress.error);
                 job.progress = progress;
+                job.library = library;
             }
         }
-        self.current_steam_progress()
+        self.current_download_progress()
     }
 
-    pub fn steam_download(&self, key: &str, resume: bool) -> Result<(), steam_control::Error> {
+    pub fn control_download(&self, key: &str, resume: bool) -> Result<(), String> {
         use steam_control::Error;
         if self.ready().is_err() || self.fixture.is_some() {
-            return Err(Error::Unavailable);
+            return Err(Error::Unavailable.message().into());
+        }
+        if self.downloads.request(key).is_some() {
+            return self.downloads.control(key, resume);
         }
         let snapshot = self
             .steam_jobs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(key)
-            .filter(|job| job.progress.operation == Operation::Install && job.progress.active())
+            .filter(|job| {
+                job.progress.operation.downloads() && job.progress.phase != Phase::Complete
+            })
             .cloned()
-            .ok_or(Error::Busy)?;
+            .ok_or_else(|| Error::Busy.message().to_string())?;
+        if !snapshot.progress.controllable {
+            if !resume {
+                return Err("Pause this download in the game client".into());
+            }
+            self.steam.preserve(&snapshot.root);
+            actions::dispatch(&ActionTarget::Url {
+                url: format!("steam://install/{}", snapshot.appid),
+            })?;
+            if let Some(job) = self
+                .steam_jobs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_mut(key)
+            {
+                job.progress.phase = Phase::Starting;
+                job.started = std::time::Instant::now();
+            }
+            return Ok(());
+        }
         let result = self.steam.control(
             &snapshot.root,
             snapshot.appid,
@@ -509,23 +692,101 @@ impl Backend {
                 Err(error) => job.progress.error = Some(error),
             }
         }
-        result.map(|_| ())
+        result.map(|_| ()).map_err(|e| e.message().to_string())
     }
 
-    pub fn current_steam_progress(&self) -> HashMap<String, Progress> {
-        self.steam_jobs
+    pub fn current_download_progress(&self) -> HashMap<String, Progress> {
+        let mut progress: HashMap<_, _> = self
+            .steam_jobs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
             .map(|(key, job)| (key.clone(), job.progress.clone()))
-            .collect()
+            .collect();
+        progress.extend(self.downloads.snapshot());
+        progress.extend(
+            self.handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        );
+        if self.fixture.is_some()
+            && let Ok(bytes) = std::fs::read(self.data.join("download-progress.json"))
+            && let Ok(fixture) = serde_json::from_slice::<HashMap<String, Progress>>(&bytes)
+        {
+            progress.extend(fixture);
+        }
+        progress
     }
 
-    pub fn finish_steam_jobs(&self) {
+    pub fn finish_download_jobs(&self) {
+        self.downloads.finish();
+        self.handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, p| p.phase != Phase::Complete);
+        if self.fixture.is_none() {
+            self.save_handoffs();
+        }
         self.steam_jobs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|_, job| job.progress.phase != Phase::Complete);
+    }
+
+    pub fn automatic_game_updates(&self) -> bool {
+        self.ui()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("automatic_game_updates")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    pub fn set_automatic_game_updates(&self, enabled: bool) {
+        self.ui()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("automatic_game_updates".into(), serde_json::json!(enabled));
+    }
+
+    pub fn check_game_updates(&self, force: bool) -> (HashMap<String, Progress>, Vec<String>) {
+        if self.fixture.is_some()
+            || self.closing.load(Ordering::SeqCst)
+            || std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+        {
+            return (self.current_download_progress(), vec![]);
+        }
+        if self.game_checking.swap(true, Ordering::SeqCst) {
+            return (self.current_download_progress(), vec![]);
+        }
+        struct CheckGuard<'a>(&'a AtomicBool);
+        impl Drop for CheckGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = CheckGuard(&self.game_checking);
+        let report = self
+            .report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(report) = report else {
+            return (HashMap::new(), vec![]);
+        };
+        self.steam_actions(&mut (*report).clone());
+        let mut errors = self.downloads.check_updates(&report, force);
+        if self.automatic_game_updates() {
+            for (key, progress) in self.current_download_progress() {
+                if progress.operation == Operation::Update && progress.phase == Phase::Available {
+                    if let Err(error) = self.control_download(&key, true) {
+                        errors.push(error);
+                    }
+                }
+            }
+        }
+        (self.download_progress(), errors)
     }
 
     pub fn mod_catalog(
@@ -974,7 +1235,7 @@ mod tests {
             ..queued.clone()
         };
         assert_eq!(
-            merge_steam_progress(Some(live.clone()), queued.clone()),
+            merge_download_progress(Some(live.clone()), queued.clone()),
             live
         );
         let complete = Progress {
@@ -982,11 +1243,11 @@ mod tests {
             percent: None,
             ..queued.clone()
         };
-        let committing = merge_steam_progress(Some(complete.clone()), queued.clone());
+        let committing = merge_download_progress(Some(complete.clone()), queued.clone());
         assert_eq!(committing.phase, Phase::Installing);
         assert_eq!(committing.percent, Some(100));
         assert_eq!(
-            merge_steam_progress(Some(complete.clone()), complete.clone()).phase,
+            merge_download_progress(Some(complete.clone()), complete.clone()).phase,
             Phase::Complete
         );
         let lost_drive = Progress {
@@ -995,7 +1256,7 @@ mod tests {
             ..queued
         };
         assert_eq!(
-            merge_steam_progress(Some(complete), lost_drive.clone()),
+            merge_download_progress(Some(complete), lost_drive.clone()),
             lost_drive
         );
     }
@@ -1005,6 +1266,7 @@ mod tests {
         backend.data = dir.join("data");
         backend.cache = dir.join("cache");
         backend.mod_manager = raesir_backend::mods::Manager::new(&backend.data, &backend.cache);
+        backend.downloads = raesir_backend::downloads::Manager::new(&backend.data);
         let path = dir.join("library.json");
         std::fs::write(
             &path,
@@ -1052,6 +1314,22 @@ mod tests {
         assert_eq!(fixture(dir.path()).zoom(), 22.);
         std::fs::write(backend.data.join("native-ui.json"), b"bad json").unwrap();
         assert_eq!(fixture(dir.path()).zoom(), 16.);
+    }
+
+    #[test]
+    fn automatic_game_updates_persist_without_replacing_other_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = fixture(dir.path());
+        assert!(backend.automatic_game_updates());
+        backend.set_zoom(19.);
+        backend.set_automatic_game_updates(false);
+        backend.save_ui();
+        let reopened = fixture(dir.path());
+        assert!(!reopened.automatic_game_updates());
+        assert_eq!(reopened.zoom(), 19.);
+        reopened.set_automatic_game_updates(true);
+        reopened.save_ui();
+        assert!(fixture(dir.path()).automatic_game_updates());
     }
 
     #[test]

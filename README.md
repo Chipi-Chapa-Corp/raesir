@@ -44,6 +44,33 @@ Click a game to see its details. Right-click for game actions. Use **Ctrl + / âˆ
 
 On supported Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Raesir. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; other builds use Steam's own dialogs.
 
+Steam ownership is read from the installed, signed-in client on 64-bit Windows
+and Linux, without a Web API key. Failed or signed-out lookups keep the prior
+library. Steam's native background download controls currently require a
+compatible Linux client; Windows uses Steam's dialogs and reads committed
+installation manifests for progress.
+
+Settings opens a popup with **Automatic game updates**, enabled by default.
+Available updates replace Play with **Update** on cards and game pages. With
+automatic updates enabled, Raesir starts those updates; turning it off leaves
+them available for manual installation. Running transfers show **Pause** and
+their progress, and paused transfers show **Resume**. The Downloads popup uses
+the same state and controls. This setting governs requests made by Raesir;
+existing clients retain their own automatic-update settings.
+
+Update checks run at startup and periodically while Raesir is open. Steam uses
+its client's known update state; Epic checks installed Legendary/Heroic profiles,
+and Xbox on Linux can use an installed Ferestre helper. Epic and Ferestre
+transfers use those clients' existing accounts and install locations. Managed
+workers retain progress across Raesir restarts, continue after Raesir closes,
+and coordinate with mod/game leases. A transfer is complete only after the
+client exits successfully and commits its expected installation version.
+
+Clients without verified direct controls continue to handle their own install
+dialogs. Raesir tracks those requested installs in Downloads until their
+installation metadata confirms completion, and offers **Open in game client**.
+It does not invent percentages or expose a nonfunctional Pause button for them.
+
 For development, run `./dev`. It builds incrementally with optimized UI and image
 processing, then launches Raesir. Close the app or press **Ctrl+C**, then run
 `./dev` again to pick up changes. No watcher or Dioxus CLI is needed.

@@ -321,8 +321,61 @@ pub fn program(name: &str) -> Option<String> {
         .into_iter()
         .flat_map(|p| env::split_paths(&p).collect::<Vec<_>>())
         .flat_map(|p| names.iter().map(move |n| p.join(n)))
-        .find(|p| p.is_file())
+        .find(|p| {
+            p.is_file()
+                && (!p.starts_with("/app/bin")
+                    || !Path::new("/.flatpak-info").is_file()
+                    || host_program(name))
+        })
         .map(|p| p.to_string_lossy().into())
+}
+
+fn host_program(name: &str) -> bool {
+    use std::{
+        collections::HashMap,
+        process::{Command, Stdio},
+        sync::{LazyLock, Mutex},
+        time::{Duration, Instant},
+    };
+    static CACHE: LazyLock<Mutex<HashMap<String, (Instant, bool)>>> =
+        LazyLock::new(Default::default);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((time, found)) = cache.get(name)
+        && time.elapsed() < Duration::from_secs(60)
+    {
+        return *found;
+    }
+    // Fixed shell program, with the requested executable passed as an argument.
+    let found = Command::new("flatpak-spawn")
+        .args([
+            "--host",
+            "sh",
+            "-c",
+            "command -v -- \"$1\" >/dev/null",
+            "raesir",
+            name,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+        .is_some_and(|mut child| {
+            let started = Instant::now();
+            loop {
+                if let Ok(Some(status)) = child.try_wait() {
+                    break status.success();
+                }
+                if started.elapsed() > Duration::from_secs(3) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+    cache.insert(name.into(), (Instant::now(), found));
+    found
 }
 
 pub fn desktop_command(needle: &str) -> Option<(String, Vec<String>)> {

@@ -6,6 +6,10 @@ use raesir_backend::{
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 3 && args[1] == "--download-worker" {
+        raesir_backend::downloads::run_worker(std::path::Path::new(&args[2]));
+        return;
+    }
     if args.len() == 6 && args[1] == "--steam-control" {
         let appid = args[4].to_string_lossy().parse().unwrap_or(0);
         raesir_backend::steam_control::helper(

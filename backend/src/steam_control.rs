@@ -16,6 +16,7 @@ use std::{
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Install,
+    Update,
     Uninstall,
 }
 
@@ -23,8 +24,13 @@ impl Operation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Install => "install",
+            Self::Update => "update",
             Self::Uninstall => "uninstall",
         }
+    }
+
+    pub fn downloads(self) -> bool {
+        self != Self::Uninstall
     }
 }
 
@@ -48,7 +54,7 @@ impl Error {
             }
             Self::SignedOut => "Sign in to the local Steam client, then try again.",
             Self::NotOwned => "This game is not available to the current Steam account.",
-            Self::Running => "Close the game before uninstalling it.",
+            Self::Running => "Close the game before changing its installation.",
             Self::Disk => {
                 "Steam could not write the game files. Check the library's free space and permissions."
             }
@@ -77,11 +83,7 @@ impl Status {
         // GetAppInstallState exposes aggregate Running/Queued bits, without the
         // manifest's detailed Downloading/Staging bits. Use the live stage counters
         // while the client is running this update, rather than calling it queued.
-        if operation == Operation::Install
-            && self.state & 256 != 0
-            && self.state & 512 == 0
-            && total > 0
-        {
+        if operation.downloads() && self.state & 256 != 0 && self.state & 512 == 0 && total > 0 {
             progress.phase = if done < total {
                 Phase::Downloading
             } else {
@@ -96,6 +98,7 @@ impl Status {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    Available,
     Starting,
     Queued,
     Downloading,
@@ -112,26 +115,49 @@ pub struct Progress {
     pub phase: Phase,
     pub percent: Option<u8>,
     pub error: Option<Error>,
+    #[serde(default)]
+    pub controllable: bool,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 impl Progress {
     pub fn starting(operation: Operation) -> Self {
         Self {
             operation,
-            phase: if operation == Operation::Install {
+            phase: if operation.downloads() {
                 Phase::Starting
             } else {
                 Phase::Removing
             },
             percent: None,
             error: None,
+            controllable: true,
+            detail: None,
         }
     }
     pub fn active(&self) -> bool {
-        !matches!(self.phase, Phase::Complete | Phase::Failed)
+        !matches!(
+            self.phase,
+            Phase::Available | Phase::Complete | Phase::Failed
+        )
+    }
+    pub fn blocks_play(&self) -> bool {
+        self.active()
+            || self.phase == Phase::Available
+            || self.operation == Operation::Update && self.phase == Phase::Failed
     }
     pub fn label(&self) -> String {
+        if let Some(detail) = &self.detail {
+            return detail.clone();
+        }
         match self.phase {
+            Phase::Available => if self.operation == Operation::Update {
+                "Update"
+            } else {
+                "Install"
+            }
+            .into(),
             Phase::Starting => "Starting…".into(),
             Phase::Queued => "Queued".into(),
             Phase::Downloading => self
@@ -139,15 +165,17 @@ impl Progress {
                 .map(|p| format!("Downloading {p}%"))
                 .unwrap_or_else(|| "Downloading…".into()),
             Phase::Installing => "Installing…".into(),
-            Phase::Paused => "Paused in Steam".into(),
+            Phase::Paused => "Paused".into(),
             Phase::Removing => "Uninstalling…".into(),
             Phase::Complete => match self.operation {
                 Operation::Install => "Installed",
+                Operation::Update => "Updated",
                 Operation::Uninstall => "Uninstalled",
             }
             .into(),
             Phase::Failed => match self.operation {
                 Operation::Install => "Installation stopped",
+                Operation::Update => "Update stopped",
                 Operation::Uninstall => "Uninstall stopped",
             }
             .into(),
@@ -192,6 +220,25 @@ pub fn app_library(root: &Path, appid: u32) -> Option<PathBuf> {
 pub fn progress(root: &Path, appid: u32, operation: Operation) -> Progress {
     let library = app_library(root, appid).unwrap_or_else(|| root.into());
     progress_in_library(&library, appid, operation)
+}
+
+pub fn installed_payload(root: &Path, appid: u32) -> bool {
+    let Some(library) = app_library(root, appid) else {
+        return false;
+    };
+    steam::read_text(&library.join(format!("steamapps/appmanifest_{appid}.acf")))
+        .ok()
+        .and_then(|text| vdf::parse(&text).ok())
+        .and_then(|value| {
+            value
+                .get("AppState")
+                .and_then(|app| app.field("installdir"))
+                .map(str::to_string)
+        })
+        .filter(|name| {
+            !name.is_empty() && !name.contains(['/', '\\', ':']) && name != "." && name != ".."
+        })
+        .is_some_and(|name| library.join("steamapps/common").join(name).is_dir())
 }
 
 pub fn progress_in_library(library: &Path, appid: u32, operation: Operation) -> Progress {
@@ -268,7 +315,10 @@ fn state_progress(
     }
     // Steam may report a suspended shader pass while scheduling the actual game.
     // Pauses and suspension are normal client state, not an error notification.
-    state.phase = if flags & 4 != 0 && flags & !(2 | 4 | 64) == 0 {
+    state.phase = if operation == Operation::Update && flags & 2 != 0 && flags & !(2 | 4 | 64) == 0
+    {
+        Phase::Available
+    } else if flags & 4 != 0 && flags & !(2 | 4 | 64) == 0 {
         Phase::Complete
     } else if flags & 512 != 0 {
         Phase::Paused
@@ -556,6 +606,31 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_updates_block_play_until_the_committed_manifest_is_current() {
+        let pending = manifest_progress(
+            manifest(2 | 4, 0, 0, 100).get("AppState").unwrap(),
+            Operation::Update,
+        );
+        assert_eq!(pending.phase, Phase::Available);
+        assert!(pending.blocks_play());
+        assert!(!pending.active());
+        let transfer = manifest_progress(
+            manifest(2 | 4 | 1048576, 0, 25, 100)
+                .get("AppState")
+                .unwrap(),
+            Operation::Update,
+        );
+        assert_eq!(transfer.phase, Phase::Downloading);
+        assert_eq!(transfer.percent, Some(25));
+        let committed = manifest_progress(
+            manifest(4, 0, 100, 100).get("AppState").unwrap(),
+            Operation::Update,
+        );
+        assert_eq!(committed.phase, Phase::Complete);
+        assert!(!committed.blocks_play());
+    }
 
     fn manifest(flags: u32, result: u32, bytes: u64, total: u64) -> vdf::Value {
         vdf::parse(&format!(r#""AppState" {{ "appid" "42" "installdir" "Game" "StateFlags" "{flags}" "UpdateResult" "{result}" "BytesDownloaded" "{bytes}" "BytesToDownload" "{total}" }}"#)).unwrap()

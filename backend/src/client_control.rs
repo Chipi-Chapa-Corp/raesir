@@ -301,6 +301,19 @@ pub struct Status {
 }
 
 impl Manager {
+    /// A mutation delegated through a client URL must survive Raesir closing too.
+    pub fn preserve(&self, root: &str) {
+        if let Some(lease) = self
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            && lease.client.root == root
+        {
+            lease.keep_running = true;
+        }
+    }
+
     pub fn status(&self) -> Status {
         let managed_root = self
             .lease
@@ -313,15 +326,15 @@ impl Manager {
             external_running: managed_root.is_none()
                 && snapshot().processes().values().any(|p| is_steam(p.name())),
             managed_root,
-            supported: cfg!(all(target_os = "linux", target_arch = "x86_64")),
+            supported: crate::steam_ipc::supported(),
         }
     }
     pub fn read_library(&self, root: &str) -> Result<OwnedLibrary, String> {
         if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
             return Err("Steam IPC is disabled for isolated diagnostics".into());
         }
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            return Err("Client-auth lookup currently supports Linux x86_64; use the Web API on this platform.".into());
+        if !crate::steam_ipc::supported() {
+            return Err("Client-auth lookup requires 64-bit Windows or Linux.".into());
         }
         let client = clients()
             .into_iter()
@@ -518,8 +531,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("steam");
-        std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
-        let mut external = Fixture(Command::new(executable).arg("30").spawn().unwrap());
+        let mut external = Fixture(crate::test_process::spawn(&executable));
         let process = Pid::from_u32(external.0.id());
         assert!(is_steam(snapshot().process(process).unwrap().name()));
         let manager = Manager::default();

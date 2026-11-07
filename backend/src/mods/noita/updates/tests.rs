@@ -284,3 +284,13 @@ fn switching_recipe_repository_migrates_an_existing_install_with_the_same_releas
             .is_empty()
     );
 }
+
+#[test]
+fn fork_release_revisions_do_not_roll_back_multiplayer_fixes() {
+    assert!(!not_older("v1.6.8-raesir.2", "v1.6.8-raesir.1"));
+    assert!(!not_older("v1.6.8-raesir.2", "v1.6.8"));
+    assert!(not_older("v1.6.8", "v1.6.8-raesir.1"));
+    assert!(not_older("v1.6.8-raesir.2", "v1.6.8-raesir.10"));
+    assert!(not_older("v1.6.8-raesir.2", "v1.6.9-raesir.1"));
+    assert!(!not_older("v1.6.9-raesir.1", "v1.6.8-raesir.10"));
+}

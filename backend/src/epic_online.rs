@@ -17,14 +17,26 @@ pub fn binary() -> Option<PathBuf> {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
     }
+    if let Some(path) = crate::discovery::program("legendary") {
+        return Some(path.into());
+    }
     let name = if cfg!(windows) {
         "legendary.exe"
     } else {
         "legendary"
     };
-    env::split_paths(&env::var_os("PATH")?)
-        .map(|p| p.join(name))
-        .find(|p| p.is_file())
+    let home = crate::platform::home()?;
+    for root in [
+        home.join(".config/heroic/tools/legendary"),
+        home.join(".var/app/com.heroicgameslauncher.hgl/config/heroic/tools/legendary"),
+        home.join("AppData/Roaming/heroic/tools/legendary"),
+    ] {
+        let binary = root.join(name);
+        if binary.is_file() {
+            return Some(binary);
+        }
+    }
+    None
 }
 
 #[derive(Default)]

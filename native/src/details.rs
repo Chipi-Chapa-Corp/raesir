@@ -27,7 +27,7 @@ pub struct DetailsPage {
     game: LibraryGame,
     mod_context: Option<ModContext>,
     _mod_subscription: Option<Subscription>,
-    steam_progress: Option<raesir_backend::steam_control::Progress>,
+    download_progress: Option<raesir_backend::steam_control::Progress>,
     poster: Option<Arc<RenderImage>>,
     backdrop: Entity<crate::backdrop::Backdrop>,
     backdrop_source: String,
@@ -89,12 +89,12 @@ impl DetailsPage {
         backend: Arc<Backend>,
         owner: WeakEntity<Launcher>,
         return_focus: FocusHandle,
-        steam_progress: Option<raesir_backend::steam_control::Progress>,
+        download_progress: Option<raesir_backend::steam_control::Progress>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             game: source,
-            steam_progress,
+            download_progress,
             poster,
             backdrop,
             backdrop_source: String::new(),
@@ -538,7 +538,7 @@ impl Launcher {
             backdrop.update(cx, |backdrop, cx| backdrop.retarget(image, cx));
         }
         let return_focus = self.focus.clone();
-        let steam_progress = self.display_progress(key);
+        let download_progress = self.display_progress(key);
         let page = cx.new(|cx| {
             DetailsPage::new(
                 source,
@@ -547,7 +547,7 @@ impl Launcher {
                 backend,
                 owner,
                 return_focus,
-                steam_progress,
+                download_progress,
                 cx,
             )
         });
@@ -569,7 +569,7 @@ impl DetailsPage {
         if let Some(game) = games.iter().find(|g| g.source.key == self.game.key) {
             self.game = game.source.clone();
         }
-        self.steam_progress = progress.get(&self.game.key).cloned();
+        self.download_progress = progress.get(&self.game.key).cloned();
         cx.notify();
     }
 
@@ -1387,22 +1387,21 @@ impl Render for DetailsPage {
         }
         if self.mod_context.is_none() {
             let installable = raesir_backend::actions::can_install(&self.game);
-            let working = self
-                .steam_progress
-                .as_ref()
-                .filter(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+            let working = self.download_progress.as_ref().filter(|p| p.blocks_play());
             let primary_action = if installable { "install" } else { "launch" };
-            let primary_tip = working.map(|p| p.label()).unwrap_or_else(|| {
-                if installable {
-                    self.game
-                        .install
-                        .as_ref()
-                        .and_then(|a| a.note.clone())
-                        .unwrap_or_else(|| "Install".into())
-                } else {
-                    "Play".into()
-                }
-            });
+            let primary_tip = working
+                .map(crate::downloads::button_tip)
+                .unwrap_or_else(|| {
+                    if installable {
+                        self.game
+                            .install
+                            .as_ref()
+                            .and_then(|a| a.note.clone())
+                            .unwrap_or_else(|| "Install".into())
+                    } else {
+                        "Play".into()
+                    }
+                });
             let uninstall_owner = self.owner.clone();
             let uninstall_key = self.game.key.clone();
             if raesir_backend::catalog::local(&self.game.installations)
@@ -1429,8 +1428,10 @@ impl Render for DetailsPage {
                             .size(rems(3.3))
                             .bg(rgba(0x101010b8))
                             .hover(|s| s.bg(rgba(0x303030b3)))
-                            .child(if working.is_some() {
-                                spinner("details-install-spin", 1.25).into_any_element()
+                            .child(if let Some(progress) = working {
+                                icon(crate::downloads::button_icon(progress))
+                                    .text_color(rgb(0xf0f8f3))
+                                    .into_any_element()
                             } else {
                                 icon(if installable { "install" } else { "play" })
                                     .text_color(rgb(0xf0f8f3))
@@ -1448,13 +1449,7 @@ impl Render for DetailsPage {
                             .on_click(move |_, _, cx| {
                                 action_owner
                                     .update(cx, |this, cx| {
-                                        if this.display_progress(&key).is_some_and(|p| {
-                                            p.active()
-                                            && p.operation
-                                                == raesir_backend::steam_control::Operation::Install
-                                        }) {
-                                            this.toggle_downloads(cx);
-                                        } else {
+                                        if !this.primary_download_action(&key, cx) {
                                             this.action(key.clone(), primary_action, cx);
                                         }
                                     })
@@ -1482,13 +1477,17 @@ impl Render for DetailsPage {
             title = title.child(self.mod_actions(cx));
         }
         meta = meta.child(title);
-        if let Some(error) = self.steam_progress.as_ref().and_then(|p| p.error) {
+        if let Some(error) = self.download_progress.as_ref().and_then(|p| {
+            p.error.map(|e| e.message().to_owned()).or_else(|| {
+                (p.phase == raesir_backend::steam_control::Phase::Failed).then(|| p.label())
+            })
+        }) {
             meta = meta.child(
                 div()
                     .text_size(rems(0.95))
                     .text_color(rgb(0xe6c58d))
                     .whitespace_normal()
-                    .child(error.message()),
+                    .child(error),
             );
         }
         let mut facts = Vec::new();

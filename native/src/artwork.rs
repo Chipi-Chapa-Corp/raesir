@@ -153,18 +153,28 @@ pub fn maintain(this: &mut Launcher, window: &mut Window, cx: &mut Context<Launc
     let start = row.saturating_sub(if up { 8 } else { 2 }) * this.columns;
     let end = ((row + rows + if up { 2 } else { 8 }) * this.columns).min(this.visible.len());
     this.artwork_cache.viewport = Some((first, after));
-    let foreground: HashSet<_> = this.visible[first..after]
+    let mut foreground: HashSet<_> = this.visible[first..after]
         .iter()
         .map(|i| this.games[*i].key.clone())
         .collect();
-    let keep: HashSet<_> = this
+    foreground.extend(
+        this.downloads_visible
+            .iter()
+            .map(|key| Arc::<str>::from(key.as_str())),
+    );
+    let mut keep: HashSet<_> = this
         .visible
         .get(start..end)
         .unwrap_or_default()
         .iter()
         .copied()
         .collect();
-    let wanted: HashMap<_, _> = this
+    for (index, game) in this.games.iter().enumerate() {
+        if this.downloads_visible.contains(&game.source.key) {
+            keep.insert(index);
+        }
+    }
+    let mut wanted: HashMap<_, _> = this
         .visible
         .get(start..end)
         .unwrap_or_default()
@@ -172,6 +182,11 @@ pub fn maintain(this: &mut Launcher, window: &mut Window, cx: &mut Context<Launc
         .enumerate()
         .map(|(offset, i)| (this.games[*i].key.clone(), start + offset))
         .collect();
+    for key in &this.downloads_visible {
+        wanted
+            .entry(Arc::<str>::from(key.as_str()))
+            .or_insert(first);
+    }
     for (index, game) in this.games.iter_mut().enumerate() {
         if !keep.contains(&index) && game.poster.is_some() {
             game.poster = None;

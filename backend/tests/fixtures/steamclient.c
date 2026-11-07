@@ -17,7 +17,12 @@ static void release_user(void *self, int pipe, int handle) { if (pipe != 7 || ha
 static void *get_user(void *self, int handle, int pipe, const char *version) { return strcmp(version, "SteamUser019") == 0 ? &user : 0; }
 static void *get_apps(void *self, int handle, int pipe, const char *version) { return strcmp(version, "STEAMAPPS_INTERFACE_VERSION008") == 0 ? &apps : 0; }
 static bool logged_on(void *self) { return user_open; }
+#ifdef _WIN32
+/* Match MSVC's real CSteamID class return ABI, even when compiled with MinGW. */
+static uint64_t *steam_id(void *self, uint64_t *out) { *out = 76561198000000000ULL; return out; }
+#else
 static uint64_t steam_id(void *self) { return 76561198000000000ULL; }
+#endif
 static bool subscribed(void *self, uint32_t app) { return app == 42; }
 
 void *CreateInterface(const char *version, int *result) {

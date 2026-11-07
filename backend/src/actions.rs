@@ -168,7 +168,10 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
     Ok(crate::catalog::command(&game.client, program, args))
 }
 
-fn dispatch(target: &ActionTarget) -> Result<(), String> {
+pub fn dispatch(target: &ActionTarget) -> Result<(), String> {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+        return Err("Client actions are disabled in this diagnostic profile".into());
+    }
     let mut command = match target {
         ActionTarget::Steam { .. } => {
             return Err("Steam installation requests must be handled by the launcher".into());

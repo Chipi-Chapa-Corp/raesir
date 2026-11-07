@@ -27,6 +27,20 @@ pub use updates::{UpdateIssue, UpdateReport};
 
 static ECOSYSTEM: LazyLock<Ecosystem> = LazyLock::new(Ecosystem::bundled);
 
+pub fn download_lock_path(dir: &Path) -> PathBuf {
+    crate::platform::home()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".cache/dev.raesir.launcher/mod-leases")
+        .join(format!(
+            "{}.lock",
+            launch::hash(dir.to_string_lossy().as_bytes())
+        ))
+}
+
+pub fn download_game_running(dir: &Path) -> bool {
+    launch::game_running(dir)
+}
+
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         tokio::runtime::Builder::new_multi_thread()

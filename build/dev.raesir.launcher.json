@@ -60,7 +60,7 @@
         "cargo build --release --locked --offline --package raesir --bin raesir",
         "install -Dm755 target/release/raesir /app/bin/raesir",
         "install -Dm755 build/host-command /app/bin/host-command",
-        "for tool in flatpak steam lutris heroic bottles-cli wine wine64 protontricks xdg-open; do ln -s host-command /app/bin/$tool; done",
+        "for tool in flatpak steam lutris heroic bottles-cli wine wine64 protontricks xdg-open legendary ferestre; do ln -s host-command /app/bin/$tool; done",
         "install -Dm644 build/dev.raesir.launcher.desktop /app/share/applications/dev.raesir.launcher.desktop",
         "install -Dm644 build/dev.raesir.launcher.metainfo.xml /app/share/metainfo/dev.raesir.launcher.metainfo.xml",
         "install -Dm644 build/icon.svg /app/share/icons/hicolor/scalable/apps/dev.raesir.launcher.svg",

@@ -130,13 +130,18 @@ impl Launcher {
             }))
     }
 
-    pub fn settings(&self) -> impl IntoElement + use<> {
+    pub fn settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let warnings = self
             .report
             .as_ref()
             .map(|r| r.warnings.clone())
             .unwrap_or_default();
-        pill()
+        let automatic = self.backend.automatic_game_updates();
+        div().absolute().inset_0()
+            .child(div().absolute().inset_0().on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {
+                this.menu=false; cx.notify();
+            })))
+            .child(pill()
             .id("settings-panel")
             .absolute()
             .top(rems(4.))
@@ -146,10 +151,30 @@ impl Launcher {
             .w(rems(27.))
             .max_h(rems(28.))
             .overflow_y_scroll()
+            .shadow_lg()
             .flex_col()
-            .items_start()
+            .items_stretch()
             .gap(rems(0.75))
-            .child("Settings")
+            .child(div().flex().items_center().justify_between()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
+                .child(crate::header::button("close-settings","close",false).on_click(cx.listener(|this,_,_,cx| { this.menu=false; cx.notify(); }))))
+            .child(div().id("automatic-game-updates-setting").flex().w_full().items_center().justify_between().gap(rems(1.))
+                .py(rems(0.6)).cursor_pointer()
+                .child(div().flex().flex_col().gap(rems(0.3)).flex_1().min_w_0()
+                    .child("Automatic game updates")
+                    .child(div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal()
+                        .child("Start available game updates automatically in Raesir.")))
+                .child(div().w(rems(2.8)).h(rems(1.6)).flex_none().rounded_full().flex().items_center().p(rems(0.2))
+                    .bg(if automatic { rgba(0x9ff4bcff) } else { rgba(0xffffff29) })
+                    .when(automatic,|d|d.justify_end())
+                    .child(div().size(rems(1.2)).rounded_full().bg(if automatic { rgb(0x20342a) } else { rgb(0xf0f0f0) })))
+                .on_click(cx.listener(move |this,_,_,cx| {
+                    this.backend.set_automatic_game_updates(!automatic);
+                    let backend=this.backend.clone();
+                    cx.background_executor().spawn(async move { backend.save_ui(); }).detach();
+                    this.check_game_updates(false,cx);
+                    cx.notify();
+                })))
             .child(
                 div()
                     .text_size(rems(1.125))
@@ -161,7 +186,7 @@ impl Launcher {
                     .text_size(rems(1.125))
                     .whitespace_normal()
                     .child(warning)
-            }))
+            })))
     }
 
     pub fn game_actions(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -172,7 +197,7 @@ impl Launcher {
             return div().into_any_element();
         };
         let busy = self
-            .steam_operations
+            .download_operations
             .get(key)
             .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
         let local = !busy && game.installed(self.library_scope(), self.host) == 1;

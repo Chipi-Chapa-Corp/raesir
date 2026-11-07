@@ -50,7 +50,46 @@ pub fn catalog(path: &Path) -> Result<Vec<OwnedGame>, String> {
     Ok(games)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const fn supported() -> bool {
+    cfg!(all(
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    ))
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    target_arch = "x86_64"
+))]
+fn client_library(root: &Path) -> Result<libloading::Library, String> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libloading::Library::new(root.join("linux64/steamclient.so"))
+            .map_err(|_| "Cannot load the installed Steam client library in this runtime".into())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Resolve dependencies beside this exact client DLL. Do not change the
+        // process-wide DLL search directory or load a 32-bit Steam client.
+        let path = [
+            root.join("steamclient64.dll"),
+            root.join("bin/win64/steamclient64.dll"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or("Cannot find the installed 64-bit Steam client library")?;
+        unsafe {
+            libloading::os::windows::Library::load_with_flags(path, 0x00000100 | 0x00001000)
+                .map(Into::into)
+                .map_err(|_| "Cannot load Steam's 64-bit client and its dependencies".into())
+        }
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    target_arch = "x86_64"
+))]
 pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
     use std::ffi::{c_char, c_void};
     type Obj = *mut c_void;
@@ -61,7 +100,6 @@ pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
     type ReleaseUser = unsafe extern "C" fn(Obj, i32, i32);
     type ReleasePipe = unsafe extern "C" fn(Obj, i32) -> bool;
     type LoggedOn = unsafe extern "C" fn(Obj) -> bool;
-    type GetId = unsafe extern "C" fn(Obj) -> u64;
     type Subscribed = unsafe extern "C" fn(Obj, u32) -> bool;
     // Exact vtable slots of SteamClient017, SteamUser019 and STEAMAPPS_INTERFACE_VERSION008.
     // Safety: only pointers from the matching versioned CreateInterface/GetISteam*
@@ -70,6 +108,23 @@ pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
         unsafe {
             let table = *(object as *const *const *const c_void);
             std::mem::transmute_copy(&*table.add(slot))
+        }
+    }
+    unsafe fn steam_id(user: Obj) -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            unsafe { method::<unsafe extern "C" fn(Obj) -> u64>(user, 2)(user) }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // CSteamID is a non-POD C++ class. MSVC x64 returns it in a caller
+            // buffer (this=RCX, result=RDX), unlike Linux's scalar RAX return.
+            // Valve's ISteamUser::GetSteamID declaration and MS x64 return ABI.
+            let mut id = 0u64;
+            unsafe {
+                method::<unsafe extern "C" fn(Obj, *mut u64) -> *mut u64>(user, 2)(user, &mut id);
+            }
+            id
         }
     }
     struct Session {
@@ -92,8 +147,7 @@ pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
     let candidates = catalog(&root.join("appcache/appinfo.vdf"))?;
     // No credentials/tokens are read, copied, or passed to the helper.
     unsafe {
-        let library = libloading::Library::new(root.join("linux64/steamclient.so"))
-            .map_err(|_| "Cannot load the installed Steam client library in this runtime")?;
+        let library = client_library(root)?;
         let create: libloading::Symbol<Create> = library
             .get(b"CreateInterface\0")
             .map_err(|_| "Steam client factory is unavailable")?;
@@ -133,7 +187,7 @@ pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
                 "Steam is not signed in and online yet. Finish login in Steam, then retry.".into(),
             );
         }
-        let steamid = method::<GetId>(user, 2)(user);
+        let steamid = steam_id(user);
         if steamid == 0 {
             return Err("Steam did not identify an active account".into());
         }
@@ -142,7 +196,7 @@ pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
             .into_iter()
             .filter(|g| subscribed(apps, g.appid))
             .collect();
-        if method::<GetId>(user, 2)(user) != steamid || !method::<LoggedOn>(user, 1)(user) {
+        if steam_id(user) != steamid || !method::<LoggedOn>(user, 1)(user) {
             return Err("The Steam account/session changed during lookup. Retry after signing in; the previous list was kept.".into());
         }
         if games.is_empty() {
@@ -158,9 +212,12 @@ pub fn probe(root: &Path) -> Result<OwnedLibrary, String> {
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "windows"),
+    target_arch = "x86_64"
+)))]
 pub fn probe(_root: &Path) -> Result<OwnedLibrary, String> {
-    Err("The experimental Steam client-auth bridge currently supports Linux x86_64. Use the Steam Web API lookup on this platform.".into())
+    Err("The Steam client-auth bridge requires 64-bit Windows or Linux.".into())
 }
 
 /// Entrypoint used by the desktop executable before starting the UI.
@@ -183,16 +240,25 @@ mod tests {
         assert!(catalog(&path).is_err());
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    ))]
     #[test]
     fn native_abi_filters_catalog_and_releases_its_own_pipe() {
         use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(target_os = "linux")]
         fs::create_dir_all(dir.path().join("linux64")).unwrap();
         fs::create_dir_all(dir.path().join("appcache")).unwrap();
+        let library = if cfg!(windows) {
+            dir.path().join("steamclient64.dll")
+        } else {
+            dir.path().join("linux64/steamclient.so")
+        };
         let status = Command::new("cc")
             .args(["-shared", "-fPIC", "-o"])
-            .arg(dir.path().join("linux64/steamclient.so"))
+            .arg(library)
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/steamclient.c"))
             .status()
             .unwrap();

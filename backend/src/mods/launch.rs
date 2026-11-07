@@ -795,8 +795,7 @@ mod tests {
         #[cfg(unix)]
         {
             let sleeper = game_dir.join("fixture-game");
-            std::os::unix::fs::symlink("/usr/bin/sleep", &sleeper).unwrap();
-            let mut child = Command::new(sleeper).arg("30").spawn().unwrap();
+            let mut child = crate::test_process::spawn(&sleeper);
             let errors = manager.recover_staging();
             let kept = game_dir.join("doorstop_config.ini").exists();
             let _ = child.kill();

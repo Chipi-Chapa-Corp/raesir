@@ -125,7 +125,21 @@ fn not_older(installed: &str, candidate: &str) -> bool {
         Some((major, minor, patch))
     }
     match (number(installed), number(candidate)) {
-        (Some(old), Some(new)) => new >= old,
+        (Some(old), Some(new)) if old != new => new > old,
+        (Some(_), Some(_)) => {
+            // Fork releases can keep the multiplayer protocol version while
+            // publishing fixes. A stale /latest response must not undo them.
+            let fork_revision = |version: &str| {
+                version
+                    .split_once("-raesir.")
+                    .and_then(|(_, revision)| revision.parse::<u64>().ok())
+            };
+            match (fork_revision(installed), fork_revision(candidate)) {
+                (Some(old), Some(new)) => new >= old,
+                (Some(_), None) => false,
+                _ => true,
+            }
+        }
         _ => true,
     }
 }

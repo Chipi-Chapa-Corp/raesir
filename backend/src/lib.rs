@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod client_control;
 pub mod details;
 pub mod discovery;
+pub mod downloads;
 pub mod ea;
 pub mod epic;
 pub mod epic_online;
@@ -23,3 +24,6 @@ pub mod steam_control;
 pub mod steam_ipc;
 pub mod storage;
 mod vdf;
+
+#[cfg(all(test, unix))]
+mod test_process;

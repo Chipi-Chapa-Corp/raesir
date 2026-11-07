@@ -59,9 +59,10 @@ impl Launcher {
             .collect();
         self.report = Some(report);
         self.start_mod_updates(cx);
-        self.steam_operations = self.backend.current_steam_progress();
-        self.update_steam_details(cx);
-        self.watch_steam(cx);
+        self.start_game_updates(cx);
+        self.download_operations = self.backend.current_download_progress();
+        self.update_download_details(cx);
+        self.watch_downloads(cx);
         self.starting = false;
         self.load_error = None;
         self.game_menu = None;
@@ -84,6 +85,7 @@ impl Launcher {
 
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         self.start_refresh(true, cx);
+        self.check_game_updates(true, cx);
     }
 
     pub fn support_project(&mut self, project: &'static str, cx: &mut Context<Self>) {
@@ -232,10 +234,11 @@ impl Launcher {
             return;
         }
         if matches!(kind, "launch" | "launch-modded" | "install" | "uninstall")
-            && self
-                .steam_operations
-                .get(&key)
-                .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed)
+            && self.download_operations.get(&key).is_some_and(|p| {
+                p.blocks_play()
+                    && !(kind == "install"
+                        && p.phase == raesir_backend::steam_control::Phase::Available)
+            })
         {
             return;
         }
@@ -253,29 +256,35 @@ impl Launcher {
             return;
         }
         self.pending_action = Some(key.clone());
-        let steam_operation = self
-            .games
-            .iter()
-            .find(|g| g.source.key == key)
-            .and_then(|game| {
-                let action = match kind {
-                    "install" => game.source.install.as_ref(),
-                    "uninstall" => game.source.uninstall.as_ref(),
-                    _ => None,
-                }?;
-                if let raesir_backend::model::ActionTarget::Steam { operation, .. } = &action.target
-                {
-                    Some(*operation)
-                } else {
-                    None
-                }
-            });
+        let steam_operation = if kind == "update" {
+            Some(raesir_backend::steam_control::Operation::Update)
+        } else if kind == "install" {
+            Some(raesir_backend::steam_control::Operation::Install)
+        } else {
+            self.games
+                .iter()
+                .find(|g| g.source.key == key)
+                .and_then(|game| {
+                    let action = match kind {
+                        "install" => game.source.install.as_ref(),
+                        "uninstall" => game.source.uninstall.as_ref(),
+                        _ => None,
+                    }?;
+                    if let raesir_backend::model::ActionTarget::Steam { operation, .. } =
+                        &action.target
+                    {
+                        Some(*operation)
+                    } else {
+                        None
+                    }
+                })
+        };
         if let Some(operation) = steam_operation {
-            self.steam_operations.insert(
+            self.download_operations.insert(
                 key.clone(),
                 raesir_backend::steam_control::Progress::starting(operation),
             );
-            self.update_steam_details(cx);
+            self.update_download_details(cx);
         }
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
@@ -288,9 +297,12 @@ impl Launcher {
             this.update(cx, |this, cx| {
                 this.pending_action = None;
                 if steam_operation.is_some() {
-                    this.steam_operations = this.backend.current_steam_progress();
-                    this.update_steam_details(cx);
-                    this.watch_steam(cx);
+                    this.download_operations = this.backend.current_download_progress();
+                    this.update_download_details(cx);
+                    this.watch_downloads(cx);
+                    if let Err(error) = result {
+                        this.notice(error, cx);
+                    }
                 } else {
                     match result {
                         Err(error) => this.notice(error, cx),
@@ -314,13 +326,65 @@ impl Launcher {
         cx.notify();
     }
 
-    pub(crate) fn update_steam_details(&self, cx: &mut Context<Self>) {
-        let progress = &self.steam_operations;
+    pub(crate) fn update_download_details(&self, cx: &mut Context<Self>) {
+        let progress = &self.download_operations;
         if let Some(page) = &self.details {
             page.update(cx, |page, cx| {
                 page.library_changed(&self.games, progress, cx)
             });
         }
+    }
+
+    pub(crate) fn check_game_updates(&mut self, force: bool, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let (progress, errors) = cx
+                .background_executor()
+                .spawn(async move { backend.check_game_updates(force) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.download_operations = progress;
+                this.update_download_details(cx);
+                this.watch_downloads(cx);
+                if let Some(error) = errors.first() {
+                    if force || this.game_update_notice.as_ref() != Some(error) {
+                        this.notice(error.clone(), cx);
+                    }
+                    this.game_update_notice = Some(error.clone());
+                } else {
+                    this.game_update_notice = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_game_updates(&mut self, cx: &mut Context<Self>) {
+        if self.game_update_task.is_some() || self.closing {
+            return;
+        }
+        self.game_update_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.closing {
+                            return false;
+                        }
+                        this.check_game_updates(false, cx);
+                        true
+                    })
+                    .unwrap_or(false)
+                    == false
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+            }
+        }));
     }
 
     fn start_mod_updates(&mut self, cx: &mut Context<Self>) {
@@ -435,14 +499,14 @@ impl Launcher {
         .detach();
     }
 
-    pub(crate) fn watch_steam(&mut self, cx: &mut Context<Self>) {
-        if self.steam_watching
+    pub(crate) fn watch_downloads(&mut self, cx: &mut Context<Self>) {
+        if self.downloads_watching
             || self.closing
-            || !self.steam_operations.values().any(|p| p.active())
+            || !self.download_operations.values().any(|p| p.active())
         {
             return;
         }
-        self.steam_watching = true;
+        self.downloads_watching = true;
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             loop {
@@ -450,7 +514,7 @@ impl Launcher {
                 let poll = backend.clone();
                 let progress = cx
                     .background_executor()
-                    .spawn(async move { poll.steam_progress() })
+                    .spawn(async move { poll.download_progress() })
                     .await;
                 let complete = progress
                     .values()
@@ -458,12 +522,12 @@ impl Launcher {
                 let stop = this
                     .update(cx, |this, cx| {
                         if this.closing {
-                            this.steam_watching = false;
+                            this.downloads_watching = false;
                             return true;
                         }
-                        if this.steam_operations != progress {
-                            this.steam_operations = progress;
-                            this.update_steam_details(cx);
+                        if this.download_operations != progress {
+                            this.download_operations = progress;
+                            this.update_download_details(cx);
                             cx.notify();
                         }
                         false
@@ -479,7 +543,7 @@ impl Launcher {
                         .spawn(async move { scan.scan() })
                         .await;
                     if let Ok(report) = result {
-                        backend.finish_steam_jobs();
+                        backend.finish_download_jobs();
                         this.update(cx, |this, cx| {
                             this.apply_report(report, cx);
                             cx.notify();
@@ -493,9 +557,9 @@ impl Launcher {
                 let active = this
                     .update(cx, |this, _| {
                         let active =
-                            !this.closing && this.steam_operations.values().any(|p| p.active());
+                            !this.closing && this.download_operations.values().any(|p| p.active());
                         if !active {
-                            this.steam_watching = false;
+                            this.downloads_watching = false;
                         }
                         active
                     })
