@@ -11,16 +11,24 @@ function load(name, globals) {
 }
 function ubisoft() {
     const names = ['QueryGetDownloadQueue','QueryGetGamesWithPendingPatches','MessageDownloadProgress','MessageDownloadCompleted','MessagePauseDownload','MessageResumeDownload','MessageDownloadGame','MessageInstallGame','QueryGetProducts'];
-    const messages = Object.fromEntries(names.map(name => [name, class { constructor(data) { this.type = name; Object.assign(this, data); } }]));
+    const messages = Object.fromEntries(names.map(name => [name, class { constructor(data) { this.type = name; Object.assign(this, data); if(name.startsWith('Query')) this.myQueryName=name; } }]));
     const queue = { myIsPaused: false, myDownloads: [
         { myId: 10, myGameId: 42, myState: 2, myIsActive: true, myType: 'DownloadType_Edison' },
         { myId: 11, myGameId: 43, myState: 0, myIsActive: false, myType: 'DownloadType_Legacy' },
         { myId: 12, myGameId: 42, myState: 2, myIsActive: false, myType: 'DownloadType_Additional' },
     ] };
     const routes = new Map(), sent = [];
+    const sdk = { locRequestIds: new Map(), locQueryDeferrals: new Map(), next: 1 };
+    let hang = false;
     let patches = { myProductIds: [42] }, products = { myProducts: [] };
-    const context = load('ubisoft', { uplayUiMessage() {}, System: { import: async () => messages }, upc: {
-        sendQuery: async q => q.type === 'QueryGetDownloadQueue' ? queue : q.type === 'QueryGetProducts' ? products : patches,
+    const context = load('ubisoft', { uplayUiMessage() {}, System: { import: async name => name==='@shared/upc/Upc' ? { default:sdk } : messages }, upc: {
+        sendQuery(q) {
+            const key = `${q.myQueryName}-${JSON.stringify(q)}`;
+            q.myDispatchId=sdk.next++;
+            sdk.locRequestIds.set(key,q.myDispatchId);
+            sdk.locQueryDeferrals.set(q.myDispatchId,{fixture:true});
+            return hang ? new Promise(()=>{}) : Promise.resolve(q.type === 'QueryGetDownloadQueue' ? queue : q.type === 'QueryGetProducts' ? products : patches);
+        },
         sendMessage(message) {
             sent.push(message);
             if (message.type === 'MessagePauseDownload') queue.myIsPaused = true;
@@ -28,7 +36,7 @@ function ubisoft() {
         },
         observeRoute(type) { return { subscribe(callback) { routes.set(new type().type, callback); } }; },
     } });
-    return { queue, routes, sent, context, patches: value => patches=value, products: value => products=value,
+    return { queue, routes, sent, context, sdk, hang: value=>hang=value, patches: value => patches=value, products: value => products=value,
         run: input => context.raesirUbisoft({ action: 'snapshot', ...input }) };
 }
 
@@ -136,4 +144,18 @@ test('Unknown and signed-out EA interfaces fail without sending download request
     client.manager.getQueuedOfferIds = callback => callback({ unexpected: ['offer-a'] });
     await assert.rejects(client.run({}), /Unsupported EA download queue/);
     assert.equal(client.sent.length, 0);
+});
+
+test('Ubisoft query timeout releases only the bridge request and recovers after sign-in', async () => {
+    const client=ubisoft();
+    client.sdk.locRequestIds.set('UI query',999);
+    client.sdk.locQueryDeferrals.set(999,{belongsToClient:true});
+    client.hang(true);
+    await assert.rejects(client.run({}),/client is not ready/);
+    assert.equal(client.sdk.locRequestIds.size,1);
+    assert.equal(client.sdk.locQueryDeferrals.size,1);
+    assert.equal(client.sdk.locRequestIds.get('UI query'),999);
+    client.hang(false);
+    assert.equal((await client.run({})).downloads.length,2);
+    assert.equal(client.sdk.locRequestIds.size,1);
 });

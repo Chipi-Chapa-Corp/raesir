@@ -100,7 +100,13 @@ fn linux(port: u16, client: Client, root: &Path, prefix: Option<&Path>) -> bool 
         let Ok(value) = std::str::from_utf8(value) else {
             continue;
         };
-        if Path::new(value).canonicalize().ok().as_ref() != Some(&prefix) {
+        if !Path::new(value).is_absolute()
+            || !(same_directory(Path::new(value), &prefix)
+                || same_directory(
+                    &path.join("root").join(value.trim_start_matches('/')),
+                    &prefix,
+                ))
+        {
             continue;
         }
         if is_client {
@@ -134,7 +140,13 @@ fn linux(port: u16, client: Client, root: &Path, prefix: Option<&Path>) -> bool 
             if !mapped
                 .as_ref()
                 .and_then(|p: &std::path::PathBuf| p.parent())
-                .is_some_and(|p| crate::epic::key(p) == crate::epic::key(root))
+                .is_some_and(|p| {
+                    same_directory(p, root)
+                        || same_directory(
+                            &path.join("root").join(p.strip_prefix("/").unwrap_or(p)),
+                            root,
+                        )
+                })
             {
                 continue;
             }
@@ -326,5 +338,35 @@ mod diagnostic {
             &root,
             Some(&prefix.join("other"))
         ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn same_directory(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // Flatpak may expose the same prefix under a different mount path. Compare
+    // directory identity, including through /proc/PID/root, rather than guessing
+    // a host path from a sandbox's HOME or Steam data directory.
+    fs::metadata(left)
+        .ok()
+        .zip(fs::metadata(right).ok())
+        .is_some_and(|(a, b)| a.is_dir() && b.is_dir() && a.dev() == b.dev() && a.ino() == b.ino())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn prefix_aliases_must_refer_to_the_same_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected/pfx");
+        let other = temp.path().join("other/pfx");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&selected, &alias).unwrap();
+        assert!(same_directory(&selected, &alias));
+        assert!(!same_directory(&selected, &other));
+        assert!(!same_directory(&selected, &temp.path().join("missing")));
     }
 }

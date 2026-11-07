@@ -8,6 +8,12 @@ port = int(port)
 assert port in (4695, 9394, 9222) and store in ("ea", "ubisoft")
 root, prefix = Path(root).resolve(), Path(prefix).resolve()
 expected = "eadesktop.exe" if store == "ea" else "upc.exe"
+def same_directory(left, right):
+    try:
+        return left.is_dir() and right.is_dir() and left.samefile(right)
+    except OSError:
+        return False
+
 inodes = set()
 has_client = False
 for process in Path("/proc").iterdir():
@@ -20,7 +26,8 @@ for process in Path("/proc").iterdir():
         if comm != expected and not comm.startswith("wineserver"):
             continue
         environment = dict(part.split(b"=", 1) for part in (process / "environ").read_bytes().split(b"\0") if b"=" in part)
-        if Path(os.fsdecode(environment.get(b"WINEPREFIX", b""))).resolve() != prefix:
+        selected = Path(os.fsdecode(environment.get(b"WINEPREFIX", b"")))
+        if not selected.is_absolute() or not (same_directory(selected, prefix) or same_directory(process / "root" / str(selected).lstrip("/"), prefix)):
             continue
         if comm == expected:
             argument = os.fsdecode((process / "cmdline").read_bytes().split(b"\0")[0]).replace("\\", "/")
@@ -28,7 +35,7 @@ for process in Path("/proc").iterdir():
                 path = (prefix / "dosdevices" / argument[:2].lower()).resolve() / argument[2:].lstrip("/")
             else:
                 path = Path(argument)
-            if path.resolve().parent != root:
+            if not (same_directory(path.parent, root) or same_directory(process / "root" / str(path.parent).lstrip("/"), root)):
                 continue
             has_client = True
         for fd in (process / "fd").iterdir():

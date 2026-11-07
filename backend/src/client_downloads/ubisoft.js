@@ -6,12 +6,26 @@ async function raesirUbisoft(input) {
         throw new Error("Unsupported Ubisoft client interface");
     }
     const messages = await System.import("@shared/upc/messages/Download.message");
+    const sdk = (await System.import("@shared/upc/Upc")).default;
+    if (!sdk?.locRequestIds?.get || !sdk?.locQueryDeferrals?.delete) throw new Error("Unsupported Ubisoft query interface");
     const query = request => {
+        // The SDK caches requests before replacing myDispatchId. Its own
+        // queries start at -1; 0 gives this bridge a separate cache entry.
+        // Clean up only our entry after a timeout, so signing in later retries
+        // the native query instead of reusing an eternally pending promise.
+        request.myDispatchId = 0;
+        const key = `${request.myQueryName}-${JSON.stringify(request)}`;
         let timer;
         return Promise.race([
             upc.sendQuery(request),
             new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Ubisoft client is not ready")), 3500); }),
-        ]).finally(() => clearTimeout(timer));
+        ]).finally(() => {
+            clearTimeout(timer);
+            if (request.myDispatchId > 0 && sdk.locRequestIds.get(key) === request.myDispatchId) {
+                sdk.locRequestIds.delete(key);
+                sdk.locQueryDeferrals.delete(request.myDispatchId);
+            }
+        });
     };
     const validId = id => /^(?:[1-9][0-9]{0,9})$/.test(String(id)) && Number(id) <= 4294967295;
     const stateKey = "__raesirDownloads1";
