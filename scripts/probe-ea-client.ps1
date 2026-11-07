@@ -8,6 +8,10 @@ if (-not $setup.WaitForExit(360000)) { throw 'EA installation timed out' }
 "Installer exit: $($setup.ExitCode)" | Out-File probe-results/setup.txt
 $exe = Join-Path $env:ProgramFiles 'Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe'
 if (-not (Test-Path $exe)) { throw 'EA client was not installed' }
+# The installer starts a client automatically; restart that disposable process
+# so it receives the interface flags on its first process invocation.
+Get-Process EADesktop -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep 2
 $client = Start-Process $exe -ArgumentList '-webDebugEnabled','-webDebugPort','9394' -PassThru
 function WebSocketMessage($Socket, $Value) {
     $bytes = [Text.Encoding]::UTF8.GetBytes(($Value | ConvertTo-Json -Depth 30 -Compress))
@@ -64,7 +68,7 @@ if (-not $results.port4695 -and -not $results.port9394) {
     $logs = Join-Path $env:ProgramData 'EA Desktop/Logs'
     if (Test-Path $logs) {
         Get-ChildItem $logs -Filter EADesktop.log | ForEach-Object {
-            Get-Content $_.FullName | Select-String 'ERROR|FATAL|Command line|version' | ForEach-Object { $_.Line } | Out-File probe-results/startup.txt
+            Get-Content $_.FullName | Select-String 'FATAL|Command line|Version:|startup.*error' | ForEach-Object { $_.Line } | Out-File probe-results/startup.txt
         }
     }
     throw 'EA interface did not become available'
