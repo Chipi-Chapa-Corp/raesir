@@ -25,7 +25,7 @@ impl Manager {
     pub fn mount(&self, id: &str) -> Result<String, String> {
         let mut mounts = self.mounts.lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Ordering::SeqCst) {
-            return Err("Raesir is closing".into());
+            return Err("Exposed Games is closing".into());
         }
         let (volumes, _) = platform::volumes();
         let volume = validate_volume(&volumes, id)?;
@@ -67,7 +67,7 @@ impl Manager {
             Ok(())
         } else {
             Err(format!(
-                "Could not unmount Raesir's partitions: {}. Close any games/files using them and retry closing Raesir.",
+                "Could not unmount Exposed Games's partitions: {}. Close any games/files using them and retry closing Exposed Games.",
                 errors.join("; ")
             ))
         }
@@ -205,11 +205,11 @@ fn system_connection() -> Result<zbus::blocking::Connection, String> {
     Connection::system().or_else(|error| {
         // Toolbx exposes the host system socket here. This is used only after
         // the explicit mount click; authorization is still enforced by Polkit.
-        if std::env::var_os("RAESIR_DISABLE_HOST_BRIDGE").is_some()
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_HOST_BRIDGE").is_some()
             || std::env::var_os("DBUS_SYSTEM_BUS_ADDRESS").is_some()
             || !std::path::Path::new("/run/host/run/dbus/system_bus_socket").exists() { return Err(error); }
         Builder::address("unix:path=/run/host/run/dbus/system_bus_socket")?.build()
-    }).map_err(|_| "Cannot reach UDisks on the system bus. Run Raesir in the desktop host session or expose its system bus to this container.".into())
+    }).map_err(|_| "Cannot reach UDisks on the system bus. Run Exposed Games in the desktop host session or expose its system bus to this container.".into())
 }
 
 #[cfg(target_os = "linux")]
@@ -272,7 +272,7 @@ fn mount_with_connection(
         Value::from(mount_options(&filesystem).ok_or("Unsupported filesystem")?),
     );
     // Omitting auth.no_user_interaction allows the desktop's Polkit agent to
-    // ask for approval/password. Raesir never receives that password.
+    // ask for approval/password. Exposed Games never receives that password.
     let point: String = service.call("Mount", &(options,)).map_err(|e| format!("Mount was cancelled or failed: {e}. Check UDisks, the filesystem driver and your desktop authorization agent. No writable fallback was attempted."))?;
     Ok(Mounted {
         volume: volume.clone(),
@@ -353,7 +353,7 @@ mod tests {
         impl Block {
             #[zbus(property)]
             fn device(&self) -> Vec<u8> {
-                b"/dev/raesir_fixture\0".to_vec()
+                b"/dev/exposed_games_fixture\0".to_vec()
             }
             #[zbus(property)]
             fn id_type(&self) -> String {
@@ -411,7 +411,7 @@ mod tests {
                 Ok(())
             }
         }
-        let path = "/org/freedesktop/UDisks2/block_devices/raesir_5ffixture";
+        let path = "/org/freedesktop/UDisks2/block_devices/exposed_5fgames_5ffixture";
         let _server = Builder::address(address.trim())
             .unwrap()
             .name("org.freedesktop.UDisks2")
@@ -437,13 +437,13 @@ mod tests {
             .unwrap();
         let connection = Builder::address(address.trim()).unwrap().build().unwrap();
         let volume = Volume {
-            device: "/dev/raesir_fixture".into(),
+            device: "/dev/exposed_games_fixture".into(),
             filesystem: "ntfs".into(),
             ..Volume::default()
         };
         let lease = mount_with_connection(&volume, &connection).unwrap();
         assert_eq!(lease.point, "/fixture/mounted-readonly");
-        // Already-mounted partitions are never adopted by Raesir.
+        // Already-mounted partitions are never adopted by Exposed Games.
         assert!(
             mount_with_connection(&volume, &connection)
                 .unwrap_err()

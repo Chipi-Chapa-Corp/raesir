@@ -25,16 +25,49 @@ pub use launch::LaunchTask;
 pub use steam::helper as steam_helper;
 pub use updates::{UpdateIssue, UpdateReport};
 
-static ECOSYSTEM: LazyLock<Ecosystem> = LazyLock::new(Ecosystem::bundled);
+static ECOSYSTEM: LazyLock<Ecosystem> = LazyLock::new(|| {
+    let mut ecosystem = Ecosystem::bundled();
+    // The 0.3.0 snapshot has no routes for Lovely, silently recording regular
+    // packages without copying any payload. Keep each Lua package's full tree.
+    for game in ecosystem.games.values_mut() {
+        for profile in &mut game.profiles {
+            if profile.package_loader == thunderstore_engine::ecosystem::LoaderKind::Lovely
+                && profile.install_rules.is_empty()
+            {
+                profile.install_rules.push(
+                    serde_json::from_value(serde_json::json!({
+                        "route": "mods", "trackingMethod": "subdir-no-flatten",
+                        "isDefaultLocation": true
+                    }))
+                    .expect("Lovely install route"),
+                );
+            }
+        }
+    }
+    ecosystem
+});
 
 pub fn download_lock_path(dir: &Path) -> PathBuf {
-    crate::platform::home()
+    mod_lease_dir().join(format!(
+        "{}.lock",
+        launch::hash(dir.to_string_lossy().as_bytes())
+    ))
+}
+
+fn mod_lease_dir() -> PathBuf {
+    let cache = crate::platform::home()
         .unwrap_or_else(std::env::temp_dir)
-        .join(".cache/dev.raesir.launcher/mod-leases")
-        .join(format!(
-            "{}.lock",
-            launch::hash(dir.to_string_lossy().as_bytes())
-        ))
+        .join(".cache");
+    crate::storage::application_dir(&cache).join("mod-leases")
+}
+
+fn steam_mods_dir(root: &Path) -> PathBuf {
+    let legacy = root.join("raesir/mods");
+    if legacy.is_dir() {
+        legacy
+    } else {
+        root.join("exposed-games/mods")
+    }
 }
 
 pub fn download_game_running(dir: &Path) -> bool {
@@ -57,8 +90,8 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 pub fn diagnostic_launch_enabled() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("ISOLATED_GUI_SESSION").is_some()
-        && std::env::var_os("RAESIR_MODS_TEST_LAUNCH").is_some_and(|v| v == "1")
-        && std::env::var_os("RAESIR_MODS_TEST_ENV").is_some()
+        && std::env::var_os("EXPOSED_GAMES_MODS_TEST_LAUNCH").is_some_and(|v| v == "1")
+        && std::env::var_os("EXPOSED_GAMES_MODS_TEST_ENV").is_some()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -170,16 +203,14 @@ pub fn community(game: &LibraryGame) -> Option<&'static str> {
 impl Manager {
     pub fn new(data: &Path, cache: &Path) -> Self {
         Self {
-            data: std::env::var_os("RAESIR_MODS_DIR")
+            data: std::env::var_os("EXPOSED_GAMES_MODS_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| data.join("mods")),
             cache: cache.join("mods"),
             catalogs: Mutex::new(HashMap::new()),
             operation: Arc::new(Mutex::new(())),
             active: Default::default(),
-            leases: crate::platform::home()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".cache/dev.raesir.launcher/mod-leases"),
+            leases: mod_lease_dir(),
         }
     }
 
@@ -208,7 +239,7 @@ impl Manager {
         {
             return Ok((catalog.index.clone(), catalog.packages.clone()));
         }
-        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
             return Err("Mod networking is disabled in this diagnostic profile".into());
         }
         let client = self.client(community)?;
@@ -291,26 +322,33 @@ impl Manager {
             .unwrap_or_else(|| root.clone());
         if storage != root
             && !crate::platform::local_sources().iter().any(|s| {
-                let base = Path::new(&s.path).join("raesir/mods");
-                let suffix = if profile == "raesir" {
-                    PathBuf::from(community)
-                } else {
-                    PathBuf::from(community).join("profiles").join(profile)
-                };
-                if profile == "raesir" && base.join(community) == storage {
-                    return true;
-                }
-                let Ok(relative) = storage.strip_prefix(&base) else {
-                    return false;
-                };
-                let mut parts = relative.components();
-                parts
-                    .next()
-                    .and_then(|p| p.as_os_str().to_str())
-                    .is_some_and(|tag| {
-                        tag.len() == 16 && tag.bytes().all(|b| b.is_ascii_hexdigit())
+                // Saved pointers from before the rename remain valid; both
+                // roots must pass the same namespace and community checks.
+                ["exposed-games/mods", "raesir/mods"]
+                    .iter()
+                    .any(|directory| {
+                        let base = Path::new(&s.path).join(directory);
+                        let suffix = if profiles::is_default_profile(profile) {
+                            PathBuf::from(community)
+                        } else {
+                            PathBuf::from(community).join("profiles").join(profile)
+                        };
+                        if profiles::is_default_profile(profile) && base.join(community) == storage
+                        {
+                            return true;
+                        }
+                        let Ok(relative) = storage.strip_prefix(&base) else {
+                            return false;
+                        };
+                        let mut parts = relative.components();
+                        parts
+                            .next()
+                            .and_then(|p| p.as_os_str().to_str())
+                            .is_some_and(|tag| {
+                                tag.len() == 16 && tag.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                            && parts.as_path() == suffix
                     })
-                    && parts.as_path() == suffix
             })
         {
             return None;
@@ -347,8 +385,8 @@ impl Manager {
                     .to_string_lossy()
                     .as_bytes(),
             );
-            let root = root.join("raesir/mods").join(namespace).join(slug);
-            return Ok(if id == "raesir" {
+            let root = steam_mods_dir(&root).join(namespace).join(slug);
+            return Ok(if profiles::is_default_profile(id) {
                 root
             } else {
                 root.join("profiles").join(id)
@@ -386,7 +424,7 @@ impl Manager {
         let selected = self
             .selected(community, &profiles)
             .map(|p| p.id.clone())
-            .unwrap_or_else(|| "raesir".into());
+            .unwrap_or_else(|| "exposed-games".into());
         Ok(Snapshot {
             community: community.into(),
             profiles,

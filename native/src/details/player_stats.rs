@@ -1,5 +1,5 @@
 use super::*;
-use raesir_backend::player_stats::{Achievement, PlayerStats};
+use exposed_games_backend::player_stats::{Achievement, PlayerStats};
 
 fn hours(seconds: u64) -> String {
     let n = seconds as f64 / 3600.;
@@ -26,7 +26,7 @@ fn status(a: &Achievement) -> String {
     let mut parts = Vec::new();
     if a.unlocked {
         if let Some(date) = a.unlocked_at {
-            let date = raesir_backend::details::display_date(&date.to_string());
+            let date = exposed_games_backend::details::display_date(&date.to_string());
             if !date.is_empty() {
                 parts.push(date);
             }

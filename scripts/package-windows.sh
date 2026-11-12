@@ -9,7 +9,7 @@ if [[ "${MSYSTEM:-}" != UCRT64 ]]; then
 fi
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
-cargo build --release --locked --package raesir --bin raesir
+cargo build --release --locked --package exposed-games --bin exposed-games
 python scripts/package-windows.py
 version="$(python -c 'import tomllib; print(tomllib.load(open("native/Cargo.toml", "rb"))["package"]["version"])')"
 makensis -WX -DAPP_VERSION="$version" \

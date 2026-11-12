@@ -7,9 +7,44 @@ use std::{
     process::{Command, Stdio},
 };
 use thunderstore_engine::profile::launch::{
-    self, HostOs, LaunchContext, LaunchMode, Runtime, StorePlatform,
+    self, HostOs, LaunchContext, LaunchMode, LaunchPlan, Runtime, StorePlatform,
 };
 pub(super) mod steam_launch;
+
+fn loader_plan(profile: &Path, slug: &str, context: &LaunchContext) -> Result<LaunchPlan, String> {
+    let mut plan =
+        launch::launch_plan_in(profile, &ECOSYSTEM, slug, context).map_err(|e| e.to_string())?;
+    // thunderstore-engine 0.3.0 defaults Lovely to winhttp; its proxy is winmm.
+    if context.runtime == Runtime::Proton
+        && context.mode == LaunchMode::Modded
+        && ECOSYSTEM
+            .game(slug)
+            .and_then(|g| g.profile())
+            .is_some_and(|p| p.package_loader == thunderstore_engine::ecosystem::LoaderKind::Lovely)
+    {
+        let proxy = if profile.join("winmm.dll").is_file() {
+            "winmm"
+        } else if profile.join("version.dll").is_file() {
+            "version"
+        } else {
+            return Err("Reinstall Lovely to restore its missing loader DLL".into());
+        };
+        for (key, value) in &mut plan.env {
+            if key == "WINEDLLOVERRIDES" {
+                *value = format!("{proxy}=n,b");
+            }
+        }
+        // Lovely reads this path inside Wine, where Unix absolute paths need
+        // the Z: drive mapping rather than the current Windows drive root.
+        if context.mode == LaunchMode::Modded && cfg!(target_os = "linux") {
+            let mods = profile.join("mods");
+            if mods.is_absolute() {
+                plan.args[1] = format!("Z:{}", mods.to_string_lossy());
+            }
+        }
+    }
+    Ok(plan)
+}
 
 pub struct LaunchTask(pub(super) std::sync::mpsc::Receiver<Result<(), String>>);
 
@@ -57,19 +92,39 @@ struct Receipt {
 }
 
 impl Manager {
-    pub(super) fn game_lease(&self, dir: &Path) -> Result<GameLease, String> {
+    fn lease_file(&self, dir: &Path) -> Result<fs::File, String> {
         fs::create_dir_all(&self.leases).map_err(|e| e.to_string())?;
         let key = hash(dir.to_string_lossy().as_bytes());
-        let file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(self.leases.join(format!("{key}.lock")))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())
+    }
+
+    // Running sessions retain their immutable revision even as installs publish
+    // new ones. Shared locks allow multiple sessions to use the same revision.
+    pub(super) fn revision_lease(&self, revision: &Path) -> Result<GameLease, String> {
+        let file = self.lease_file(revision)?;
+        file.try_lock_shared()
+            .map_err(|e| format!("Could not retain the running mod profile: {e}"))?;
+        Ok(GameLease(file))
+    }
+
+    pub(super) fn wait_for_profile_lease(&self, path: &Path) -> Result<GameLease, String> {
+        let file = self.lease_file(path)?;
+        file.lock()
+            .map_err(|e| format!("Could not lock the mod profile: {e}"))?;
+        Ok(GameLease(file))
+    }
+
+    pub(super) fn game_lease(&self, dir: &Path) -> Result<GameLease, String> {
+        let file = self.lease_file(dir)?;
         file.try_lock().map_err(|e| {
             format!(
-                "Another Raesir session is using this game, or its mod lock is unavailable: {e}"
+                "Another Exposed Games session is using this game, or its mod lock is unavailable: {e}"
             )
         })?;
         Ok(GameLease(file))
@@ -78,7 +133,7 @@ impl Manager {
     /// Recover only our own receipts, leaving a running game and any externally
     /// changed files alone. Called by normal library hydration after a restart.
     pub fn recover_staging(&self) -> Vec<String> {
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
             return Vec::new();
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
@@ -218,8 +273,7 @@ impl Manager {
             LaunchMode::Modded,
         )
         .with_extra_args(extra_args.to_vec());
-        let plan = launch::launch_plan_in(&profile.path, &ECOSYSTEM, slug, &context)
-            .map_err(|e| e.to_string())?;
+        let plan = loader_plan(&profile.path, slug, &context)?;
         let mut command = if proton {
             let prefix = discovery::prefixes(report)
                 .into_iter()
@@ -271,7 +325,7 @@ impl Manager {
         extra_args: &[String],
         mode: LaunchMode,
     ) -> Result<LaunchTask, String> {
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
             && !super::diagnostic_launch_enabled()
         {
             return Err("Game launches are disabled in this diagnostic profile".into());
@@ -310,8 +364,10 @@ impl Manager {
         if mode == LaunchMode::Vanilla {
             return Err("Use this game's normal Play action for a vanilla launch".into());
         }
+        let _profile_lease = self.profile_lease(community(game).ok_or("Unknown mod community")?)?;
         let (mut command, profile, game_dir, context) =
             self.direct_command(report, game, extra_args)?;
+        let revision_lease = self.revision_lease(&profile)?;
         if game_running(&game_dir) {
             return Err("Close the game before changing its modded launch".into());
         }
@@ -356,6 +412,7 @@ impl Manager {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _lease = lease;
+            let _revision_lease = revision_lease;
             let exited = child
                 .wait()
                 .map_err(|e| format!("Could not wait for modded game: {e}"));
@@ -448,9 +505,8 @@ impl Manager {
         let files = launch::stage_for_launch_in(profile, &ECOSYSTEM, slug, mirror.path(), context)
             .map_err(|e| e.to_string())?;
         launch::ensure_loader_scripts_executable(profile).map_err(|e| e.to_string())?;
-        if files.is_empty() {
-            return Ok(());
-        }
+        // Script loaders can stage no files, but still need a durable profile
+        // reference so cleanup after a launcher restart retains their revision.
         self.stage_mirror(profile, game_dir, mirror.path(), &files, receipt_dir)
     }
 
@@ -479,7 +535,7 @@ impl Manager {
                 .to_path_buf();
             let destination = safe_destination(game_dir, &relative)?;
             if relative == Path::new("doorstop_config.ini") {
-                // External Steam launches remain vanilla if Raesir is interrupted.
+                // External Steam launches remain vanilla if Exposed Games is interrupted.
                 // The engine's explicit per-launch argument enables Doorstop.
                 let text = fs::read_to_string(source).map_err(|e| e.to_string())?;
                 fs::write(source, disable_doorstop(&text)).map_err(|e| e.to_string())?;
@@ -672,6 +728,67 @@ fn disable_doorstop(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn loaders_without_staged_files_still_record_the_running_revision_for_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = manager_fixture(temp.path(), &temp.path().join("leases"));
+        let profile = temp.path().join("profile");
+        let game_dir = temp.path().join("game");
+        fs::create_dir_all(&profile).unwrap();
+        fs::create_dir_all(&game_dir).unwrap();
+        let game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
+        let context = LaunchContext::new(
+            HostOs::Linux,
+            StorePlatform::Other,
+            Runtime::Native,
+            LaunchMode::Modded,
+        );
+        let staged = manager.stage_dir(&game_dir);
+        manager
+            .stage(&game, &profile, &game_dir, &context, &staged)
+            .unwrap();
+        let receipt: Receipt =
+            serde_json::from_slice(&fs::read(staged.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(receipt.profile, profile);
+        assert!(receipt.files.is_empty());
+        restore(&staged).unwrap();
+        assert!(!staged.join("receipt.json").exists());
+    }
+
+    #[test]
+    fn lovely_proton_uses_the_installed_proxy_and_a_wine_mod_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = LaunchContext::new(
+            HostOs::Linux,
+            StorePlatform::Steam,
+            Runtime::Proton,
+            LaunchMode::Modded,
+        );
+        assert!(loader_plan(dir.path(), "balatro", &context).is_err());
+        let vanilla = LaunchContext::new(
+            HostOs::Linux,
+            StorePlatform::Steam,
+            Runtime::Proton,
+            LaunchMode::Vanilla,
+        );
+        assert_eq!(
+            loader_plan(dir.path(), "balatro", &vanilla).unwrap().args,
+            vec!["--vanilla"]
+        );
+        for dll in ["version", "winmm"] {
+            fs::write(dir.path().join(format!("{dll}.dll")), b"loader").unwrap();
+            let plan = loader_plan(dir.path(), "balatro", &context).unwrap();
+            assert!(
+                plan.env
+                    .contains(&("WINEDLLOVERRIDES".into(), format!("{dll}=n,b")))
+            );
+            assert_eq!(plan.args[0], "--mod-dir");
+            if cfg!(target_os = "linux") {
+                assert_eq!(plan.args[1], format!("Z:{}/mods", dir.path().display()));
+            }
+        }
+    }
+
     fn manager_fixture(root: &Path, leases: &Path) -> Manager {
         Manager {
             data: root.join("data"),
@@ -684,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn game_lease_protects_the_same_installation_across_separate_raesir_profiles() {
+    fn game_lease_protects_the_same_installation_across_separate_exposed_games_profiles() {
         let root = tempfile::tempdir().unwrap();
         let first = manager_fixture(&root.path().join("first"), &root.path().join("locks"));
         let second = manager_fixture(&root.path().join("second"), &root.path().join("locks"));

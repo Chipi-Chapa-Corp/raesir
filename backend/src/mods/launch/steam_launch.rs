@@ -34,6 +34,7 @@ impl Manager {
             .map_err(|e| e.to_string())?;
         let root = wine_runtime::steam_client_root(Path::new(&installation.library))
             .ok_or("Could not find the owning Steam client")?;
+        let _profile_lease = self.profile_lease(slug)?;
         let profiles = self.profiles(slug);
         let profile = self.selected(slug, &profiles);
         if mode == LaunchMode::Modded
@@ -45,6 +46,11 @@ impl Manager {
             game_dir.as_path()
         } else {
             profile.map_or(game_dir.as_path(), |p| p.path.as_path())
+        };
+        let revision_lease = if mode == LaunchMode::Modded {
+            Some(self.revision_lease(profile_path)?)
+        } else {
+            None
         };
         let schema = ECOSYSTEM
             .game(slug)
@@ -67,32 +73,31 @@ impl Manager {
             mode,
         )
         .with_extra_args(extra_args.to_vec());
-        let plan = launch::launch_plan_in(profile_path, &ECOSYSTEM, slug, &context)
-            .map_err(|e| e.to_string())?;
+        let plan = loader_plan(profile_path, slug, &context)?;
         let mut args = plan.args;
         if cfg!(target_os = "linux") {
-            args.push(format!("--raesir-program={}", exe.display()));
+            args.push(format!("--exposed-games-program={}", exe.display()));
         }
         if context.runtime == Runtime::Proton {
-            args.push("--raesir-proton".into());
+            args.push("--exposed-games-proton".into());
         }
         if mode == LaunchMode::Modded
             && let Some((_, value)) = plan.env.iter().find(|(k, _)| k == "WINEDLLOVERRIDES")
         {
-            args.push(format!("--raesir-dll={value}"));
+            args.push(format!("--exposed-games-dll={value}"));
         }
         if std::env::var_os("ISOLATED_GUI_SESSION").is_some() {
             let env_file = PathBuf::from(
-                std::env::var_os("RAESIR_MODS_TEST_ENV")
+                std::env::var_os("EXPOSED_GAMES_MODS_TEST_ENV")
                     .ok_or("Steam GUI tests require an explicit private environment file")?,
             );
             let env_file = env_file.canonicalize().map_err(|e| e.to_string())?;
-            if !env_file.starts_with(root.join("raesir/diagnostics")) {
+            if !env_file.starts_with(root.join("exposed-games/diagnostics")) {
                 return Err(
                     "Steam test environment must be in the private diagnostic directory".into(),
                 );
             }
-            args.push(format!("--raesir-env={}", env_file.display()));
+            args.push(format!("--exposed-games-env={}", env_file.display()));
         }
         let staged = self.stage_dir(&game_dir);
         restore_session(&staged)?;
@@ -102,7 +107,7 @@ impl Manager {
         fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
         let result = if cfg!(target_os = "linux") {
             (|| {
-                let wrapper = root.join("raesir/wrappers/launch.sh");
+                let wrapper = root.join("exposed-games/wrappers/launch.sh");
                 write_wrapper(&wrapper)?;
                 let original = steam::call(&root, Request::Read { appid })?;
                 let installed = wrap_options(original.as_deref().unwrap_or(""), &wrapper)?;
@@ -148,6 +153,7 @@ impl Manager {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _lease = lease;
+            let _revision_lease = revision_lease;
             let deadline = Instant::now() + Duration::from_secs(120);
             while !game_running(&game_dir) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(250));
@@ -236,23 +242,23 @@ fn quote_arguments(args: &[String]) -> Result<String, String> {
 
 fn write_wrapper(path: &Path) -> Result<(), String> {
     let prefix = r#"#!/bin/sh
-# Raesir's per-launch environment, followed by the shared engine wrapper.
-RAESIR_REMAINING=$#
-while [ "$RAESIR_REMAINING" -gt 0 ]; do
-  RAESIR_ARGUMENT="$1"
+# Exposed Games's per-launch environment, followed by the shared engine wrapper.
+EXPOSED_GAMES_REMAINING=$#
+while [ "$EXPOSED_GAMES_REMAINING" -gt 0 ]; do
+  EXPOSED_GAMES_ARGUMENT="$1"
   shift
-  RAESIR_REMAINING=$((RAESIR_REMAINING - 1))
-  case "$RAESIR_ARGUMENT" in
-    --raesir-dll=*)
-      WINEDLLOVERRIDES="${RAESIR_ARGUMENT#--raesir-dll=}${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+  EXPOSED_GAMES_REMAINING=$((EXPOSED_GAMES_REMAINING - 1))
+  case "$EXPOSED_GAMES_ARGUMENT" in
+    --exposed-games-dll=*)
+      WINEDLLOVERRIDES="${EXPOSED_GAMES_ARGUMENT#--exposed-games-dll=}${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
       export WINEDLLOVERRIDES
       ;;
-    --raesir-env=*)
-      RAESIR_ENV="${RAESIR_ARGUMENT#--raesir-env=}"
-      [ -f "$RAESIR_ENV" ] || exit 78
-      . "$RAESIR_ENV" || exit 78
+    --exposed-games-env=*)
+      EXPOSED_GAMES_ENV="${EXPOSED_GAMES_ARGUMENT#--exposed-games-env=}"
+      [ -f "$EXPOSED_GAMES_ENV" ] || exit 78
+      . "$EXPOSED_GAMES_ENV" || exit 78
       ;;
-    *) set -- "$@" "$RAESIR_ARGUMENT" ;;
+    *) set -- "$@" "$EXPOSED_GAMES_ARGUMENT" ;;
   esac
 done
 "#;
@@ -271,36 +277,36 @@ done
     // or the native game, after that bootstrap has finished.
     let outer = format!(
         r#"#!/bin/sh
-RAESIR_INNER={inner}
-RAESIR_PROGRAM=""
-RAESIR_PROTON=""
-RAESIR_REMAINING=$#
-while [ "$RAESIR_REMAINING" -gt 0 ]; do
-  RAESIR_ARGUMENT="$1"
+EXPOSED_GAMES_INNER={inner}
+EXPOSED_GAMES_PROGRAM=""
+EXPOSED_GAMES_PROTON=""
+EXPOSED_GAMES_REMAINING=$#
+while [ "$EXPOSED_GAMES_REMAINING" -gt 0 ]; do
+  EXPOSED_GAMES_ARGUMENT="$1"
   shift
-  RAESIR_REMAINING=$((RAESIR_REMAINING - 1))
-  case "$RAESIR_ARGUMENT" in
-    --raesir-program=*) RAESIR_PROGRAM="${{RAESIR_ARGUMENT#--raesir-program=}}" ;;
-    --raesir-proton) RAESIR_PROTON=1 ;;
-    *) set -- "$@" "$RAESIR_ARGUMENT" ;;
+  EXPOSED_GAMES_REMAINING=$((EXPOSED_GAMES_REMAINING - 1))
+  case "$EXPOSED_GAMES_ARGUMENT" in
+    --exposed-games-program=*) EXPOSED_GAMES_PROGRAM="${{EXPOSED_GAMES_ARGUMENT#--exposed-games-program=}}" ;;
+    --exposed-games-proton) EXPOSED_GAMES_PROTON=1 ;;
+    *) set -- "$@" "$EXPOSED_GAMES_ARGUMENT" ;;
   esac
 done
-[ -n "$RAESIR_PROGRAM" ] || exec "$@"
-RAESIR_INSERTED=""
-RAESIR_REMAINING=$#
-while [ "$RAESIR_REMAINING" -gt 0 ]; do
-  RAESIR_ARGUMENT="$1"
+[ -n "$EXPOSED_GAMES_PROGRAM" ] || exec "$@"
+EXPOSED_GAMES_INSERTED=""
+EXPOSED_GAMES_REMAINING=$#
+while [ "$EXPOSED_GAMES_REMAINING" -gt 0 ]; do
+  EXPOSED_GAMES_ARGUMENT="$1"
   shift
-  RAESIR_REMAINING=$((RAESIR_REMAINING - 1))
-  if [ -z "$RAESIR_INSERTED" ]; then
-    if {{ [ -n "$RAESIR_PROTON" ] && [ "${{RAESIR_ARGUMENT##*/}}" = "proton" ]; }} || {{ [ -z "$RAESIR_PROTON" ] && [ "$RAESIR_ARGUMENT" -ef "$RAESIR_PROGRAM" ]; }}; then
-      set -- "$@" "$RAESIR_INNER"
-      RAESIR_INSERTED=1
+  EXPOSED_GAMES_REMAINING=$((EXPOSED_GAMES_REMAINING - 1))
+  if [ -z "$EXPOSED_GAMES_INSERTED" ]; then
+    if {{ [ -n "$EXPOSED_GAMES_PROTON" ] && [ "${{EXPOSED_GAMES_ARGUMENT##*/}}" = "proton" ]; }} || {{ [ -z "$EXPOSED_GAMES_PROTON" ] && [ "$EXPOSED_GAMES_ARGUMENT" -ef "$EXPOSED_GAMES_PROGRAM" ]; }}; then
+      set -- "$@" "$EXPOSED_GAMES_INNER"
+      EXPOSED_GAMES_INSERTED=1
     fi
   fi
-  set -- "$@" "$RAESIR_ARGUMENT"
+  set -- "$@" "$EXPOSED_GAMES_ARGUMENT"
 done
-[ -n "$RAESIR_INSERTED" ] || exit 78
+[ -n "$EXPOSED_GAMES_INSERTED" ] || exit 78
 exec "$@"
 "#
     );
@@ -348,10 +354,10 @@ mod tests {
                 "quote'and\"literal",
                 "$literal",
             ])
-            .arg("--raesir-program=game path.exe")
-            .arg("--raesir-proton")
-            .arg("--raesir-dll=winhttp=n,b")
-            .arg(format!("--raesir-env={}", env.display()))
+            .arg("--exposed-games-program=game path.exe")
+            .arg("--exposed-games-proton")
+            .arg("--exposed-games-dll=winhttp=n,b")
+            .arg(format!("--exposed-games-env={}", env.display()))
             .env("DBUS_SESSION_BUS_ADDRESS", "bootstrap-bus")
             .env_remove("WINEDLLOVERRIDES")
             .output()
@@ -368,8 +374,8 @@ mod tests {
         let refused = Command::new(&wrapper)
             .arg(&runtime)
             .arg("missing-proton")
-            .arg("--raesir-program=game path.exe")
-            .arg("--raesir-proton")
+            .arg("--exposed-games-program=game path.exe")
+            .arg("--exposed-games-proton")
             .output()
             .unwrap();
         assert_eq!(refused.status.code(), Some(78));
@@ -393,7 +399,7 @@ mod tests {
         let output = Command::new(wrapper)
             .arg(&game)
             .arg("one argument")
-            .arg(format!("--raesir-program={}", game.display()))
+            .arg(format!("--exposed-games-program={}", game.display()))
             .args(launch::wrapper_target_args(&profile))
             .output()
             .unwrap();

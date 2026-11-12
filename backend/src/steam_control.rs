@@ -408,7 +408,7 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
         return Err(Error::Rejected);
     }
     if matches!(operation, "install" | "uninstall" | "pause" | "resume")
-        && std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+        && std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
     {
         return Err(Error::Unavailable);
     }

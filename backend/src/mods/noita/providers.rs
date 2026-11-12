@@ -10,7 +10,7 @@ pub(super) type Download = (
 
 fn http() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .user_agent("Raesir/0.1")
+        .user_agent("ExposedGames/0.1")
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(45))
         .build()
@@ -48,7 +48,7 @@ impl Manager {
             return Ok(value);
         }
         let fetch = || {
-            if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+            if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
                 return Err("Mod networking is disabled".to_owned());
             }
             let mut data = Vec::new();
@@ -96,7 +96,7 @@ impl Manager {
         if path.is_file() {
             return Ok(path);
         }
-        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
             return Err("Mod networking is disabled".into());
         }
         let response = http()?
@@ -399,7 +399,7 @@ fn recipe_package(recipe: &recipes::Recipe) -> Package {
         downloads: 0,
         deprecated: false,
         categories: recipe.categories.clone(),
-        source: "Raesir catalog".into(),
+        source: "Exposed Games catalog".into(),
     }
 }
 

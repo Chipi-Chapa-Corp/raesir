@@ -72,7 +72,7 @@ class CacheTests(unittest.TestCase):
     def test_incremental_variants_are_bounded_and_dry_run_is_read_only(self):
         profile = self.profile()
         for i in range(5):
-            path = self.old(profile / f"incremental/raesir-{i}/session/work.bin", 900 + i * 100)
+            path = self.old(profile / f"incremental/exposed-games-{i}/session/work.bin", 900 + i * 100)
             for parent in (path.parent, path.parent.parent):
                 os.utime(parent, (time.time() - 900 - i * 100,) * 2)
         before = sorted(str(p) for p in self.root.rglob("*"))
@@ -87,7 +87,7 @@ class CacheTests(unittest.TestCase):
         inactive = self.profile("desktop-dev")
         self.old(inactive / "deps/library.rlib")
         active = self.profile("release")
-        binary = self.old(active / "raesir")
+        binary = self.old(active / "exposed-games")
         for profile in (debug, inactive, active):
             for path, _ in cache.files(profile):
                 os.utime(path, (time.time() - 900,) * 2)

@@ -62,7 +62,7 @@ pub fn helper(root: &Path, input: &Path, output: &Path) {
         let request: Request = serde_json::from_slice(&fs::read(input).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if !matches!(&request, Request::Read { .. })
-            && std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+            && std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
             && !super::diagnostic_launch_enabled()
         {
             return Err("Steam launch changes are disabled in this diagnostic profile".into());
@@ -182,7 +182,7 @@ fn request_impl(root: &Path, request: Request) -> Result<Option<String>, String>
                 config,
                 3,
                 key.as_ptr(),
-                c"__RAESIR_UNSET_LAUNCH_OPTIONS__".as_ptr(),
+                c"__EXPOSED_GAMES_UNSET_LAUNCH_OPTIONS__".as_ptr(),
             );
             if value.is_null() {
                 return Err("Steam did not return launch options".into());
@@ -191,7 +191,7 @@ fn request_impl(root: &Path, request: Request) -> Result<Option<String>, String>
             if value.len() > 32768 {
                 return Err("Steam launch options are too long".into());
             }
-            Ok((value != "__RAESIR_UNSET_LAUNCH_OPTIONS__").then(|| value.to_owned()))
+            Ok((value != "__EXPOSED_GAMES_UNSET_LAUNCH_OPTIONS__").then(|| value.to_owned()))
         };
         match request {
             Request::Read { .. } => read(),

@@ -33,12 +33,12 @@ impl Manager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok());
         let readme = cached.or_else(|| {
-            if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+            if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
                 return None;
             }
             let fetch = || -> Result<serde_json::Value, String> {
                 let client = reqwest::blocking::Client::builder()
-                    .user_agent("Raesir/0.1")
+                    .user_agent("ExposedGames/0.1")
                     .connect_timeout(Duration::from_secs(3))
                     .timeout(Duration::from_secs(10))
                     .build()

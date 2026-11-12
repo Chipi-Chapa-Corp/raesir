@@ -38,7 +38,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 prune_cache
-printf '[dev] Building and launching Raesir. Run ./dev again after changes.\n'
-setsid cargo run --package raesir --bin raesir -- "$@" 9>&- &
+printf '[dev] Building and launching Exposed Games. Run ./dev again after changes.\n'
+setsid cargo run --package exposed-games --bin exposed-games -- "$@" 9>&- &
 app_pid=$!
 wait "$app_pid"

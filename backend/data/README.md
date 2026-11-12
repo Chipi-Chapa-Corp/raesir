@@ -1,4 +1,4 @@
-The versioned `mod-recipes.json` catalog is bundled into Raesir at build time.
+The versioned `mod-recipes.json` catalog is bundled into Exposed Games at build time.
 It is data, with no shell scripts or expressions to execute.
 
 Each game specifies its exact Steam app ID, installer adapter, ModWorkshop game
@@ -20,7 +20,7 @@ its upstream repository. Catalog artwork also applies to existing installations.
 
 Supported argument placeholders are `{game.executable}`, `{profile.config}` and
 `{profile.state}`. The latter two point to persistent, separate data for the
-selected Raesir profile. Arguments are passed directly to the process, without a
+selected Exposed Games profile. Arguments are passed directly to the process, without a
 shell. New operations or game installation formats require an adapter change;
 adding another recipe using these operations requires only catalog data.
 

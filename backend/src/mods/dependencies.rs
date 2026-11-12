@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::{BTreeSet, HashSet};
 
-const FILE: &str = "raesir-install-reasons.json";
+const FILE: &str = "exposed-games-install-reasons.json";
 
 /// Kept inside each revision so files, dependency edges and install reasons
 /// are published together. Missing reasons mean user-managed, never automatic.
@@ -12,7 +12,15 @@ pub(super) struct Reasons {
 
 impl Reasons {
     pub(super) fn read(path: &Path) -> Result<Self, String> {
-        match fs::read(path.join(FILE)) {
+        let file = path.join(FILE);
+        let bytes = fs::read(&file).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                fs::read(path.join("raesir-install-reasons.json"))
+            } else {
+                Err(error)
+            }
+        });
+        match bytes {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
                 format!("Could not read mod install reasons; existing files were kept: {e}")
             }),
@@ -150,6 +158,23 @@ impl Profile {
 mod tests {
     use super::*;
 
+    #[test]
+    fn renamed_app_preserves_legacy_dependency_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("raesir-install-reasons.json"),
+            br#"{"automatic":["Owner-Dependency"]}"#,
+        )
+        .unwrap();
+        let mut reasons = Reasons::read(dir.path()).unwrap();
+        assert!(reasons.automatic.contains("Owner-Dependency"));
+        reasons.automatic.clear();
+        reasons.write(dir.path()).unwrap();
+        assert!(Reasons::read(dir.path()).unwrap().automatic.is_empty());
+        fs::write(dir.path().join(FILE), b"corrupt").unwrap();
+        assert!(Reasons::read(dir.path()).is_err());
+    }
+
     fn entry(name: &str, dependencies: &[&str]) -> modlist::ProfileMod {
         let version: thunderstore_engine::models::Version =
             serde_json::from_value(serde_json::json!({
@@ -172,7 +197,7 @@ mod tests {
         Profile {
             id: "test".into(),
             name: "Test".into(),
-            source: "Raesir".into(),
+            source: "Exposed Games".into(),
             path: PathBuf::new(),
             active: true,
             installed: reasons.installed(entries),
@@ -276,7 +301,7 @@ mod tests {
                 packages: Arc::new(Vec::new()),
             },
         );
-        let root = manager.profile_root("peak", "raesir");
+        let root = manager.profile_root("peak", "exposed-games");
         let original = root.join("revisions/profile-original");
         let entries = vec![
             entry("Root", &["Owner-Dependency-1.0.0"]),

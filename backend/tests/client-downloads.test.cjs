@@ -37,7 +37,7 @@ function ubisoft() {
         observeRoute(type) { return { subscribe(callback) { routes.set(new type().type, callback); } }; },
     } });
     return { queue, routes, sent, context, sdk, hang: value=>hang=value, patches: value => patches=value, products: value => products=value,
-        run: input => context.raesirUbisoft({ action: 'snapshot', ...input }) };
+        run: input => context.exposedGamesUbisoft({ action: 'snapshot', ...input }) };
 }
 
 test('Ubisoft observes byte progress, excludes DLC, and rejects unknown patch schemas', async () => {
@@ -99,7 +99,7 @@ function ea() {
         initiateUpdateV3(input, callback) { sent.push(input); queued.push(...input.offerIds); callback(); },
     };
     const context = load('ea', { webchannel: { objects: { GamesManager: manager } } });
-    return { queued, installed, states, sent, manager, run: input => context.raesirEa({ action: 'snapshot', ...input }) };
+    return { queued, installed, states, sent, manager, run: input => context.exposedGamesEa({ action: 'snapshot', ...input }) };
 }
 
 test('EA reads explicit update flags and live progress from its native queue', async () => {
@@ -139,7 +139,7 @@ test('EA completion requires installed, unqueued, explicitly up-to-date content'
 
 test('Unknown and signed-out EA interfaces fail without sending download requests', async () => {
     const context = load('ea', {});
-    await assert.rejects(context.raesirEa({ action: 'update', id: 'offer-a' }), /Sign in/);
+    await assert.rejects(context.exposedGamesEa({ action: 'update', id: 'offer-a' }), /Sign in/);
     const client = ea();
     client.manager.getQueuedOfferIds = callback => callback({ unexpected: ['offer-a'] });
     await assert.rejects(client.run({}), /Unsupported EA download queue/);

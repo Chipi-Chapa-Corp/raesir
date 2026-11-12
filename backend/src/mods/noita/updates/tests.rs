@@ -94,7 +94,7 @@ fn recipe_updates_keep_the_pair_and_settings_and_failed_downloads_leave_the_orig
         "",
         &[(&tool.executable, b"updated companion, never executed")],
     );
-    let root = manager.profile_root("noita", "raesir");
+    let root = manager.profile_root("noita", "exposed-games");
     let source = root.join("revisions/profile-fixture");
     fs::create_dir_all(source.join("mods/oldfolder")).unwrap();
     fs::write(source.join("mods/oldfolder/old.lua"), b"old mod").unwrap();
@@ -287,10 +287,25 @@ fn switching_recipe_repository_migrates_an_existing_install_with_the_same_releas
 
 #[test]
 fn fork_release_revisions_do_not_roll_back_multiplayer_fixes() {
-    assert!(!not_older("v1.6.8-raesir.2", "v1.6.8-raesir.1"));
-    assert!(!not_older("v1.6.8-raesir.2", "v1.6.8"));
-    assert!(not_older("v1.6.8", "v1.6.8-raesir.1"));
-    assert!(not_older("v1.6.8-raesir.2", "v1.6.8-raesir.10"));
-    assert!(not_older("v1.6.8-raesir.2", "v1.6.9-raesir.1"));
-    assert!(!not_older("v1.6.9-raesir.1", "v1.6.8-raesir.10"));
+    assert!(!not_older("v1.6.8-raesir.2", "v1.6.8-exposed-games.1"));
+    assert!(not_older("v1.6.8-raesir.2", "v1.6.8-exposed-games.3"));
+    assert!(!not_older("v1.6.8-exposed-games.3", "v1.6.8-raesir.2"));
+    assert!(!not_older(
+        "v1.6.8-exposed-games.2",
+        "v1.6.8-exposed-games.1"
+    ));
+    assert!(!not_older("v1.6.8-exposed-games.2", "v1.6.8"));
+    assert!(not_older("v1.6.8", "v1.6.8-exposed-games.1"));
+    assert!(not_older(
+        "v1.6.8-exposed-games.2",
+        "v1.6.8-exposed-games.10"
+    ));
+    assert!(not_older(
+        "v1.6.8-exposed-games.2",
+        "v1.6.9-exposed-games.1"
+    ));
+    assert!(!not_older(
+        "v1.6.9-exposed-games.1",
+        "v1.6.8-exposed-games.10"
+    ));
 }

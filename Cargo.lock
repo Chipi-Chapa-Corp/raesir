@@ -1839,6 +1839,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "exposed-games"
+version = "0.1.0"
+dependencies = [
+ "dirs 7.0.0",
+ "exposed-games-backend",
+ "futures",
+ "gpui-ce",
+ "gpui_ce_elements",
+ "gpui_ce_platform",
+ "image",
+ "libloading",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
+ "winresource",
+]
+
+[[package]]
+name = "exposed-games-backend"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "libloading",
+ "prost",
+ "pulldown-cmark",
+ "reqwest 0.12.28",
+ "roxmltree 0.21.2",
+ "rusqlite",
+ "scraper",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "shlex 1.3.0",
+ "steam-vdf-parser",
+ "sysinfo 0.37.2",
+ "tempfile",
+ "thunderstore-engine",
+ "tokio",
+ "tungstenite",
+ "zbus",
+ "zip 9.1.3",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5331,50 +5376,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "raesir"
-version = "0.1.0"
-dependencies = [
- "dirs 7.0.0",
- "futures",
- "gpui-ce",
- "gpui_ce_elements",
- "gpui_ce_platform",
- "image",
- "libloading",
- "raesir-backend",
- "serde_json",
- "tempfile",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "raesir-backend"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "libc",
- "libloading",
- "prost",
- "pulldown-cmark",
- "reqwest 0.12.28",
- "roxmltree 0.21.2",
- "rusqlite",
- "scraper",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "shlex 1.3.0",
- "steam-vdf-parser",
- "sysinfo 0.37.2",
- "tempfile",
- "thunderstore-engine",
- "tokio",
- "tungstenite",
- "zbus",
- "zip 9.1.3",
-]
-
-[[package]]
 name = "rand"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8530,6 +8531,15 @@ checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "version_check",
 ]
 
 [[package]]

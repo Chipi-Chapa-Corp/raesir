@@ -1,5 +1,5 @@
 [package]
-name = "raesir"
+name = "exposed-games"
 version = "0.1.0"
 license = "GPL-3.0-only"
 edition = "2024"
@@ -14,7 +14,7 @@ gpui = { package = "gpui-ce", version = "=0.3.0", default-features = false }
 gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", default-features = false, features = ["wayland", "x11"] }
 gpui_ce_elements = "=0.3.0"
 serde_json = "1"
-raesir-backend = { path = "../backend" }
+exposed-games-backend = { path = "../backend" }
 dirs = "7"
 libloading = "0.8"
 futures = "0.3"
@@ -22,7 +22,9 @@ unicode-segmentation = "1"
 image_codec = { package = "image", version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif-native"] }
 tempfile = "3"
 
+[build-dependencies]
+winresource = { version = "0.1.31", default-features = false }
 
 [[bin]]
-name = "raesir"
+name = "exposed-games"
 path = "src/main.rs"

@@ -1,7 +1,7 @@
 // Evaluated only in the selected Ubisoft client's local native popup context.
 // The installed client supplies the messaging classes and performs entitlement,
 // install-directory, license and download checks itself.
-async function raesirUbisoft(input) {
+async function exposedGamesUbisoft(input) {
     if (typeof uplayUiMessage !== "function" || !globalThis.upc?.sendQuery || !globalThis.System?.import) {
         throw new Error("Unsupported Ubisoft client interface");
     }
@@ -28,7 +28,7 @@ async function raesirUbisoft(input) {
         });
     };
     const validId = id => /^(?:[1-9][0-9]{0,9})$/.test(String(id)) && Number(id) <= 4294967295;
-    const stateKey = "__raesirDownloads1";
+    const stateKey = "__exposedGamesDownloads1";
     if (!globalThis[stateKey]) {
         const cache = { progress: new Map(), completed: new Set(), games: new Map() };
         upc.observeRoute(messages.MessageDownloadProgress).subscribe(message => {

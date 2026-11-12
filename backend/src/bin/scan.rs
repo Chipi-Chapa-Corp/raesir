@@ -1,5 +1,5 @@
 //! Read-only scanner diagnostics, without opening a desktop or accessing the API.
-use raesir_backend::{
+use exposed_games_backend::{
     inventory,
     model::{Os, OwnedLibrary, ScanOptions, Source},
 };
@@ -7,12 +7,12 @@ use raesir_backend::{
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() == 3 && args[1] == "--download-worker" {
-        raesir_backend::downloads::run_worker(std::path::Path::new(&args[2]));
+        exposed_games_backend::downloads::run_worker(std::path::Path::new(&args[2]));
         return;
     }
     if args.len() == 6 && args[1] == "--steam-control" {
         let appid = args[4].to_string_lossy().parse().unwrap_or(0);
-        raesir_backend::steam_control::helper(
+        exposed_games_backend::steam_control::helper(
             std::path::Path::new(&args[2]),
             appid,
             &args[3].to_string_lossy(),
@@ -21,14 +21,14 @@ fn main() {
         return;
     }
     if args.len() == 6 && args[1] == "--game-details" {
-        let game = raesir_backend::catalog::entry(
+        let game = exposed_games_backend::catalog::entry(
             &args[2].to_string_lossy(),
             &args[3].to_string_lossy(),
             &args[4].to_string_lossy(),
             vec![],
             "diagnostic",
         );
-        let result = raesir_backend::details::fetch(&game, std::path::Path::new(&args[5]));
+        let result = exposed_games_backend::details::fetch(&game, std::path::Path::new(&args[5]));
         match result {
             Ok(data) => println!("{}", serde_json::to_string_pretty(&data).unwrap()),
             Err(error) => {
@@ -39,7 +39,7 @@ fn main() {
         return;
     }
     if args.len() == 3 && args[1] == "--steam-catalog" {
-        let result = raesir_backend::steam_ipc::catalog(std::path::Path::new(&args[2]));
+        let result = exposed_games_backend::steam_ipc::catalog(std::path::Path::new(&args[2]));
         println!("{}", serde_json::to_string(&result).unwrap());
         return;
     }

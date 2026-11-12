@@ -43,6 +43,51 @@ fn cached_download(manager: &Manager, url: &str, files: &[(&str, &[u8])]) {
 }
 
 #[test]
+fn nexus_import_and_removal_work_while_noita_or_its_proxy_owns_the_game_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = manager(dir.path());
+    manager.leases = dir.path().join("leases");
+    let game_dir = dir.path().join("game");
+    fs::create_dir_all(game_dir.join("mods/live")).unwrap();
+    fs::write(game_dir.join("mods/live/init.lua"), b"running mod").unwrap();
+    let mut game = game();
+    game.installations.push(crate::model::Installation {
+        path: game_dir.to_string_lossy().into(),
+        library: dir.path().to_string_lossy().into(),
+        os: crate::model::Os::host(),
+        state: "installed".into(),
+        last_seen: 0,
+    });
+    let _lease = manager.game_lease(&game_dir).unwrap();
+    manager.active.lock().unwrap().insert(game_dir.clone());
+    let archive = dir.path().join("mod.zip");
+    zip(
+        &archive,
+        &[
+            ("new/mod.xml", b"<Mod name=\"New\"/>"),
+            ("new/init.lua", b"next launch"),
+        ],
+    );
+    manager
+        .import_nexus(
+            &game,
+            "https://www.nexusmods.com/noita/mods/1",
+            &archive,
+            "",
+        )
+        .unwrap();
+    let installed = manager.own_path("noita").unwrap();
+    assert!(installed.join("mods/new/init.lua").is_file());
+    manager.uninstall(&game, "nexus:1").unwrap();
+    assert!(!manager.own_path("noita").unwrap().join("mods/new").exists());
+    assert_eq!(
+        fs::read(game_dir.join("mods/live/init.lua")).unwrap(),
+        b"running mod"
+    );
+    assert!(!game_dir.join("mods/new").exists());
+}
+
+#[test]
 fn nexus_import_requires_a_matching_source_page_and_preserves_other_profiles() {
     let dir = tempfile::tempdir().unwrap();
     let manager = manager(dir.path());
@@ -83,7 +128,7 @@ fn nexus_import_requires_a_matching_source_page_and_preserves_other_profiles() {
     assert!(original.join("mods/test_mod/init.lua").is_file());
     manager.create_profile(&game(), "Separate").unwrap();
     assert!(manager.profiles("noita")[1].installed.is_empty());
-    manager.select(&game(), "raesir").unwrap();
+    manager.select(&game(), "exposed-games").unwrap();
     manager.uninstall(&game(), "nexus:1").unwrap();
     assert!(
         !manager
@@ -120,7 +165,7 @@ fn flat_archives_need_an_explicit_folder_and_conflicts_are_transactional() {
     manager
         .import_nexus(&game(), url, &archive, "flat")
         .unwrap();
-    let root = manager.profile_root("noita", "raesir");
+    let root = manager.profile_root("noita", "exposed-games");
     let pointer = fs::read(root.join("current.json")).unwrap();
     assert!(
         manager
@@ -214,7 +259,12 @@ fn bundled_recipe_installs_a_matching_pair_and_a_failed_tool_update_keeps_live_r
             .join(&records[0].companion.as_ref().unwrap().executable)
             .is_file()
     );
-    let pointer = fs::read(manager.profile_root("noita", "raesir").join("current.json")).unwrap();
+    let pointer = fs::read(
+        manager
+            .profile_root("noita", "exposed-games")
+            .join("current.json"),
+    )
+    .unwrap();
     cached_download(
         &manager,
         tool_url,
@@ -222,7 +272,12 @@ fn bundled_recipe_installs_a_matching_pair_and_a_failed_tool_update_keeps_live_r
     );
     assert!(manager.install(&game(), "recipe:entangled-worlds").is_err());
     assert_eq!(
-        fs::read(manager.profile_root("noita", "raesir").join("current.json")).unwrap(),
+        fs::read(
+            manager
+                .profile_root("noita", "exposed-games")
+                .join("current.json")
+        )
+        .unwrap(),
         pointer
     );
     assert_eq!(

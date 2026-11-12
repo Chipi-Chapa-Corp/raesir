@@ -39,7 +39,7 @@ impl ModBrowser {
     pub(super) fn modworkshop_files_dialog(
         &self,
         id: &str,
-        files: &[raesir_backend::mods::ModFile],
+        files: &[exposed_games_backend::mods::ModFile],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
@@ -209,7 +209,7 @@ impl ModBrowser {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Install Mod"))
                 .child(div().whitespace_normal().child("Download the mod from Nexus, then choose its archive. Installs into the selected profile."))
                 .child(text_button("browse-nexus","Browse Nexus Mods").on_click(move|_,_,cx|{
-                    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none(){cx.open_url(&url);}
+                    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none(){cx.open_url(&url);}
                 }))
                 .child(pill().rounded(rems(0.8)).px(rems(0.8)).child(
                     text_input("nexus-page-url").state(self.nexus_url.downgrade()).placeholder("Nexus mod page URL")

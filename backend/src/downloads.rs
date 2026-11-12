@@ -171,7 +171,7 @@ impl Manager {
             else {
                 continue;
             };
-            // The owning client can finish an available update outside Raesir.
+            // The owning client can finish an available update outside Exposed Games.
             if progress.phase == Phase::Available
                 && request
                     .completion
@@ -228,7 +228,7 @@ impl Manager {
     }
 
     pub fn start(&self, mut request: Request) -> Result<(), String> {
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
             return Err("Downloads are disabled in this diagnostic profile".into());
         }
         let dir = self.directory(&request.key);

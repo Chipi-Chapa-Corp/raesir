@@ -55,7 +55,7 @@ fn steam_launch_url(id: &str, args: &[String]) -> Result<String, String> {
 }
 
 pub fn resolve(report: &Report, key: &str, kind: &str) -> Result<GameAction, String> {
-    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
     let game = report
@@ -169,7 +169,7 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
 }
 
 pub fn dispatch(target: &ActionTarget) -> Result<(), String> {
-    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
     let mut command = match target {
@@ -310,7 +310,7 @@ fn portal_request(connection: &zbus::blocking::Connection, url: &str) -> Result<
         .as_str()
         .trim_start_matches(':')
         .replace('.', "_");
-    let path = format!("/org/freedesktop/portal/desktop/request/{sender}/raesir");
+    let path = format!("/org/freedesktop/portal/desktop/request/{sender}/exposed_games");
     let request = Proxy::new(
         connection,
         "org.freedesktop.portal.Desktop",
@@ -342,7 +342,7 @@ fn portal_request(connection: &zbus::blocking::Connection, url: &str) -> Result<
         "org.freedesktop.portal.OpenURI",
     )
     .map_err(|e| e.to_string())?;
-    let options = HashMap::from([("handle_token", Value::from("raesir"))]);
+    let options = HashMap::from([("handle_token", Value::from("exposed_games"))]);
     let opened: zbus::Result<OwnedObjectPath> = portal.call("OpenURI", &("", url, options));
     let result = match opened {
         Err(e) => Err(format!("Could not open the link through your desktop: {e}")),
@@ -360,7 +360,7 @@ fn portal_request(connection: &zbus::blocking::Connection, url: &str) -> Result<
 }
 
 pub fn support(project: &str) -> Result<(), String> {
-    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
     let url = match project {
@@ -646,7 +646,7 @@ mod tests {
                     options
                         .get("handle_token")
                         .and_then(|v| <&str>::try_from(v).ok()),
-                    Some("raesir")
+                    Some("exposed_games")
                 );
                 let sender = header
                     .sender()
@@ -654,7 +654,8 @@ mod tests {
                     .as_str()
                     .trim_start_matches(':')
                     .replace('.', "_");
-                let path = format!("/org/freedesktop/portal/desktop/request/{sender}/raesir");
+                let path =
+                    format!("/org/freedesktop/portal/desktop/request/{sender}/exposed_games");
                 connection
                     .emit_signal(
                         None::<&str>,

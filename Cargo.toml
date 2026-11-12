@@ -9,7 +9,7 @@ incremental = true
 
 # The launcher is developed interactively; image decoding and per-pixel card
 # processing must not run as unoptimized debug loops.
-[profile.dev.package.raesir]
+[profile.dev.package.exposed-games]
 opt-level = 2
 
 [profile.dev.package.image]

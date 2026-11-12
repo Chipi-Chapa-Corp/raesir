@@ -1,9 +1,0 @@
-[Flatpak Repo]
-Title=Raesir
-Url=https://chipi-chapa-corp.github.io/raesir/flatpak
-Homepage=https://github.com/Chipi-Chapa-Corp/raesir
-Comment=Stable releases of Raesir
-Description=Stable Flatpak releases of the Raesir game launcher
-Icon=https://chipi-chapa-corp.github.io/raesir/flatpak/raesir.png
-DefaultBranch=stable
-GPGVerify=false

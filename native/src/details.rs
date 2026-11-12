@@ -5,8 +5,8 @@ use crate::{
     icons::{icon, rating_image, system_icon},
     smooth_scroll::SmoothWheel,
 };
+use exposed_games_backend::{details::Details, model::LibraryGame};
 use gpui::{prelude::*, *};
-use raesir_backend::{details::Details, model::LibraryGame};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -16,18 +16,14 @@ use std::{
 };
 mod description;
 mod player_stats;
+mod reviews;
 use unicode_segmentation::UnicodeSegmentation;
-
-const REVIEW_FILTERS: [[&str; 3]; 2] = [
-    ["All dates", "Past 30 days", "Past year"],
-    ["All ratings", "Recommended", "Not recommended"],
-];
 
 pub struct DetailsPage {
     game: LibraryGame,
     mod_context: Option<ModContext>,
     _mod_subscription: Option<Subscription>,
-    download_progress: Option<raesir_backend::steam_control::Progress>,
+    download_progress: Option<exposed_games_backend::steam_control::Progress>,
     poster: Option<Arc<RenderImage>>,
     backdrop: Entity<crate::backdrop::Backdrop>,
     backdrop_source: String,
@@ -39,7 +35,7 @@ pub struct DetailsPage {
     loading: bool,
     error: Option<String>,
     task: Option<Task<()>>,
-    stats: Option<Arc<raesir_backend::player_stats::PlayerStats>>,
+    stats: Option<Arc<exposed_games_backend::player_stats::PlayerStats>>,
     stats_task: Option<Task<()>>,
     stats_loading: bool,
     achievements_open: bool,
@@ -63,10 +59,9 @@ pub struct DetailsPage {
     media_scroll: ScrollHandle,
     strip_bounds: Rc<Cell<Bounds<Pixels>>>,
     about_expanded: bool,
-    review_date: u8,
-    review_rating: u8,
+    review_state: reviews::State,
     filter_menu: Option<(usize, usize)>,
-    filter_bounds: [Rc<Cell<Bounds<Pixels>>>; 2],
+    filter_bounds: [Rc<Cell<Bounds<Pixels>>>; 6],
     filter_focus: FocusHandle,
     return_focus: FocusHandle,
     wheel: SmoothWheel,
@@ -89,7 +84,7 @@ impl DetailsPage {
         backend: Arc<Backend>,
         owner: WeakEntity<Launcher>,
         return_focus: FocusHandle,
-        download_progress: Option<raesir_backend::steam_control::Progress>,
+        download_progress: Option<exposed_games_backend::steam_control::Progress>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -130,8 +125,7 @@ impl DetailsPage {
             media_scroll: ScrollHandle::new(),
             strip_bounds: Rc::new(Cell::new(Bounds::default())),
             about_expanded: false,
-            review_date: 0,
-            review_rating: 0,
+            review_state: reviews::State::new(cx),
             filter_menu: None,
             filter_bounds: std::array::from_fn(|_| Rc::new(Cell::new(Bounds::default()))),
             filter_focus: cx.focus_handle(),
@@ -563,7 +557,7 @@ impl DetailsPage {
     pub fn library_changed(
         &mut self,
         games: &[crate::library::Game],
-        progress: &HashMap<String, raesir_backend::steam_control::Progress>,
+        progress: &HashMap<String, exposed_games_backend::steam_control::Progress>,
         cx: &mut Context<Self>,
     ) {
         if let Some(game) = games.iter().find(|g| g.source.key == self.game.key) {
@@ -577,147 +571,6 @@ impl DetailsPage {
         self.filter_menu = None;
         window.focus(&self.return_focus, cx);
         cx.notify();
-    }
-    fn select_filter(
-        &mut self,
-        kind: usize,
-        value: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if kind == 0 {
-            self.review_date = value as u8;
-        } else {
-            self.review_rating = value as u8;
-        }
-        self.reviews_visible = 4;
-        self.close_filter(window, cx);
-    }
-    fn review_controls(&self, cx: &mut Context<Self>) -> Div {
-        div()
-            .flex()
-            .flex_wrap()
-            .gap(rems(0.65))
-            .children((0..2).map(|kind| {
-                let selected = [self.review_date, self.review_rating][kind] as usize;
-                let bounds = self.filter_bounds[kind].clone();
-                text_button(
-                    ["review-date", "review-rating"][kind],
-                    REVIEW_FILTERS[kind][selected],
-                )
-                .w(rems([12., 14.][kind]))
-                .justify_between()
-                .child(icon("expand"))
-                .on_prepaint(move |paint, _, _| bounds.set(paint.bounds))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.filter_menu.is_some_and(|(open, _)| open == kind) {
-                        this.close_filter(window, cx);
-                    } else {
-                        this.filter_menu = Some((kind, selected));
-                        window.focus(&this.filter_focus, cx);
-                        cx.notify();
-                    }
-                }))
-            }))
-    }
-    fn review_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some((kind, highlighted)) = self.filter_menu else {
-            return div().into_any_element();
-        };
-        let selected = [self.review_date, self.review_rating][kind] as usize;
-        let bounds = self.filter_bounds[kind].get();
-        let above = bounds.bottom() + window.rem_size() * 10.7 > window.viewport_size().height;
-        let origin = point(
-            bounds.left(),
-            if above {
-                bounds.top() - window.rem_size() * 0.4
-            } else {
-                bounds.bottom() + window.rem_size() * 0.4
-            },
-        );
-        let menu = pill()
-            .id("review-filter-menu")
-            .occlude()
-            .track_focus(&self.filter_focus)
-            .w(rems([12., 14.][kind]))
-            .p(rems(0.5))
-            .rounded(rems(1.))
-            .shadow_lg()
-            .bg(rgba(0x101010e6))
-            .flex_col()
-            .items_stretch()
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                if !this
-                    .filter_bounds
-                    .iter()
-                    .any(|b| b.get().contains(&event.position))
-                {
-                    this.close_filter(window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &crate::ClearSearch, window, cx| {
-                this.close_filter(window, cx);
-                cx.stop_propagation();
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                let Some((kind, active)) = this.filter_menu else {
-                    return;
-                };
-                match event.keystroke.key.as_str() {
-                    "up" => this.filter_menu = Some((kind, (active + 2) % 3)),
-                    "down" => this.filter_menu = Some((kind, (active + 1) % 3)),
-                    "home" => this.filter_menu = Some((kind, 0)),
-                    "end" => this.filter_menu = Some((kind, 2)),
-                    "enter" | "space" => this.select_filter(kind, active, window, cx),
-                    "escape" | "tab" => this.close_filter(window, cx),
-                    _ => return,
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .children(
-                REVIEW_FILTERS[kind]
-                    .iter()
-                    .enumerate()
-                    .map(|(index, label)| {
-                        text_button(("review-option", index), *label)
-                            .rounded(rems(0.6))
-                            .justify_between()
-                            .bg(if index == highlighted {
-                                rgba(0x303030b3)
-                            } else {
-                                rgba(0x00000000)
-                            })
-                            .when(index == selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                            .child(
-                                div()
-                                    .size(rems(1.25))
-                                    .when(index == selected, |d| d.child(icon("check"))),
-                            )
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                if this.filter_menu != Some((kind, index)) {
-                                    this.filter_menu = Some((kind, index));
-                                    cx.notify();
-                                }
-                            }))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_filter(kind, index, window, cx)
-                            }))
-                    }),
-            );
-        deferred(
-            anchored()
-                .anchor(if above {
-                    Anchor::BottomLeft
-                } else {
-                    Anchor::TopLeft
-                })
-                .position(origin)
-                .snap_to_window_with_margin(window.rem_size() * 0.5)
-                .child(menu),
-        )
-        .priority(1)
-        .into_any_element()
     }
     pub fn update_cover(
         &mut self,
@@ -750,7 +603,7 @@ impl DetailsPage {
                 })
                 .await;
             let fresh = cached.as_ref().is_some_and(|v| {
-                raesir_backend::details::now().saturating_sub(v.updated) < 21600
+                exposed_games_backend::details::now().saturating_sub(v.updated) < 21600
                     && (v.description.is_empty() || v.description_html.is_some())
                     && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft")
                         || v.store_url.is_some())
@@ -1327,7 +1180,7 @@ impl Render for DetailsPage {
                 if self
                     .game
                     .client_os
-                    .contains(&raesir_backend::model::Os::host())
+                    .contains(&exposed_games_backend::model::Os::host())
                 {
                     platform
                         .tooltip(move |_, cx| {
@@ -1374,7 +1227,7 @@ impl Render for DetailsPage {
                     .size(rems(3.3))
                     .on_click(move |_, _, cx| {
                         if let Some(url) = &store_url {
-                            if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
+                            if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
                                 cx.open_url(url);
                             }
                         } else {
@@ -1386,7 +1239,7 @@ impl Render for DetailsPage {
             );
         }
         if self.mod_context.is_none() {
-            let installable = raesir_backend::actions::can_install(&self.game);
+            let installable = exposed_games_backend::actions::can_install(&self.game);
             let working = self.download_progress.as_ref().filter(|p| p.blocks_play());
             let primary_action = if installable { "install" } else { "launch" };
             let primary_tip = working
@@ -1404,7 +1257,7 @@ impl Render for DetailsPage {
                 });
             let uninstall_owner = self.owner.clone();
             let uninstall_key = self.game.key.clone();
-            if raesir_backend::catalog::local(&self.game.installations)
+            if exposed_games_backend::catalog::local(&self.game.installations)
                 && self.game.uninstall.is_some()
                 && working.is_none()
             {
@@ -1479,7 +1332,7 @@ impl Render for DetailsPage {
         meta = meta.child(title);
         if let Some(error) = self.download_progress.as_ref().and_then(|p| {
             p.error.map(|e| e.message().to_owned()).or_else(|| {
-                (p.phase == raesir_backend::steam_control::Phase::Failed).then(|| p.label())
+                (p.phase == exposed_games_backend::steam_control::Phase::Failed).then(|| p.label())
             })
         }) {
             meta = meta.child(
@@ -1686,7 +1539,7 @@ impl Render for DetailsPage {
                                                                 .child(label),
                                                         )
                                                         .child(paragraph(
-                                                            raesir_backend::details::requirement_text(text),
+                                                            exposed_games_backend::details::requirement_text(text),
                                                         ))
                                                 }),
                                             ),
@@ -1696,88 +1549,7 @@ impl Render for DetailsPage {
                 );
             }
             if self.mod_context.is_none() || !data.reviews.is_empty() {
-                let since =
-                    raesir_backend::details::review_cutoff([0, 30, 365][self.review_date as usize]);
-                let recommendation = match self.review_rating {
-                    1 => Some(true),
-                    2 => Some(false),
-                    _ => None,
-                };
-                let matching = data
-                    .reviews
-                    .iter()
-                    .filter(|r| r.matches_filters(&since, recommendation))
-                    .collect::<Vec<_>>();
-                let mut reviews = div()
-                    .flex()
-                    .flex_col()
-                    .gap(rems(0.9))
-                    .child(self.review_controls(cx));
-                if matching.is_empty() {
-                    reviews = reviews.child(panel().child(muted(if data.reviews.is_empty() {
-                        "No written player reviews are available from this store for this edition."
-                    } else {
-                        "No reviews match these filters."
-                    })));
-                }
-                reviews = reviews
-                    .children(matching.iter().take(self.reviews_visible).map(|r| {
-                        let mut footer = Vec::new();
-                        if !r.date.is_empty() {
-                            footer.push(r.date.clone());
-                        }
-                        if let Some(hours) = r.hours.filter(|n| n.is_finite() && *n >= 0.) {
-                            let value = format!("{hours:.1}");
-                            footer.push(format!("{} hours played", value.trim_end_matches(".0")));
-                        }
-                        if !r.platform.is_empty() {
-                            footer.push(r.platform.clone());
-                        }
-                        panel()
-                            .p(rems(1.25))
-                            .gap(rems(0.65))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(rems(0.65))
-                                    .when_some(r.recommended(), |d, good| {
-                                        d.child(
-                                            icon(if good { "thumb-up" } else { "thumb-down" })
-                                                .text_color(rgb(if good {
-                                                    0x65d69a
-                                                } else {
-                                                    0xf4787b
-                                                })),
-                                        )
-                                    })
-                                    .child(div().font_weight(FontWeight::SEMIBOLD).child(
-                                        if r.author.is_empty() {
-                                            "Player".into()
-                                        } else {
-                                            r.author.clone()
-                                        },
-                                    )),
-                            )
-                            .child(review_paragraph(if r.title.is_empty() {
-                                r.text.clone()
-                            } else {
-                                format!("{}\n{}", r.title, r.text)
-                            }))
-                            .when(!footer.is_empty(), |d| d.child(muted(footer.join(" · "))))
-                    }))
-                    .when(matching.len() > self.reviews_visible, |d| {
-                        d.child(
-                            text_button("more-reviews", "Show more reviews")
-                                .self_start()
-                                .child(icon("more"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.reviews_visible += 4;
-                                    cx.notify();
-                                })),
-                        )
-                    });
-                body = body.child(reviews);
+                body = body.child(self.reviews_content(data, cx));
             }
         } else if self.loading {
             body = body.child(content_skeleton());

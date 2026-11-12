@@ -6,7 +6,7 @@ pub(super) enum Dialog {
     Nexus,
     Files {
         id: String,
-        files: Vec<raesir_backend::mods::ModFile>,
+        files: Vec<exposed_games_backend::mods::ModFile>,
     },
     Create,
     Rename {

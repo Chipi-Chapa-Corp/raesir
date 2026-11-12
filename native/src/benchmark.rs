@@ -22,12 +22,12 @@ fn summary(mut values: Vec<f64>) -> Value {
 }
 
 pub fn start(window: &Window, cx: &mut Context<Launcher>) {
-    let Ok(output) = std::env::var("RAESIR_BENCH_OUTPUT") else {
+    let Ok(output) = std::env::var("EXPOSED_GAMES_BENCH_OUTPUT") else {
         return;
     };
     let output = PathBuf::from(output);
     gpui::profiler::set_trace_enabled(true);
-    let mode = std::env::var("RAESIR_BENCH_INPUT").unwrap_or_default();
+    let mode = std::env::var("EXPOSED_GAMES_BENCH_INPUT").unwrap_or_default();
     let fast = mode == "spin";
     let jump_back = mode == "jump-back";
     let jump = mode == "jump" || jump_back;
@@ -136,10 +136,10 @@ pub fn start(window: &Window, cx: &mut Context<Launcher>) {
         }
         let intervals: Vec<_> = present.windows(2).map(|v| v[1] - v[0]).collect();
         let fps = (present.len() - 1) as f64 * 1000. / (present.last().unwrap() - present[0]);
-        let report = json!({"blur": std::env::var_os("RAESIR_NO_BLUR").is_none(),
+        let report = json!({"blur": std::env::var_os("EXPOSED_GAMES_NO_BLUR").is_none(),
             "catalog_games": catalog_games, "visible_games": visible_games, "max_decoded_posters": max_decoded_posters,
             "artwork_cache": artwork_stats,
-            "inactive_cap": std::env::var_os("RAESIR_LIMIT_BACKGROUND").is_some(),
+            "inactive_cap": std::env::var_os("EXPOSED_GAMES_LIMIT_BACKGROUND").is_some(),
             "active": active,
             "input": if jump { "jump" } else if fast { "spin" } else { "wheel" }, "viewport_ready_after_360ms": summary(viewport_ready), "viewport_ready_after_settling": settled_ready, "refresh_hz": refresh, "submitted_fps": fps,
             "present_interval_ms": summary(intervals), "cpu_draw_ms": summary(draw), "layout_ms": summary(layout),

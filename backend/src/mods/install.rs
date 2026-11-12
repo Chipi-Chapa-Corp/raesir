@@ -6,15 +6,14 @@ impl Manager {
         if recipes::for_game(game).is_some() {
             return self.noita_uninstall(game, package);
         }
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
-            && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none()
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none()
         {
             return Err("Mod changes are disabled in this diagnostic profile".into());
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
-        let _lease = self.modification_lease(game)?;
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let profiles = self.profiles(slug);
         let source = self
@@ -51,40 +50,14 @@ impl Manager {
         if recipes::for_game(game).is_some() {
             return self.noita_install(game, package);
         }
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
-            && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none()
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none()
         {
             return Err("Mod installation is disabled in this diagnostic profile".into());
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
-        let _lease = game
-            .installations
-            .iter()
-            .find(|i| {
-                i.os == crate::model::Os::host()
-                    && matches!(i.state.as_str(), "installed" | "external")
-            })
-            .map(|i| {
-                Path::new(&i.path)
-                    .canonicalize()
-                    .map_err(|e| e.to_string())
-                    .and_then(|p| self.game_lease(&p))
-            })
-            .transpose()?;
-        if game.installations.iter().any(|i| {
-            i.os == crate::model::Os::host()
-                && (super::launch::game_running(Path::new(&i.path))
-                    || Path::new(&i.path).canonicalize().ok().is_some_and(|p| {
-                        self.active
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .contains(&p)
-                    }))
-        }) {
-            return Err("Close the game before installing or updating mods".into());
-        }
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let (index, _) = self.catalog(slug, false)?;
         if index.find_index_by_full_name(package).is_none() {
@@ -132,16 +105,63 @@ impl Manager {
 }
 
 impl Manager {
+    fn lovely_repairs(
+        &self,
+        slug: &str,
+        source: &Path,
+    ) -> Result<Vec<(String, bool, thunderstore_engine::install::InstallPlan)>, String> {
+        use thunderstore_engine::{ecosystem::LoaderKind, install};
+        let Some(schema) = ECOSYSTEM
+            .game(slug)
+            .and_then(|g| g.profile())
+            .filter(|p| p.package_loader == LoaderKind::Lovely)
+        else {
+            return Ok(Vec::new());
+        };
+        let mut repairs = Vec::new();
+        for entry in modlist::read(source).map_err(|e| e.to_string())? {
+            if !entry.online_source || ECOSYSTEM.modloader_package(&entry.name).is_some() {
+                continue;
+            }
+            let cache = profile::cache::package_cache_dir(
+                &self.cache,
+                slug,
+                &entry.name,
+                &entry.version_number.to_string(),
+            );
+            if !cache.is_dir() {
+                // A complete profile can still launch after its download cache
+                // was removed. A broken legacy install must be reinstalled.
+                let folder = source.join("mods").join(&entry.name);
+                if folder.is_dir() {
+                    continue;
+                }
+                return Err(format!(
+                    "Reinstall {} to restore its missing mod files",
+                    entry.name
+                ));
+            }
+            let plan = install::plan_install(&ECOSYSTEM, schema, &entry.name, &cache, None)
+                .map_err(|e| e.to_string())?;
+            if !install::plan_is_on_disk(&plan, source, &entry.name, entry.enabled) {
+                repairs.push((entry.name, entry.enabled, plan));
+            }
+        }
+        Ok(repairs)
+    }
+
     /// Move existing revisions into the owning client’s accessible storage when needed.
     pub(super) fn prepare_selected_for_launch(&self, game: &LibraryGame) -> Result<(), String> {
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
+        let _profile_lease = self.profile_lease(slug)?;
         let profiles = self.profiles(slug);
         let Some(source) = self.selected(slug, &profiles) else {
             return Ok(());
         };
         let revisions = self.revisions_dir(game)?;
         fs::create_dir_all(&revisions).map_err(|e| e.to_string())?;
-        if source.path.parent() == revisions.canonicalize().ok().as_deref() {
+        let repairs = self.lovely_repairs(slug, &source.path)?;
+        if repairs.is_empty() && source.path.parent() == revisions.canonicalize().ok().as_deref() {
             return Ok(());
         }
         let pending = tempfile::Builder::new()
@@ -151,6 +171,18 @@ impl Manager {
         profile::portability::ensure_disjoint_trees(&source.path, pending.path())
             .map_err(|e| e.to_string())?;
         copy_profile(&source.path, pending.path())?;
+        for (name, enabled, plan) in repairs {
+            thunderstore_engine::install::apply_install(&plan, pending.path())
+                .map_err(|e| e.to_string())?;
+            if !enabled {
+                thunderstore_engine::install::disable_mod(
+                    ECOSYSTEM.game(slug).and_then(|g| g.profile()).unwrap(),
+                    pending.path(),
+                    &name,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
         commit(&self.profile_root(slug, &self.selected_id(slug)), pending)?;
         self.prune_revisions(slug);
         Ok(())
@@ -195,6 +227,11 @@ impl Manager {
         for revision in revisions.into_iter().skip(2) {
             let path = revision.path();
             if current.as_ref() != Some(&path) && !in_use.contains(&path) {
+                // Another launcher/session may still use this revision even
+                // when this manager has no staging receipt (e.g. script loaders).
+                let Ok(_unused) = self.game_lease(&path) else {
+                    continue;
+                };
                 let _ = fs::remove_dir_all(path);
             }
         }
@@ -256,6 +293,90 @@ pub(super) fn commit(root: &Path, pending: tempfile::TempDir) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lovely_install_preserves_nested_payload_and_supports_toggle_and_uninstall() {
+        let dir = tempfile::tempdir().unwrap();
+        let extracted = dir.path().join("extracted");
+        fs::create_dir_all(extracted.join("src")).unwrap();
+        fs::create_dir_all(extracted.join("lovely")).unwrap();
+        fs::write(extracted.join("src/main.lua"), b"lua").unwrap();
+        fs::write(extracted.join("lovely/patch.toml"), b"patch").unwrap();
+        let target = dir.path().join("profile");
+        let version = serde_json::from_value(
+            serde_json::json!({"name":"Mod", "version_number":"1.0.0", "dependencies":[], "date_created":"2026-01-01T00:00:00Z"}),
+        )
+        .unwrap();
+        profile::install_extracted_in(
+            &target,
+            &ECOSYSTEM,
+            "balatro",
+            "Owner-Mod",
+            "Owner",
+            &version,
+            &extracted,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(target.join("mods/Owner-Mod/src/main.lua")).unwrap(),
+            b"lua"
+        );
+        assert!(target.join("mods/Owner-Mod/lovely/patch.toml").is_file());
+        profile::set_enabled_in(&target, &ECOSYSTEM, "balatro", "Owner-Mod", false).unwrap();
+        assert!(!target.join("mods/Owner-Mod/src/main.lua").exists());
+        assert!(target.join("mods/Owner-Mod/src/main.lua.old").is_file());
+        profile::set_enabled_in(&target, &ECOSYSTEM, "balatro", "Owner-Mod", true).unwrap();
+        profile::uninstall_mod_in(&target, &ECOSYSTEM, "balatro", "Owner-Mod").unwrap();
+        assert!(!target.join("mods/Owner-Mod").exists());
+        assert!(modlist::read(&target).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lovely_launch_repairs_record_only_profiles_atomically_and_preserves_disabled_mods() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = Manager::new(&dir.path().join("data"), &dir.path().join("cache"));
+        manager.leases = dir.path().join("leases");
+        let game = crate::catalog::entry("steam", "2379780", "Balatro", vec![], "fixture");
+        let root = manager.profile_root("balatro", "exposed-games");
+        let revisions = manager.revisions_dir(&game).unwrap();
+        fs::create_dir_all(&revisions).unwrap();
+        let pending = tempfile::Builder::new()
+            .prefix("pending-")
+            .tempdir_in(&revisions)
+            .unwrap();
+        let mut entries = Vec::new();
+        for (name, enabled) in [("Owner-Enabled", true), ("Owner-Disabled", false)] {
+            let version = serde_json::from_value(
+                serde_json::json!({"name":name, "version_number":"1.0.0", "dependencies":[], "date_created":"2026-01-01T00:00:00Z"}),
+            )
+            .unwrap();
+            let mut entry = profile::mod_entry_from_version(name, "Owner", &version, 42);
+            entry.enabled = enabled;
+            entries.push(entry);
+            let cache = profile::cache::package_cache_dir(&manager.cache, "balatro", name, "1.0.0");
+            fs::create_dir_all(cache.join("src")).unwrap();
+            fs::write(cache.join("src/main.lua"), name).unwrap();
+        }
+        modlist::write(pending.path(), &entries).unwrap();
+        commit(&root, pending).unwrap();
+        let original = manager.own_path("balatro").unwrap();
+        manager.prepare_selected_for_launch(&game).unwrap();
+        let current = manager.own_path("balatro").unwrap();
+        assert_ne!(original, current);
+        assert!(!original.join("mods").exists());
+        assert!(current.join("mods/Owner-Enabled/src/main.lua").is_file());
+        assert!(
+            current
+                .join("mods/Owner-Disabled/src/main.lua.old")
+                .is_file()
+        );
+        assert!(!current.join("mods/Owner-Disabled/src/main.lua").exists());
+        assert_eq!(modlist::read(&current).unwrap()[0].installed_at_time, 42);
+        manager.prepare_selected_for_launch(&game).unwrap();
+        assert_eq!(manager.own_path("balatro").unwrap(), current);
+    }
+
     #[test]
     fn cancelled_staging_leaves_the_live_profile_unchanged_and_commit_publishes_a_complete_revision()
      {

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Raesir's bundled Steam-session bridge. No downloaded script is evaluated."""
+"""Exposed Games's bundled Steam-session bridge. No downloaded script is evaluated."""
 import json
 import os
 import shlex
@@ -88,7 +88,7 @@ def main():
         os.chdir(Path(plan['proxy']).parent)
         command = [plan['proxy'], *plan['proxy_args'], '--launch-cmd',
                    shlex.quote(str(Path(plan['runtime']) / 'launch-noita.sh'))]
-        print('Raesir: launching companion in the owning Steam session.', flush=True)
+        print('Exposed Games: launching companion in the owning Steam session.', flush=True)
         os.execve(command[0], command, environment)
     elif mode == 'game':
         # Inherit NP_NOITA_ADDR and other networking state from the proxy. A
@@ -96,7 +96,7 @@ def main():
         environment = game_environment(plan, os.environ)
         os.chdir(plan['game_dir'])
         command = [*plan['game_command'], *sys.argv[3:]]
-        print('Raesir: launching Noita with the recorded Proton and its required Steam runtimes.', flush=True)
+        print('Exposed Games: launching Noita with the recorded Proton and its required Steam runtimes.', flush=True)
         os.execve(command[0], command, environment)
     else:
         raise RuntimeError('Invalid Steam companion operation')
@@ -106,5 +106,5 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, RuntimeError) as error:
-        print(f'Raesir: {error}', file=sys.stderr)
+        print(f'Exposed Games: {error}', file=sys.stderr)
         sys.exit(1)

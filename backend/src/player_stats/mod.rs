@@ -150,7 +150,7 @@ fn read(path: &Path, limit: u64) -> Option<Vec<u8>> {
 }
 fn client() -> Option<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .user_agent("Raesir/0.1")
+        .user_agent("ExposedGames/0.1")
         .connect_timeout(Duration::from_secs(4))
         .timeout(Duration::from_secs(10))
         .build()
@@ -249,7 +249,7 @@ pub fn cached(game: &LibraryGame, report: &Report, root: &Path) -> PlayerStats {
 
 pub fn refresh(game: &LibraryGame, report: &Report, root: &Path) -> PlayerStats {
     let mut stats = cached(game, report, root);
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some()
         || (stats.updated > 0 && details::now().saturating_sub(stats.updated) < 900)
     {
         return stats;

@@ -40,7 +40,7 @@ fn run_inner(dir: &Path) -> Result<(), String> {
         read_json(&dir.join("request.json")).ok_or("Missing download request")?,
     )
     .map_err(|_| "Invalid download request")?;
-    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
         return Err("Downloads are disabled in diagnostics".into());
     }
     let mut progress = Progress::starting(request.operation);

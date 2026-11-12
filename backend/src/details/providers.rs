@@ -79,19 +79,43 @@ pub(super) fn steam(
     out.store_url = Some(format!("https://store.steampowered.com/app/{id}/"));
     out.sources.push("Steam".into());
     if with_reviews {
-        let input = json!({"appid":id.parse::<u64>().unwrap_or(0),"filter":1,"languages":["english"],"review_type":0,"purchase_type":0,"num_per_page":12});
-        match get_json(
-            client,
-            &format!(
-                "https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/?input_json={}",
-                crate::catalog::encode(&input.to_string())
-            ),
-        ) {
-            Ok(value) => parse_steam_reviews(value.get("response").unwrap_or(&value), out),
-            Err(_) => out
-                .warnings
-                .push("Steam reviews could not be loaded. Try refreshing this page.".into()),
+        let query = reviews::Query::default();
+        let (main, recent) = std::thread::scope(|scope| {
+            let recent = scope.spawn(|| reviews::fetch(id, &query, true, "*"));
+            (
+                reviews::fetch(id, &query, false, "*"),
+                recent
+                    .join()
+                    .unwrap_or_else(|_| Err("Recent reviews could not be loaded".into())),
+            )
+        });
+        let mut pages = reviews::SteamReviews {
+            appid: id.into(),
+            ..Default::default()
+        };
+        match main {
+            Ok(page) => {
+                out.reviews = page.reviews.clone();
+                out.review_summary = page.summary.clone();
+                if let Some(score) = page.score {
+                    out.scores.insert(0, format!("Steam players {score:.1}/5"));
+                }
+                pages.main = page;
+            }
+            Err(error) => {
+                pages.main.error = Some(error.clone());
+                out.warnings.push(error);
+            }
         }
+        match recent {
+            Ok(page) => pages.recent = page,
+            Err(error) => {
+                pages.recent.error = Some(error.clone());
+                out.warnings.push(error);
+            }
+        }
+        out.review_source = "Steam players".into();
+        out.steam_reviews = Some(pages);
     }
     Ok(())
 }
@@ -177,59 +201,6 @@ fn requirement_text(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn parse_steam_reviews(value: &Value, out: &mut Details) {
-    let summary = &value["query_summary"];
-    let label = text(summary, "review_score_desc");
-    if let Some(total) = summary["total_reviews"].as_u64() {
-        out.review_summary = format!("{label} · {total} reviews");
-        if let Some(positive) = summary["total_positive"].as_u64().filter(|_| total > 0) {
-            out.scores.insert(
-                0,
-                format!("Steam players {:.1}/5", positive as f64 / total as f64 * 5.),
-            );
-        }
-    }
-    out.review_source = "Steam players".into();
-    out.reviews = array(value, "reviews")
-        .iter()
-        .map(|r| Review {
-            author: match text(&r["author"], "personaname") {
-                name if !name.is_empty() => name,
-                _ => "Steam player".into(),
-            },
-            title: String::new(),
-            text: strip_bbcode(&text(r, "review")),
-            rating: if r["voted_up"].as_bool().unwrap_or(false) {
-                "Recommended"
-            } else {
-                "Not recommended"
-            }
-            .into(),
-            date: r["timestamp_created"]
-                .as_i64()
-                .map(|n| display_date(&n.to_string()))
-                .unwrap_or_default(),
-            hours: r["author"]["playtime_forever"].as_f64().map(|n| n / 60.),
-            platform: String::new(),
-        })
-        .filter(|r| !r.text.is_empty())
-        .collect();
-}
-fn strip_bbcode(input: &str) -> String {
-    let mut out = String::new();
-    let mut tag = false;
-    for c in input.chars() {
-        if c == '[' {
-            tag = true;
-        } else if c == ']' {
-            tag = false;
-        } else if !tag {
-            out.push(c);
-        }
-    }
-    out
 }
 
 pub(super) fn xbox(client: &Client, game: &LibraryGame, out: &mut Details) -> Result<(), String> {
@@ -444,6 +415,7 @@ fn parse_xbox_reviews(value: &Value, out: &mut Details) {
             date: display_date(&text(r, "submittedDateTime")),
             hours: None,
             platform: review_platform(&text(r, "deviceFamily")),
+            ..Default::default()
         })
         .filter(|r| !r.text.is_empty())
         .collect();
@@ -624,8 +596,8 @@ fn ea_product(client: &Client, game: &LibraryGame) -> Result<Value, String> {
     let bytes = response(
         client
             .post("https://store.ea.com/commerce/api/catalog/search")
-            .header("request-id", format!("raesir-details-{}", now()))
-            .header("ucp-agent", "Raesir/0.1")
+            .header("request-id", format!("exposed-games-details-{}", now()))
+            .header("ucp-agent", "ExposedGames/0.1")
             .json(&body),
     )?;
     let value: Value =
@@ -953,7 +925,7 @@ mod tests {
         );
     }
     #[test]
-    fn steam_details_support_streaming_trailers_and_new_review_response() {
+    fn steam_details_support_streaming_trailers() {
         let data = json!({"detailed_description":"<p>A game</p>","developers":["Studio"],"publishers":["Publisher"],"ratings":{"esrb":{"rating":"T"}},"movies":[{"name":"Trailer","hls_h264":"https://cdn.example/trailer.m3u8"}],"screenshots":[{"path_full":"https://cdn.example/shot.jpg"}],"pc_requirements":{"minimum":"<b>OS:</b> Windows 10<br>RAM: 8GB"},"linux_requirements":{"minimum":"<b>Minimum:</b>"}});
         let mut out = Details::default();
         parse_steam(&data, &mut out);
@@ -964,17 +936,6 @@ mod tests {
         assert!(out.requirements[0].minimum.contains("RAM: 8GB"));
         assert_eq!(out.age_rating, "ESRB T");
         assert_eq!(out.requirements.len(), 1);
-        parse_steam_reviews(
-            &json!({"query_summary":{"total_reviews":2,"total_positive":1,"review_score_desc":"Mixed"},"reviews":[{"author":{"playtime_forever":120},"review":"[b]Great[/b]","voted_up":true,"timestamp_created":1750032000}]}),
-            &mut out,
-        );
-        assert_eq!(out.reviews[0].text, "Great");
-        assert_eq!(out.reviews[0].hours, Some(2.));
-        assert_eq!(out.reviews[0].date, "2025.06.16");
-        assert_eq!(out.reviews[0].recommended(), Some(true));
-        assert_eq!(out.score(), Some(2.5));
-        assert_eq!(out.review_source, "Steam players");
-        assert!(out.review_summary.contains("2 reviews"));
     }
     #[test]
     fn epic_metadata_preserves_platform_requirements() {

@@ -131,7 +131,8 @@ fn not_older(installed: &str, candidate: &str) -> bool {
             // publishing fixes. A stale /latest response must not undo them.
             let fork_revision = |version: &str| {
                 version
-                    .split_once("-raesir.")
+                    .split_once("-exposed-games.")
+                    .or_else(|| version.split_once("-raesir."))
                     .and_then(|(_, revision)| revision.parse::<u64>().ok())
             };
             match (fork_revision(installed), fork_revision(candidate)) {

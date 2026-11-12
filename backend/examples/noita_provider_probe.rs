@@ -1,12 +1,12 @@
 //! Explicit provider diagnostic. Downloads only into the required private root;
 //! it never launches Noita or any downloaded companion executable.
-use raesir_backend::{catalog, mods::Manager};
+use exposed_games_backend::{catalog, mods::Manager};
 use std::path::PathBuf;
 
 fn main() -> Result<(), String> {
     let root = PathBuf::from(
-        std::env::var_os("RAESIR_MOD_PROBE_DIR")
-            .ok_or("Set RAESIR_MOD_PROBE_DIR to a diagnostic directory")?,
+        std::env::var_os("EXPOSED_GAMES_MOD_PROBE_DIR")
+            .ok_or("Set EXPOSED_GAMES_MOD_PROBE_DIR to a diagnostic directory")?,
     );
     let manager = Manager::new(&root.join("data"), &root.join("cache"));
     let game = catalog::entry("steam", "881100", "Noita", vec![], "diagnostic");
@@ -41,7 +41,7 @@ fn main() -> Result<(), String> {
             }
         }
     }
-    for source in ["Raesir catalog", "ModWorkshop", "Nexus Mods"] {
+    for source in ["Exposed Games catalog", "ModWorkshop", "Nexus Mods"] {
         println!(
             "{source}: {}",
             snapshot

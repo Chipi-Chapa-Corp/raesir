@@ -352,7 +352,7 @@ fn host_program(name: &str) -> bool {
             "sh",
             "-c",
             "command -v -- \"$1\" >/dev/null",
-            "raesir",
+            "exposed-games",
             name,
         ])
         .stdin(Stdio::null())

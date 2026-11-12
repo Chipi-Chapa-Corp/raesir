@@ -1,6 +1,6 @@
 use crate::{Launcher, library::Game};
+use exposed_games_backend::{catalog, model::Report};
 use gpui::*;
-use raesir_backend::{catalog, model::Report};
 use std::{collections::HashMap, sync::Arc};
 
 impl Launcher {
@@ -237,7 +237,7 @@ impl Launcher {
             && self.download_operations.get(&key).is_some_and(|p| {
                 p.blocks_play()
                     && !(kind == "install"
-                        && p.phase == raesir_backend::steam_control::Phase::Available)
+                        && p.phase == exposed_games_backend::steam_control::Phase::Available)
             })
         {
             return;
@@ -257,9 +257,9 @@ impl Launcher {
         }
         self.pending_action = Some(key.clone());
         let steam_operation = if kind == "update" {
-            Some(raesir_backend::steam_control::Operation::Update)
+            Some(exposed_games_backend::steam_control::Operation::Update)
         } else if kind == "install" {
-            Some(raesir_backend::steam_control::Operation::Install)
+            Some(exposed_games_backend::steam_control::Operation::Install)
         } else {
             self.games
                 .iter()
@@ -270,7 +270,7 @@ impl Launcher {
                         "uninstall" => game.source.uninstall.as_ref(),
                         _ => None,
                     }?;
-                    if let raesir_backend::model::ActionTarget::Steam { operation, .. } =
+                    if let exposed_games_backend::model::ActionTarget::Steam { operation, .. } =
                         &action.target
                     {
                         Some(*operation)
@@ -282,7 +282,7 @@ impl Launcher {
         if let Some(operation) = steam_operation {
             self.download_operations.insert(
                 key.clone(),
-                raesir_backend::steam_control::Progress::starting(operation),
+                exposed_games_backend::steam_control::Progress::starting(operation),
             );
             self.update_download_details(cx);
         }
@@ -519,7 +519,7 @@ impl Launcher {
                     .await;
                 let complete = progress
                     .values()
-                    .any(|p| p.phase == raesir_backend::steam_control::Phase::Complete);
+                    .any(|p| p.phase == exposed_games_backend::steam_control::Phase::Complete);
                 let stop = this
                     .update(cx, |this, cx| {
                         if this.closing {

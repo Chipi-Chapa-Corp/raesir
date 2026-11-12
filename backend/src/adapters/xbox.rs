@@ -411,11 +411,11 @@ $rows=@(Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsReso
                             "-NoProfile".into(),
                             "-NonInteractive".into(),
                             "-Command".into(),
-                            "Remove-AppxPackage -Package $env:RAESIR_PACKAGE_FULL_NAME -ErrorAction Stop".into(),
+                            "Remove-AppxPackage -Package $env:EXPOSED_GAMES_PACKAGE_FULL_NAME -ErrorAction Stop".into(),
                         ],
                     );
                     if let ActionTarget::Command { env, .. } = &mut action.target {
-                        env.insert("RAESIR_PACKAGE_FULL_NAME".into(), package.into());
+                        env.insert("EXPOSED_GAMES_PACKAGE_FULL_NAME".into(), package.into());
                     }
                     game.uninstall = Some(action);
                 }

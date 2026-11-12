@@ -16,7 +16,7 @@ if stage.exists():
     shutil.rmtree(stage)
 stage.mkdir(parents=True)
 target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
-shutil.copyfile(target / "release/raesir.exe", stage / "raesir.exe")
+shutil.copyfile(target / "release/exposed-games.exe", stage / "exposed-games.exe")
 shutil.copyfile(root / "LICENSE", stage / "LICENSE")
 
 dlls = {path.name.lower(): path for path in (prefix / "bin").glob("*.dll")}
@@ -28,7 +28,7 @@ def library(*names):
 
 mpv = library("libmpv-2.dll", "mpv-2.dll")
 archive = library("archive.dll", "libarchive-13.dll")
-pending = [stage / "raesir.exe", mpv, archive]
+pending = [stage / "exposed-games.exe", mpv, archive]
 copied = set()
 packages = set()
 while pending:
@@ -70,8 +70,8 @@ with os.add_dll_directory(str(stage)):
     ctypes.CDLL(str(stage / mpv.name))
     ctypes.CDLL(str(stage / "archive.dll"))
 version = tomllib.loads((root / "native/Cargo.toml").read_text())["package"]["version"]
-output = subprocess.check_output([str(stage / "raesir.exe"), "--version"], text=True).strip()
-if output != f"Raesir {version}":
+output = subprocess.check_output([str(stage / "exposed-games.exe"), "--version"], text=True).strip()
+if output != f"Exposed Games {version}":
     raise RuntimeError(f"Unexpected executable version: {output!r}")
 
 # Delete only the files shipped by this installer, retaining user-added files.

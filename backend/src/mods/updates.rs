@@ -142,49 +142,14 @@ impl Manager {
         result
     }
 
-    fn update_leases(
-        &self,
-        game: &LibraryGame,
-        games: &[LibraryGame],
-    ) -> Result<Vec<launch::GameLease>, String> {
-        let mut paths = HashSet::new();
-        let mut leases = Vec::new();
-        for candidate in
-            std::iter::once(game).chain(games.iter().filter(|g| community(g) == community(game)))
-        {
-            for install in candidate.installations.iter().filter(|i| {
-                i.os == crate::model::Os::host()
-                    && matches!(i.state.as_str(), "installed" | "external")
-            }) {
-                let path = Path::new(&install.path)
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?;
-                if !paths.insert(path.clone()) {
-                    continue;
-                }
-                leases.push(self.game_lease(&path)?);
-                if launch::game_running(&path)
-                    || self
-                        .active
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&path)
-                {
-                    return Err("Updates wait until the game and mod proxy are closed".into());
-                }
-            }
-        }
-        Ok(leases)
-    }
-
     pub fn auto_update(
         &self,
         games: &[LibraryGame],
         startup: bool,
         cancel: &AtomicBool,
     ) -> Result<UpdateReport, String> {
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
-            && std::env::var_os("RAESIR_MODS_TEST_UPDATES").is_none()
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_UPDATES").is_none()
         {
             return Err("Automatic mod updates are disabled in this diagnostic profile".into());
         }
@@ -257,7 +222,7 @@ impl Manager {
                     i.profile != profile.id || (i.game != game.key && i.community != slug)
                 });
                 let updated =
-                    self.update_profile(&game, games, &profile.id, &source, &mut refreshed, cancel);
+                    self.update_profile(&game, &profile.id, &source, &mut refreshed, cancel);
                 let (delay, issues) = match updated {
                     Ok((packages, manual)) => {
                         result
@@ -339,8 +304,9 @@ impl Manager {
                     .issues
                     .into_iter()
                     .filter(|i| {
-                        i.game == game.key
-                            || community(game).is_some_and(|slug| slug == i.community)
+                        i.kind != "deferred"
+                            && (i.game == game.key
+                                || community(game).is_some_and(|slug| slug == i.community))
                     })
                     .map(|i| format!("Mod updates: {}", i.message))
                     .collect()
@@ -351,25 +317,23 @@ impl Manager {
     fn update_profile(
         &self,
         game: &LibraryGame,
-        games: &[LibraryGame],
         id: &str,
         source: &Path,
         refreshed: &mut HashSet<String>,
         cancel: &AtomicBool,
     ) -> Result<(Vec<String>, Vec<(String, String)>), String> {
         let slug = community(game).ok_or("Unknown mod community")?;
-        {
+        let _source_lease = {
             let _guard = self
                 .operation
                 .try_lock()
                 .map_err(|_| "Deferred: Another mod operation is in progress")?;
             let _profile_lease = self
-                .profile_lease(slug)
+                .try_profile_lease(slug)
                 .map_err(|e| format!("Deferred: {e}"))?;
-            let _leases = self
-                .update_leases(game, games)
-                .map_err(|e| format!("Deferred: {e}"))?;
-        }
+            self.revision_lease(source)
+                .map_err(|e| format!("Deferred: {e}"))?
+        };
         let stamp = tree_stamp(source)?;
         let noita = if recipes::for_game(game).is_some() {
             Some(self.noita_update_plan(game, source, refreshed)?)
@@ -425,10 +389,7 @@ impl Manager {
             .try_lock()
             .map_err(|_| "Deferred: Another mod operation is in progress")?;
         let _profile_lease = self
-            .profile_lease(slug)
-            .map_err(|e| format!("Deferred: {e}"))?;
-        let _leases = self
-            .update_leases(game, games)
+            .try_profile_lease(slug)
             .map_err(|e| format!("Deferred: {e}"))?;
         if cancel.load(Ordering::Relaxed) {
             return Err("Deferred: Application is closing".into());

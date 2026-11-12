@@ -1,5 +1,5 @@
+use exposed_games_backend::model::{LibraryGame, Os};
 use gpui::RenderImage;
-use raesir_backend::model::{LibraryGame, Os};
 use std::sync::Arc;
 
 pub struct ActionTooltip(pub String);
@@ -23,7 +23,7 @@ impl gpui::Render for ActionTooltip {
 }
 
 pub fn xbox_runtime_notice(
-    report: &raesir_backend::model::Report,
+    report: &exposed_games_backend::model::Report,
     scope: u8,
     store: Option<&str>,
 ) -> bool {
@@ -121,7 +121,7 @@ impl Game {
                 self.source.in_library
                     && !self.source.game_pass_only
                     && !self.source.is_demo
-                    && !raesir_backend::catalog::demo_title(&self.title)
+                    && !exposed_games_backend::catalog::demo_title(&self.title)
             }
             2 => self.source.game_pass,
             _ => false,
@@ -156,11 +156,11 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raesir_backend::{catalog, model::Installation};
+    use exposed_games_backend::{catalog, model::Installation};
 
     #[test]
     fn xbox_notice_tracks_os_and_client_filters_and_each_linux_system() {
-        let mut report: raesir_backend::model::Report = serde_json::from_value(serde_json::json!({
+        let mut report: exposed_games_backend::model::Report = serde_json::from_value(serde_json::json!({
             "host_os":"linux","games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null,
             "linux_systems":[{"root":"/","xbox_runtime":true},{"root":"/mounted/linux","xbox_runtime":false}]
         })).unwrap();

@@ -58,7 +58,7 @@ def installed(before):
 
 try:
     game_lease = None
-    if "RAESIR_DISABLE_ACTIONS" in os.environ:
+    if "EXPOSED_GAMES_DISABLE_ACTIONS" in os.environ:
         raise RuntimeError("actions disabled")
     if request.get("game_lock"):
         path = Path(request["game_lock"])

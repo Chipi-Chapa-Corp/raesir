@@ -114,7 +114,7 @@ fn fetch_using(
             title: None,
         });
     }
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
         return None;
     }
     fs::create_dir_all(&dir).ok()?;

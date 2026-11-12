@@ -68,7 +68,7 @@ impl ModBrowser {
             let worker_cancel = cancel.clone();
             let (send, receive) = futures::channel::oneshot::channel();
             if std::thread::Builder::new()
-                .name("raesir-mod-icon".into())
+                .name("exposed-games-mod-icon".into())
                 .spawn(move || {
                     let _ = send.send(load(&backend, &request, &worker_cancel));
                 })
@@ -103,7 +103,7 @@ impl ModBrowser {
 }
 
 fn load(backend: &Backend, url: &str, cancel: &AtomicBool) -> Result<artwork::Ready, String> {
-    let mut game = raesir_backend::catalog::entry("media", url, "", vec![], "thunderstore");
+    let mut game = exposed_games_backend::catalog::entry("media", url, "", vec![], "thunderstore");
     game.cover = Some(url.into());
     artwork::load_cancelable(backend, &game, cancel)
 }

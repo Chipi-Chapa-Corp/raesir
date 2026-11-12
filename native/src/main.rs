@@ -1,19 +1,19 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use exposed_games_backend::model::{Os, Report};
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{
     EditableTextState, StringStorage, TextChanged,
     actions::{DEFAULT_INPUT_CONTEXT, default_bindings},
 };
 use library::Game;
-use raesir_backend::model::{Os, Report};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
 
-actions!(raesir, [ClearSearch]);
+actions!(exposed_games, [ClearSearch]);
 
 mod artwork;
 mod backdrop;
@@ -52,7 +52,7 @@ struct Launcher {
     _activation: Subscription,
     last_refresh: Instant,
     pending_action: Option<String>,
-    download_operations: HashMap<String, raesir_backend::steam_control::Progress>,
+    download_operations: HashMap<String, exposed_games_backend::steam_control::Progress>,
     downloads_watching: bool,
     mods_watching: bool,
     mod_update_task: Option<Task<()>>,
@@ -385,7 +385,7 @@ impl Launcher {
         let installed_here = installed == 1;
         let playable = installed_here && g.source.launch.is_some();
         let modded = playable && g.source.mods.as_ref().is_some_and(|m| m.launchable);
-        let installable = scope != 2 && raesir_backend::actions::can_install(&g.source);
+        let installable = scope != 2 && exposed_games_backend::actions::can_install(&g.source);
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
         let working = progress.as_ref().filter(|p| p.blocks_play());
@@ -1022,17 +1022,17 @@ impl Render for Launcher {
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() == 3 && args[1] == "--download-worker" {
-        raesir_backend::downloads::run_worker(std::path::Path::new(&args[2]));
+        exposed_games_backend::downloads::run_worker(std::path::Path::new(&args[2]));
         return;
     }
     if args.len() == 2 && matches!(args[1].to_str(), Some("--version" | "-V")) {
-        println!("Raesir {}", env!("CARGO_PKG_VERSION"));
+        println!("Exposed Games {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     #[cfg(feature = "benchmark")]
     if args.len() == 3 && args[1] == "--artwork-probe" {
         let backend = backend::Backend::new();
-        let mut game = raesir_backend::catalog::entry(
+        let mut game = exposed_games_backend::catalog::entry(
             "media",
             &args[2].to_string_lossy(),
             "Probe",
@@ -1053,7 +1053,7 @@ fn main() {
     }
     if args.len() == 6 && args[1] == "--steam-control" {
         let appid = args[4].to_string_lossy().parse().unwrap_or(0);
-        raesir_backend::steam_control::helper(
+        exposed_games_backend::steam_control::helper(
             std::path::Path::new(&args[2]),
             appid,
             &args[3].to_string_lossy(),
@@ -1062,7 +1062,7 @@ fn main() {
         return;
     }
     if args.len() == 5 && args[1] == "--steam-mods" {
-        raesir_backend::mods::steam_helper(
+        exposed_games_backend::mods::steam_helper(
             std::path::Path::new(&args[2]),
             std::path::Path::new(&args[3]),
             std::path::Path::new(&args[4]),
@@ -1070,7 +1070,7 @@ fn main() {
         return;
     }
     if args.len() == 4 && args[1] == "--steam-library-probe" {
-        raesir_backend::steam_ipc::helper(
+        exposed_games_backend::steam_ipc::helper(
             std::path::Path::new(&args[2]),
             std::path::Path::new(&args[3]),
         );
@@ -1079,8 +1079,8 @@ fn main() {
     let backend = backend::Backend::new();
     let app_backend = backend.clone();
     eprintln!(
-        "Raesir: native GPUI; pill blur {}.",
-        if std::env::var_os("RAESIR_NO_BLUR").is_some() {
+        "Exposed Games: native GPUI; pill blur {}.",
+        if std::env::var_os("EXPOSED_GAMES_NO_BLUR").is_some() {
             "disabled"
         } else {
             "enabled"
@@ -1101,13 +1101,18 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Maximized(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Raesir".into()),
+                        title: Some("Exposed Games".into()),
                         ..Default::default()
                     }),
                     window_decorations: Some(WindowDecorations::Client),
-                    app_id: Some("dev.raesir.launcher".into()),
+                    app_id: Some(exposed_games_backend::storage::APP_ID.into()),
+                    icon: Some(Arc::new(
+                        image_codec::load_from_memory(include_bytes!("../../build/icon.png"))
+                            .expect("bundled Exposed Games icon")
+                            .into_rgba8(),
+                    )),
                     window_min_size: Some(size(px(1180.), px(700.))),
-                    inactive_frame_interval: std::env::var_os("RAESIR_LIMIT_BACKGROUND")
+                    inactive_frame_interval: std::env::var_os("EXPOSED_GAMES_LIMIT_BACKGROUND")
                         .map(|_| millis(33)),
                     ..Default::default()
                 },
@@ -1122,7 +1127,7 @@ fn main() {
                     root
                 },
             )
-            .expect("open Raesir window");
+            .expect("open Exposed Games window");
             cx.activate(true);
         });
     if let Err(error) = backend.shutdown() {

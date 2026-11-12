@@ -25,14 +25,14 @@ path.write_text('\n'.join('directory = "vendor"' if line.startswith('directory =
 PY
 flatpak-builder --force-clean --disable-rofiles-fuse --disable-cache \
   --delete-build-dirs --state-dir="$state_dir" --repo="$repo_dir" \
-  "$build_dir" build/dev.raesir.launcher.json
+  "$build_dir" build/com.chipichapa.exposedgames.json
 # Verify against the user's Platform, which has fewer libraries than the SDK.
 flatpak build --runtime "$build_dir" sh -ec '
-  /app/bin/raesir --version
-  linkage="$(ldd /app/bin/raesir /app/lib/libmpv.so.2)"
+  /app/bin/exposed-games --version
+  linkage="$(ldd /app/bin/exposed-games /app/lib/libmpv.so.2)"
   if printf "%s\n" "$linkage" | grep "not found"; then exit 1; fi
   test -f /usr/lib/x86_64-linux-gnu/libarchive.so.13
 '
 flatpak build-bundle --arch=x86_64 \
   --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-  "$repo_dir" dist/raesir-linux-x64.flatpak dev.raesir.launcher stable
+  "$repo_dir" dist/exposed-games-linux-x64.flatpak com.chipichapa.exposedgames stable

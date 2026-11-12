@@ -1,6 +1,6 @@
 Adwaita icons — GNOME Project (https://www.gnome.org).
 Source: https://gitlab.gnome.org/GNOME/adwaita-icon-theme
-Bundled paths are unchanged; fill colors adjusted for Raesir.
+Bundled paths are unchanged; fill colors adjusted for Exposed Games.
 
 This work is licenced under the Creative Commons Attribution-Share Alike 3.0
 United States License. To view a copy of this licence, visit
@@ -11,7 +11,7 @@ When attributing the artwork, using "GNOME Project" is enough.
 Please link to http://www.gnome.org where available.
 
 Exception: adw-external-link-symbolic.svg is by Jakub Steiner, from libadwaita,
-CC0-1.0 as recorded in its SVG metadata. Stroke color adjusted for Raesir.
+CC0-1.0 as recorded in its SVG metadata. Stroke color adjusted for Exposed Games.
 
 Additional CC0 icons: arrows-circle-rotated-symbolic.svg, loupe-symbolic.svg and games-symbolic.svg,
 by Jakub Steiner, GNOME Icon Development Kit (https://gitlab.gnome.org/Teams/Design/icon-development-kit).

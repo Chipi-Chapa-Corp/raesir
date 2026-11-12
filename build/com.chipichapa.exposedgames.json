@@ -1,10 +1,10 @@
 {
-  "app-id": "dev.raesir.launcher",
+  "app-id": "com.chipichapa.exposedgames",
   "runtime": "org.freedesktop.Platform",
   "runtime-version": "25.08",
   "sdk": "org.freedesktop.Sdk",
   "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
-  "command": "raesir",
+  "command": "exposed-games",
   "branch": "stable",
   "finish-args": [
     "--socket=wayland",
@@ -54,19 +54,19 @@
       "sources": [{"type": "archive", "url": "https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz", "sha256": "ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209"}]
     },
     {
-      "name": "raesir",
+      "name": "exposed-games",
       "buildsystem": "simple",
       "build-commands": [
-        "cargo build --release --locked --offline --package raesir --bin raesir",
-        "install -Dm755 target/release/raesir /app/bin/raesir",
+        "cargo build --release --locked --offline --package exposed-games --bin exposed-games",
+        "install -Dm755 target/release/exposed-games /app/bin/exposed-games",
         "install -Dm755 build/host-command /app/bin/host-command",
         "for tool in flatpak steam lutris heroic bottles-cli wine wine64 protontricks xdg-open legendary ferestre; do ln -s host-command /app/bin/$tool; done",
-        "install -Dm644 build/dev.raesir.launcher.desktop /app/share/applications/dev.raesir.launcher.desktop",
-        "install -Dm644 build/dev.raesir.launcher.metainfo.xml /app/share/metainfo/dev.raesir.launcher.metainfo.xml",
-        "install -Dm644 build/icon.svg /app/share/icons/hicolor/scalable/apps/dev.raesir.launcher.svg",
-        "install -Dm644 build/icon.png /app/share/icons/hicolor/256x256/apps/dev.raesir.launcher.png",
-        "install -Dm644 LICENSE /app/share/licenses/dev.raesir.launcher/LICENSE",
-        "python3 scripts/collect-licenses.py /app/share/licenses/dev.raesir.launcher/third-party"
+        "install -Dm644 build/com.chipichapa.exposedgames.desktop /app/share/applications/com.chipichapa.exposedgames.desktop",
+        "install -Dm644 build/com.chipichapa.exposedgames.metainfo.xml /app/share/metainfo/com.chipichapa.exposedgames.metainfo.xml",
+        "install -Dm644 build/icon.svg /app/share/icons/hicolor/scalable/apps/com.chipichapa.exposedgames.svg",
+        "install -Dm644 build/icon.png /app/share/icons/hicolor/256x256/apps/com.chipichapa.exposedgames.png",
+        "install -Dm644 LICENSE /app/share/licenses/com.chipichapa.exposedgames/LICENSE",
+        "python3 scripts/collect-licenses.py /app/share/licenses/com.chipichapa.exposedgames/third-party"
       ],
       "sources": [{"type": "dir", "path": "../dist/flatpak-source"}]
     }

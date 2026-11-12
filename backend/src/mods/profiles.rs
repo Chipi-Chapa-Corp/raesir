@@ -16,13 +16,18 @@ pub(super) struct Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            selected: "raesir".into(),
+            selected: "exposed-games".into(),
             profiles: vec![NamedProfile {
-                id: "raesir".into(),
+                id: "exposed-games".into(),
                 name: "Default".into(),
             }],
         }
     }
+}
+
+pub(super) fn is_default_profile(id: &str) -> bool {
+    // Existing registries keep their IDs so external profile pointers stay valid.
+    matches!(id, "exposed-games" | "raesir")
 }
 
 fn valid_id(id: &str) -> bool {
@@ -66,11 +71,11 @@ impl Manager {
 
     pub(super) fn selected_id(&self, community: &str) -> String {
         self.registry(community)
-            .map_or_else(|_| "raesir".into(), |r| r.selected)
+            .map_or_else(|_| "exposed-games".into(), |r| r.selected)
     }
 
     pub(super) fn profile_root(&self, community: &str, id: &str) -> PathBuf {
-        if id == "raesir" {
+        if is_default_profile(id) {
             self.data.join(community)
         } else {
             layout::profile_dir(&self.data, community, id)
@@ -101,7 +106,7 @@ impl Manager {
                     active: p.id == registry.selected,
                     id: p.id,
                     name: p.name,
-                    source: "Raesir".into(),
+                    source: "Exposed Games".into(),
                     path,
                     installed,
                 }
@@ -219,7 +224,7 @@ impl Manager {
             fs::remove_dir_all(path)
                 .map_err(|e| format!("Profile deleted, but its files could not be removed: {e}"))?;
         }
-        if id == "raesir" {
+        if is_default_profile(id) {
             let _ = fs::remove_file(self.data.join(slug).join("current.json"));
             let runtime = self.data.join(slug).join("runtime");
             if runtime.is_dir() {
@@ -232,9 +237,17 @@ impl Manager {
     }
 
     pub(super) fn profile_lease(&self, slug: &str) -> Result<launch::GameLease, String> {
+        self.wait_for_profile_lease(&self.profile_lock_path(slug)?)
+    }
+
+    pub(super) fn try_profile_lease(&self, slug: &str) -> Result<launch::GameLease, String> {
+        self.game_lease(&self.profile_lock_path(slug)?)
+    }
+
+    fn profile_lock_path(&self, slug: &str) -> Result<PathBuf, String> {
         fs::create_dir_all(&self.data).map_err(|e| e.to_string())?;
         let root = self.data.canonicalize().map_err(|e| e.to_string())?;
-        self.game_lease(&root.join(slug).join(".profile-mutation"))
+        Ok(root.join(slug).join(".profile-mutation"))
     }
 
     pub(super) fn modification_lease(
@@ -267,6 +280,36 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_app_keeps_legacy_default_profile_and_revision_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::new(&dir.path().join("data"), &dir.path().join("cache"));
+        let root = manager.data.join("peak");
+        let revision = root.join("revisions/profile-before-rename");
+        fs::create_dir_all(&revision).unwrap();
+        fs::write(revision.join("mod.dll"), b"installed mod").unwrap();
+        crate::storage::write_json(
+            &root.join("profiles.json"),
+            &serde_json::json!({"selected":"raesir", "profiles":[{"id":"raesir", "name":"Default"}]}),
+        ).unwrap();
+        crate::storage::write_json(
+            &root.join("current.json"),
+            &serde_json::json!({"revision":"profile-before-rename"}),
+        )
+        .unwrap();
+        assert_eq!(manager.selected_id("peak"), "raesir");
+        assert_eq!(manager.profile_root("peak", "raesir"), root);
+        let profiles = manager.profiles("peak");
+        let selected = manager.selected("peak", &profiles).unwrap();
+        assert_eq!(selected.source, "Exposed Games");
+        assert_eq!(selected.path, revision.canonicalize().unwrap());
+        assert_eq!(
+            fs::read(selected.path.join("mod.dll")).unwrap(),
+            b"installed mod"
+        );
+    }
+
     fn entry(
         name: &str,
         dependencies: Vec<&str>,
@@ -296,7 +339,7 @@ mod tests {
             },
         );
         let original = manager
-            .profile_root("peak", "raesir")
+            .profile_root("peak", "exposed-games")
             .join("revisions/profile-original");
         let entries = vec![
             entry("Dependency", vec![]),
@@ -309,7 +352,9 @@ mod tests {
             fs::write(path.join("mod.dll"), name).unwrap();
         }
         crate::storage::write_json(
-            &manager.profile_root("peak", "raesir").join("current.json"),
+            &manager
+                .profile_root("peak", "exposed-games")
+                .join("current.json"),
             &serde_json::json!({"revision":"profile-original"}),
         )
         .unwrap();
@@ -339,7 +384,7 @@ mod tests {
             b"Dependency"
         );
         assert!(original.join("BepInEx/plugins/Owner-Test/mod.dll").exists());
-        manager.delete_profile(&game, "raesir").unwrap();
+        manager.delete_profile(&game, "exposed-games").unwrap();
         assert!(!original.exists());
         assert_eq!(manager.selected_id("peak"), other);
         assert_eq!(manager.profiles("peak")[0].installed.len(), 1);
@@ -398,7 +443,7 @@ mod tests {
         assert_eq!(manager.profiles("peak").len(), 1);
         manager.create_profile(&game, "New profile").unwrap();
         let id = manager.selected_id("peak");
-        assert_ne!(id, "raesir");
+        assert_ne!(id, "exposed-games");
         assert!(
             manager
                 .selected("peak", &manager.profiles("peak"))
@@ -409,9 +454,9 @@ mod tests {
         manager.rename_profile(&game, &id, "Renamed").unwrap();
         assert_eq!(manager.selected_id("peak"), id);
         manager.delete_profile(&game, &id).unwrap();
-        assert_eq!(manager.selected_id("peak"), "raesir");
+        assert_eq!(manager.selected_id("peak"), "exposed-games");
         assert_eq!(fs::read(path.join("mod.dll")).unwrap(), b"keep original");
-        assert!(manager.delete_profile(&game, "raesir").is_err());
+        assert!(manager.delete_profile(&game, "exposed-games").is_err());
         assert!(manager.create_profile(&game, "../escape").is_err());
         assert!(manager.create_profile(&game, " ").is_err());
         assert!(manager.rename_profile(&game, "missing", "Name").is_err());

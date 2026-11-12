@@ -89,7 +89,7 @@ impl Api {
         } else {
             vec!["libmpv.so.2"]
         };
-        let paths = std::env::var_os("RAESIR_MPV_LIBRARY")
+        let paths = std::env::var_os("EXPOSED_GAMES_MPV_LIBRARY")
             .map(PathBuf::from)
             .into_iter()
             .chain(names.iter().map(|s| PathBuf::from(*s)))
@@ -425,7 +425,7 @@ fn run(
     commands: commands::Receiver<Vec<String>>,
     notify: &mut mpsc::Sender<()>,
 ) -> Result<(), String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() && url.starts_with("https://") {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() && url.starts_with("https://") {
         return Err("Trailer streaming is offline. Saved screenshots are still available.".into());
     }
     let api = Api::load(cache)?;
@@ -1018,9 +1018,9 @@ mod tests {
         assert_eq!(animation_size([0, 0]), [1, 1]);
     }
     #[test]
-    #[ignore = "requires RAESIR_VIDEO_FIXTURE (30-second red/green/blue clip) and libmpv"]
+    #[ignore = "requires EXPOSED_GAMES_VIDEO_FIXTURE (30-second red/green/blue clip) and libmpv"]
     fn live_scrubbing_updates_before_release_without_replaying_old_frames() {
-        let clip = std::env::var("RAESIR_VIDEO_FIXTURE").expect("local diagnostic clip");
+        let clip = std::env::var("EXPOSED_GAMES_VIDEO_FIXTURE").expect("local diagnostic clip");
         let state = Arc::new(Mutex::new(Playback {
             volume: 100.,
             ..Default::default()

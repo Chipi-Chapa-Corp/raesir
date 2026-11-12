@@ -11,7 +11,7 @@ pub fn animation(url: &str, root: &Path, allow_download: bool) -> Result<PathBuf
     if path.is_file() {
         return Ok(path);
     }
-    if !allow_download || std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if !allow_download || std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
         return Err("Animation is not cached".into());
     }
     fs::create_dir_all(root).map_err(|e| e.to_string())?;

@@ -223,12 +223,13 @@ print('steam-session-ready')
 #[ignore = "requires explicit Steam root/proxy paths and a running Steam session"]
 fn installed_steam_session_and_runtime_probe() {
     let root = PathBuf::from(
-        std::env::var_os("RAESIR_NOITA_STEAM_PROBE_ROOT").expect("explicit Steam root"),
+        std::env::var_os("EXPOSED_GAMES_NOITA_STEAM_PROBE_ROOT").expect("explicit Steam root"),
     );
     let proxy = PathBuf::from(
-        std::env::var_os("RAESIR_NOITA_STEAM_PROBE_PROXY").expect("explicit installed proxy path"),
+        std::env::var_os("EXPOSED_GAMES_NOITA_STEAM_PROBE_PROXY")
+            .expect("explicit installed proxy path"),
     );
-    let diagnostics = root.join("raesir/diagnostics");
+    let diagnostics = root.join("exposed-games/diagnostics");
     fs::create_dir_all(&diagnostics).unwrap();
     let scratch = tempfile::Builder::new()
         .prefix("companion-probe-")

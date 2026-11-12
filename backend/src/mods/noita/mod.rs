@@ -71,8 +71,8 @@ pub(super) fn installed(path: &Path) -> Result<Vec<InstalledMod>, String> {
 }
 
 fn allowed() -> Result<(), String> {
-    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
-        && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none()
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+        && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none()
     {
         return Err("Mod changes are disabled in this diagnostic profile".into());
     }
@@ -114,7 +114,6 @@ impl Manager {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
-        let _lease = self.modification_lease(game)?;
         let definition = recipes::for_game(game).ok_or("Unsupported game")?;
         let (package, path, folder, companion, source_file) =
             if let Some(id) = id.strip_prefix("recipe:") {
@@ -154,7 +153,6 @@ impl Manager {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
-        let _lease = self.modification_lease(game)?;
         let pending = self.noita_pending(game)?;
         let mut entries = read(pending.path())?;
         let entry = entries
@@ -198,7 +196,6 @@ impl Manager {
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
-        let _lease = self.modification_lease(game)?;
         let pending = self.noita_pending(game)?;
         let mut entries = read(pending.path())?;
         let package = Package {

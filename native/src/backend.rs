@@ -1,4 +1,4 @@
-use raesir_backend::{
+use exposed_games_backend::{
     actions, artwork, client_control, epic_online,
     model::*,
     mount,
@@ -17,8 +17,8 @@ use std::{
 pub struct Backend {
     pub data: PathBuf,
     pub cache: PathBuf,
-    mod_manager: raesir_backend::mods::Manager,
-    mod_launches: Mutex<Vec<raesir_backend::mods::LaunchTask>>,
+    mod_manager: exposed_games_backend::mods::Manager,
+    mod_launches: Mutex<Vec<exposed_games_backend::mods::LaunchTask>>,
     fixture: Option<PathBuf>,
     report: RwLock<Option<Arc<Report>>>,
     achievement_icons: Mutex<HashMap<String, Arc<gpui::RenderImage>>>,
@@ -32,8 +32,8 @@ pub struct Backend {
     steam_jobs: Mutex<HashMap<String, SteamJob>>,
     steam_bridge: Mutex<Option<(String, std::time::SystemTime, bool)>>,
     epic: epic_online::Manager,
-    downloads: raesir_backend::downloads::Manager,
-    client_downloads: raesir_backend::client_downloads::Manager,
+    downloads: exposed_games_backend::downloads::Manager,
+    client_downloads: exposed_games_backend::client_downloads::Manager,
     handoffs: Mutex<HashMap<String, Progress>>,
     handoffs_loaded: OnceLock<()>,
     handoff_scan: Mutex<std::time::Instant>,
@@ -65,29 +65,25 @@ fn merge_download_progress(live: Option<Progress>, disk: Progress) -> Progress {
 
 impl Backend {
     pub fn new() -> Arc<Self> {
-        let data = std::env::var_os("RAESIR_DATA_DIR")
+        let data = std::env::var_os("EXPOSED_GAMES_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                dirs::data_dir()
-                    .expect("user data directory")
-                    .join("dev.raesir.launcher")
+                storage::application_dir(&dirs::data_dir().expect("user data directory"))
             });
-        let cache = std::env::var_os("RAESIR_CACHE_DIR")
+        let cache = std::env::var_os("EXPOSED_GAMES_CACHE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                dirs::cache_dir()
-                    .expect("user cache directory")
-                    .join("dev.raesir.launcher")
+                storage::application_dir(&dirs::cache_dir().expect("user cache directory"))
             });
-        let mod_manager = raesir_backend::mods::Manager::new(&data, &cache);
-        let downloads = raesir_backend::downloads::Manager::new(&data);
-        let client_downloads = raesir_backend::client_downloads::Manager::new(&data);
+        let mod_manager = exposed_games_backend::mods::Manager::new(&data, &cache);
+        let downloads = exposed_games_backend::downloads::Manager::new(&data);
+        let client_downloads = exposed_games_backend::client_downloads::Manager::new(&data);
         Arc::new(Self {
             data,
             cache,
             mod_manager,
             mod_launches: Mutex::new(Vec::new()),
-            fixture: std::env::var_os("RAESIR_LIBRARY_FIXTURE").map(PathBuf::from),
+            fixture: std::env::var_os("EXPOSED_GAMES_LIBRARY_FIXTURE").map(PathBuf::from),
             report: RwLock::new(None),
             achievement_icons: Mutex::new(HashMap::new()),
             operation: Mutex::new(()),
@@ -112,7 +108,7 @@ impl Backend {
 
     fn ready(&self) -> Result<(), String> {
         if self.closing.load(Ordering::SeqCst) {
-            Err("Raesir is closing".into())
+            Err("Exposed Games is closing".into())
         } else {
             Ok(())
         }
@@ -179,7 +175,7 @@ impl Backend {
             .as_ref()
             .map(|r| (**r).clone())
             .ok_or("Library is not ready")?;
-        if !raesir_backend::game_pass::refresh(&self.data, &mut report, force)? {
+        if !exposed_games_backend::game_pass::refresh(&self.data, &mut report, force)? {
             return Ok(None);
         }
         self.ready()?;
@@ -249,7 +245,7 @@ impl Backend {
         if self.fixture.is_some() {
             return Err("Mounting is disabled in the fixture profile".into());
         }
-        if std::env::var_os("RAESIR_DISABLE_MOUNTS").is_some() {
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_MOUNTS").is_some() {
             return Err("Mounting is disabled in this diagnostic profile".into());
         }
         self.mounts.mount(id)?;
@@ -260,7 +256,7 @@ impl Backend {
         self.ready()?;
         if self.fixture.is_some()
             && !(matches!(kind, "launch" | "launch-modded")
-                && raesir_backend::mods::diagnostic_launch_enabled())
+                && exposed_games_backend::mods::diagnostic_launch_enabled())
         {
             return Err("Client actions are disabled in the fixture profile".into());
         }
@@ -276,14 +272,16 @@ impl Backend {
                 .iter()
                 .find(|g| g.key == key)
                 .ok_or("Game is no longer in the library")?;
-            let test_args =
-                if self.fixture.is_some() && raesir_backend::mods::diagnostic_launch_enabled() {
-                    mod_test_args()?
-                } else {
-                    Vec::new()
-                };
+            let test_args = if self.fixture.is_some()
+                && exposed_games_backend::mods::diagnostic_launch_enabled()
+            {
+                mod_test_args()?
+            } else {
+                Vec::new()
+            };
             if kind == "launch-modded"
-                || self.fixture.is_some() && raesir_backend::mods::diagnostic_launch_enabled()
+                || self.fixture.is_some()
+                    && exposed_games_backend::mods::diagnostic_launch_enabled()
             {
                 let launch = if kind == "launch-modded" {
                     self.mod_manager.launch_modded(&report, game, &test_args)?
@@ -323,7 +321,7 @@ impl Backend {
         }
         if kind == "install"
             && let Some(game) = report.catalog.iter().find(|g| g.key == key)
-            && let Some(request) = raesir_backend::downloads::install_request(&report, game)
+            && let Some(request) = exposed_games_backend::downloads::install_request(&report, game)
         {
             self.downloads.start(request)?;
             return Ok("Download started".into());
@@ -430,7 +428,7 @@ impl Backend {
             let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
             for (key, progress) in handoffs.iter_mut().filter(|(_, p)| p.active()) {
                 if let Some(game) = report.catalog.iter().find(|g| &g.key == key) {
-                    if raesir_backend::catalog::local(&game.installations) {
+                    if exposed_games_backend::catalog::local(&game.installations) {
                         progress.phase = Phase::Complete;
                         progress.percent = Some(100);
                         progress.detail = None;
@@ -485,7 +483,7 @@ impl Backend {
                 game.install = None;
                 continue;
             };
-            let local = raesir_backend::catalog::local(&game.installations);
+            let local = exposed_games_backend::catalog::local(&game.installations);
             if bridge {
                 let operation = if local {
                     Operation::Uninstall
@@ -513,13 +511,15 @@ impl Backend {
                 // Explicit documented handoff on unsupported builds/platforms;
                 // never reuse an old cached native action from another client.
                 if local {
-                    game.uninstall = Some(raesir_backend::catalog::url(
+                    game.uninstall = Some(exposed_games_backend::catalog::url(
                         "Steam",
                         format!("steam://uninstall/{appid}"),
                     ));
                 } else if game.in_library && game.client_os.contains(&Os::host()) {
-                    let mut action =
-                        raesir_backend::catalog::url("Steam", format!("steam://install/{appid}"));
+                    let mut action = exposed_games_backend::catalog::url(
+                        "Steam",
+                        format!("steam://install/{appid}"),
+                    );
                     action.note = Some("Steam will open its installation dialog.".into());
                     game.install = Some(action);
                 } else {
@@ -527,7 +527,7 @@ impl Backend {
                 }
             }
             // Adopt downloads already in progress, including after restarting
-            // Raesir. A missing payload by itself is not a download operation.
+            // Exposed Games. A missing payload by itself is not a download operation.
             if !jobs.contains_key(&game.key)
                 || jobs
                     .get(&game.key)
@@ -793,7 +793,7 @@ impl Backend {
     pub fn check_game_updates(&self, force: bool) -> (HashMap<String, Progress>, Vec<String>) {
         if self.fixture.is_some()
             || self.closing.load(Ordering::SeqCst)
-            || std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+            || std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
         {
             return (self.current_download_progress(), vec![]);
         }
@@ -837,22 +837,28 @@ impl Backend {
         &self,
         game: &LibraryGame,
         refresh: bool,
-    ) -> Result<raesir_backend::mods::Snapshot, String> {
+    ) -> Result<exposed_games_backend::mods::Snapshot, String> {
         self.ready()?;
         self.mod_manager.snapshot(game, refresh)
     }
 
     pub fn mod_auto_updates_enabled(&self) -> bool {
         let test = cfg!(debug_assertions)
-            && std::env::var_os("RAESIR_MODS_TEST_UPDATES").is_some_and(|v| v == "1");
+            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_UPDATES").is_some_and(|v| v == "1");
         (self.fixture.is_none() || test)
-            && (std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() || test)
+            && (std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() || test)
     }
 
     pub fn auto_update_mods(
         &self,
         startup: bool,
-    ) -> Result<Option<(raesir_backend::mods::UpdateReport, Option<Arc<Report>>)>, String> {
+    ) -> Result<
+        Option<(
+            exposed_games_backend::mods::UpdateReport,
+            Option<Arc<Report>>,
+        )>,
+        String,
+    > {
         self.ready()?;
         if !self.mod_auto_updates_enabled() {
             return Ok(None);
@@ -898,9 +904,9 @@ impl Backend {
         &self,
         game: &LibraryGame,
         package: &str,
-    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+    ) -> Result<(exposed_games_backend::mods::Snapshot, Arc<Report>), String> {
         self.ready()?;
-        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+        if self.fixture.is_some() && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none() {
             return Err("Mod installation is disabled in this fixture profile".into());
         }
         let snapshot = self.mod_manager.install(game, package)?;
@@ -921,7 +927,7 @@ impl Backend {
         &self,
         game: &LibraryGame,
         package: &str,
-    ) -> Result<raesir_backend::details::Details, String> {
+    ) -> Result<exposed_games_backend::details::Details, String> {
         self.ready()?;
         self.mod_manager.details(game, package)
     }
@@ -930,9 +936,9 @@ impl Backend {
         &self,
         game: &LibraryGame,
         package: &str,
-    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+    ) -> Result<(exposed_games_backend::mods::Snapshot, Arc<Report>), String> {
         self.ready()?;
-        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+        if self.fixture.is_some() && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none() {
             return Err("Mod changes are disabled in this fixture profile".into());
         }
         let snapshot = self.mod_manager.uninstall(game, package)?;
@@ -945,9 +951,9 @@ impl Backend {
         url: &str,
         archive: &Path,
         folder: &str,
-    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+    ) -> Result<(exposed_games_backend::mods::Snapshot, Arc<Report>), String> {
         self.ready()?;
-        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+        if self.fixture.is_some() && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none() {
             return Err("Mod changes are disabled in this fixture profile".into());
         }
         let snapshot = self.mod_manager.import_nexus(game, url, archive, folder)?;
@@ -958,7 +964,7 @@ impl Backend {
         &self,
         game: &LibraryGame,
         id: &str,
-    ) -> Result<Vec<raesir_backend::mods::ModFile>, String> {
+    ) -> Result<Vec<exposed_games_backend::mods::ModFile>, String> {
         self.ready()?;
         self.mod_manager.mod_files(game, id)
     }
@@ -969,7 +975,7 @@ impl Backend {
         operation: &str,
         id: &str,
         name: &str,
-    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+    ) -> Result<(exposed_games_backend::mods::Snapshot, Arc<Report>), String> {
         self.ready()?;
         match operation {
             "create" => self.mod_manager.create_profile(game, name)?,
@@ -1000,7 +1006,9 @@ impl Backend {
         cancel: &AtomicBool,
     ) -> Result<artwork::Artwork, String> {
         self.ready()?;
-        if self.fixture.is_some() && std::env::var_os("RAESIR_ARTWORK_NETWORK_FIXTURE").is_none() {
+        if self.fixture.is_some()
+            && std::env::var_os("EXPOSED_GAMES_ARTWORK_NETWORK_FIXTURE").is_none()
+        {
             return game
                 .cover
                 .as_ref()
@@ -1022,15 +1030,18 @@ impl Backend {
         actions::support(project)
     }
 
-    pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_backend::details::Details> {
-        raesir_backend::details::cached(game, &self.cache.join("details"))
+    pub fn cached_details(
+        &self,
+        game: &LibraryGame,
+    ) -> Option<exposed_games_backend::details::Details> {
+        exposed_games_backend::details::cached(game, &self.cache.join("details"))
     }
 
     pub fn player_stats(
         &self,
         game: &LibraryGame,
         refresh: bool,
-    ) -> raesir_backend::player_stats::PlayerStats {
+    ) -> exposed_games_backend::player_stats::PlayerStats {
         if self.fixture.is_some() {
             return std::fs::read(self.data.join("player-stats.json"))
                 .ok()
@@ -1047,25 +1058,56 @@ impl Backend {
             return Default::default();
         };
         if refresh {
-            raesir_backend::player_stats::refresh(game, &report, &self.cache.join("player-stats"))
+            exposed_games_backend::player_stats::refresh(
+                game,
+                &report,
+                &self.cache.join("player-stats"),
+            )
         } else {
-            raesir_backend::player_stats::cached(game, &report, &self.cache.join("player-stats"))
+            exposed_games_backend::player_stats::cached(
+                game,
+                &report,
+                &self.cache.join("player-stats"),
+            )
         }
     }
 
-    pub fn details(&self, game: &LibraryGame) -> Result<raesir_backend::details::Details, String> {
+    pub fn details(
+        &self,
+        game: &LibraryGame,
+    ) -> Result<exposed_games_backend::details::Details, String> {
         self.ready()?;
         if self.fixture.is_some() {
             return self
                 .cached_details(game)
                 .ok_or("No details in this diagnostic profile".into());
         }
-        raesir_backend::details::fetch(game, &self.cache.join("details"))
+        exposed_games_backend::details::fetch(game, &self.cache.join("details"))
+    }
+
+    pub fn review_page(
+        &self,
+        appid: &str,
+        query: &exposed_games_backend::details::reviews::Query,
+        recent: bool,
+        cursor: &str,
+    ) -> Result<exposed_games_backend::details::reviews::Page, String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return std::fs::read(self.data.join(if recent {
+                "reviews-recent.json"
+            } else {
+                "reviews-main.json"
+            }))
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()));
+        }
+        exposed_games_backend::details::reviews::fetch(appid, query, recent, cursor)
     }
 
     pub fn detail_media(&self, url: &str) -> Result<String, String> {
         self.ready()?;
-        let mut game = raesir_backend::catalog::entry("media", url, "", vec![], "media");
+        let mut game = exposed_games_backend::catalog::entry("media", url, "", vec![], "media");
         game.cover = Some(url.into());
         if self.fixture.is_some() {
             if let Some(art) = artwork::cached(&game, &self.cache.join("artwork")) {
@@ -1087,7 +1129,7 @@ impl Backend {
             .cloned()
     }
 
-    pub fn warm_achievement_icons(&self, stats: &raesir_backend::player_stats::PlayerStats) {
+    pub fn warm_achievement_icons(&self, stats: &exposed_games_backend::player_stats::PlayerStats) {
         let order = stats.highlights().into_iter().chain(
             stats
                 .by_progress()
@@ -1110,7 +1152,7 @@ impl Backend {
         if url.is_empty() {
             return Err("No achievement icon".into());
         }
-        let mut game = raesir_backend::catalog::entry("media", url, "", vec![], "media");
+        let mut game = exposed_games_backend::catalog::entry("media", url, "", vec![], "media");
         game.cover = Some(url.into());
         let path = if Path::new(url).is_file() {
             url.to_owned()
@@ -1150,7 +1192,7 @@ impl Backend {
 
     pub fn detail_animation(&self, url: &str) -> Result<String, String> {
         self.ready()?;
-        raesir_backend::details::media::animation(
+        exposed_games_backend::details::media::animation(
             url,
             &self.cache.join("animations"),
             self.fixture.is_none(),
@@ -1257,7 +1299,7 @@ impl Backend {
 
 fn mod_test_args() -> Result<Vec<String>, String> {
     // The fixture passes a JSON argv array, avoiding another shell parser.
-    std::env::var("RAESIR_MODS_TEST_ARGS").map_or_else(
+    std::env::var("EXPOSED_GAMES_MODS_TEST_ARGS").map_or_else(
         |_| Ok(Vec::new()),
         |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
     )
@@ -1309,9 +1351,11 @@ mod tests {
         let mut backend = Arc::try_unwrap(Backend::new()).ok().unwrap();
         backend.data = dir.join("data");
         backend.cache = dir.join("cache");
-        backend.mod_manager = raesir_backend::mods::Manager::new(&backend.data, &backend.cache);
-        backend.downloads = raesir_backend::downloads::Manager::new(&backend.data);
-        backend.client_downloads = raesir_backend::client_downloads::Manager::new(&backend.data);
+        backend.mod_manager =
+            exposed_games_backend::mods::Manager::new(&backend.data, &backend.cache);
+        backend.downloads = exposed_games_backend::downloads::Manager::new(&backend.data);
+        backend.client_downloads =
+            exposed_games_backend::client_downloads::Manager::new(&backend.data);
         let path = dir.join("library.json");
         std::fs::write(
             &path,
@@ -1418,8 +1462,8 @@ mod tests {
             .save(&path)
             .unwrap();
         let url = path.to_string_lossy().into_owned();
-        let stats = raesir_backend::player_stats::PlayerStats {
-            achievements: vec![raesir_backend::player_stats::Achievement {
+        let stats = exposed_games_backend::player_stats::PlayerStats {
+            achievements: vec![exposed_games_backend::player_stats::Achievement {
                 icon: url.clone(),
                 ..Default::default()
             }],
@@ -1440,7 +1484,7 @@ mod tests {
             .save_with_format(&path, image_codec::ImageFormat::Jpeg)
             .unwrap();
         let mut game =
-            raesir_backend::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
+            exposed_games_backend::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
         game.cover = Some(path.to_string_lossy().into_owned());
         let ready = crate::artwork::load(&backend, &game).unwrap();
         let image = &ready.poster;

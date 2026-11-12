@@ -84,7 +84,7 @@ pub fn fetch_cancelable(
     if let Some(value) = cached(game, root) {
         return Ok(value);
     }
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
         return Err("Artwork networking disabled for diagnostics".into());
     }
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
@@ -103,7 +103,7 @@ pub fn fetch_cancelable(
             reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(7))
                 .connect_timeout(Duration::from_secs(3))
-                .user_agent("Raesir/0.1")
+                .user_agent("ExposedGames/0.1")
                 .build()
                 .map_err(|e| e.to_string())
         });
@@ -371,7 +371,7 @@ fn remote_bytes(url: reqwest::Url, cancel: &AtomicBool, limit: usize) -> Result<
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(7))
                 .connect_timeout(Duration::from_secs(3))
-                .user_agent("Raesir/0.1")
+                .user_agent("ExposedGames/0.1")
                 .build()
                 .map_err(|e| e.to_string())?,
         })

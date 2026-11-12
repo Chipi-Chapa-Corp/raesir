@@ -1,6 +1,6 @@
 use crate::{Launcher, header::pill};
+use exposed_games_backend::model::Os;
 use gpui::{prelude::*, *};
-use raesir_backend::model::Os;
 
 pub(crate) fn text_button(
     id: impl Into<ElementId>,
@@ -163,7 +163,7 @@ impl Launcher {
                 .child(div().flex().flex_col().gap(rems(0.3)).flex_1().min_w_0()
                     .child("Automatic game updates")
                     .child(div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal()
-                        .child("Start available game updates automatically in Raesir.")))
+                        .child("Start available game updates automatically in Exposed Games.")))
                 .child(div().w(rems(2.8)).h(rems(1.6)).flex_none().rounded_full().flex().items_center().p(rems(0.2))
                     .bg(if automatic { rgba(0x9ff4bcff) } else { rgba(0xffffff29) })
                     .when(automatic,|d|d.justify_end())
@@ -199,7 +199,7 @@ impl Launcher {
         let busy = self
             .download_operations
             .get(key)
-            .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
+            .is_some_and(|p| p.phase != exposed_games_backend::steam_control::Phase::Failed);
         let local = !busy && game.installed(self.library_scope(), self.host) == 1;
         let items = [
             ("launch", "Launch", local && game.source.launch.is_some()),
@@ -208,7 +208,7 @@ impl Launcher {
                 "Install",
                 !busy
                     && self.library_scope() != 2
-                    && raesir_backend::actions::can_install(&game.source),
+                    && exposed_games_backend::actions::can_install(&game.source),
             ),
             ("store", "View in store", game.source.store_page.is_some()),
             (

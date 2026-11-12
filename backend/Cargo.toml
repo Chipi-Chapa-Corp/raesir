@@ -1,13 +1,13 @@
 [package]
-name = "raesir-backend"
+name = "exposed-games-backend"
 version = "0.1.0"
 license = "GPL-3.0-only"
-description = "Game library discovery and client integration for Raesir"
+description = "Game library discovery and client integration for Exposed Games"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "raesir-scan"
+name = "exposed-games-scan"
 path = "src/bin/scan.rs"
 
 [dependencies]

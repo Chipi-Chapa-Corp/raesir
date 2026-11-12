@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn native_peer_fixture() {
-        let Some(dir) = std::env::var_os("RAESIR_NATIVE_PEER_FIXTURE") else {
+        let Some(dir) = std::env::var_os("EXPOSED_GAMES_NATIVE_PEER_FIXTURE") else {
             return;
         };
         let dir = std::path::PathBuf::from(dir);
@@ -274,7 +274,7 @@ mod tests {
                 "--exact",
                 "client_downloads::peer::tests::native_peer_fixture",
             ])
-            .env("RAESIR_NATIVE_PEER_FIXTURE", dir.path())
+            .env("EXPOSED_GAMES_NATIVE_PEER_FIXTURE", dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -315,10 +315,10 @@ mod diagnostic {
     fn private_wine_listener_owner() {
         assert!(std::env::var_os("ISOLATED_GUI_SESSION").is_some());
         let root = std::path::PathBuf::from(
-            std::env::var_os("RAESIR_NATIVE_CLIENT_ROOT").expect("private client root"),
+            std::env::var_os("EXPOSED_GAMES_NATIVE_CLIENT_ROOT").expect("private client root"),
         );
         let prefix = std::path::PathBuf::from(
-            std::env::var_os("RAESIR_NATIVE_CLIENT_PREFIX").expect("private prefix"),
+            std::env::var_os("EXPOSED_GAMES_NATIVE_CLIENT_PREFIX").expect("private prefix"),
         );
         let private = crate::platform::home()
             .unwrap()

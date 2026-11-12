@@ -1,6 +1,6 @@
 // Invoked only in the verified EA Desktop SPA. Qt owns all entitlement,
 // content checks and download operations; no account data leaves that client.
-async function raesirEa(input) {
+async function exposedGamesEa(input) {
     const manager = globalThis.webchannel?.objects?.GamesManager;
     if (!manager || typeof manager.getGameStatusV2 !== "function"
         || typeof manager.getQueuedOfferIds !== "function") throw new Error("Sign in to EA app first");
@@ -15,7 +15,7 @@ async function raesirEa(input) {
         if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Unsupported EA game status");
         const game = result.gameStatus && typeof result.gameStatus === "object" ? result.gameStatus : result;
         let info = result.installInfo && typeof result.installInfo === "object" ? result.installInfo : game;
-        if (info.installStatusString === undefined) info = await call("getInstallInfo", id, "raesir");
+        if (info.installStatusString === undefined) info = await call("getInstallInfo", id, "exposed-games");
         if (!info || typeof info !== "object") throw new Error("Unsupported EA installation status");
         const state = info.installStatusString ?? game.installStatusString;
         return { game, info, state, managed: result.managedBy === undefined || result.managedBy === "EA" };
@@ -41,7 +41,7 @@ async function raesirEa(input) {
             if (!Array.isArray(existing)) throw new Error("Unsupported EA download queue");
             if (!current.managed) throw new Error("Manage this game's update in its original client");
             if (!existing.includes(input.id) && current.game.updateavailable !== true && current.game.updaterequired !== true) throw new Error("EA has no update for this game");
-            if (!existing.includes(input.id)) await call("initiateUpdateV3", { offerIds: [input.id], trigger: "raesir" });
+            if (!existing.includes(input.id)) await call("initiateUpdateV3", { offerIds: [input.id], trigger: "exposed-games" });
         } else throw new Error("Unsupported EA download action");
     }
     const queued = await call("getQueuedOfferIds");

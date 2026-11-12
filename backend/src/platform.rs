@@ -176,9 +176,9 @@ pub fn unreadable_note(host: Os, filesystem: &str, driver_present: bool) -> Stri
         (Os::Windows, "btrfs") =>
             "WinBtrfs is installed, but this partition has no accessible mount. Expose the correct subvolume in read-only mode and rescan.".into(),
         (Os::Windows, "ext4") =>
-            "ext4 is not readable here. A filesystem reader/driver is required; Raesir scans readable mounted partitions. WSL --mount cannot attach the running Windows disk.".into(),
+            "ext4 is not readable here. A filesystem reader/driver is required; Exposed Games scans readable mounted partitions. WSL --mount cannot attach the running Windows disk.".into(),
         (_, "crypto_luks" | "bitlocker") =>
-            "Encrypted partition. Unlock and expose it using your OS tools, then rescan. Raesir does not unlock volumes.".into(),
+            "Encrypted partition. Unlock and expose it using your OS tools, then rescan. Exposed Games does not unlock volumes.".into(),
         (Os::Linux, "ntfs") =>
             "Unmounted NTFS partition; it may contain Windows games. Use Mount read-only to request access through your OS. Windows/Steam installation is not yet verified.".into(),
         (Os::Windows, "linux") =>

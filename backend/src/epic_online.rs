@@ -13,7 +13,7 @@ use std::{
 };
 
 pub fn binary() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("RAESIR_LEGENDARY_BINARY") {
+    if let Some(path) = env::var_os("EXPOSED_GAMES_LEGENDARY_BINARY") {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
     }
@@ -78,7 +78,7 @@ impl Manager {
         .ok_or(
             "Choose a detected local Legendary/Heroic profile. Other-OS profiles are read-only.",
         )?;
-        let program = binary().ok_or("Legendary is not available. Install its CLI or set RAESIR_LEGENDARY_BINARY; cached libraries still work. Sign in with Heroic or Legendary first.")?;
+        let program = binary().ok_or("Legendary is not available. Install its CLI or set EXPOSED_GAMES_LEGENDARY_BINARY; cached libraries still work. Sign in with Heroic or Legendary first.")?;
         self.run(program, &profile.path, Duration::from_secs(120))
     }
 
@@ -118,7 +118,7 @@ impl Manager {
         {
             let mut process = self.process.lock().unwrap_or_else(|e| e.into_inner());
             if self.closing.load(Ordering::SeqCst) {
-                return Err("Epic lookup cancelled because Raesir is closing".into());
+                return Err("Epic lookup cancelled because Exposed Games is closing".into());
             }
             *process = Some(command.spawn().map_err(|_| "Could not run Legendary")?);
         }
@@ -127,7 +127,7 @@ impl Manager {
             let mut process = self.process.lock().unwrap_or_else(|e| e.into_inner());
             let child = process
                 .as_mut()
-                .ok_or("Epic lookup cancelled because Raesir is closing")?;
+                .ok_or("Epic lookup cancelled because Exposed Games is closing")?;
             let too_large = [reader.metadata(), error_reader.metadata()]
                 .into_iter()
                 .any(|m| m.map(|m| m.len() > 32 * 1024 * 1024).unwrap_or(true));
@@ -151,7 +151,7 @@ impl Manager {
             }
         };
         if !status.success() {
-            return Err("Legendary could not read the Epic account. Sign in using Heroic or `legendary auth`, then retry. The previous Raesir library was kept.".into());
+            return Err("Legendary could not read the Epic account. Sign in using Heroic or `legendary auth`, then retry. The previous Exposed Games library was kept.".into());
         }
         if reader.metadata().map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
             return Err(

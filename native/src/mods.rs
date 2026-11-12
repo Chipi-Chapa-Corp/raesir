@@ -4,9 +4,9 @@ use crate::{
     header::{bar, button, button_shell, pill, spinner},
     icons::icon,
 };
+use exposed_games_backend::{model::LibraryGame, mods::Snapshot};
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{EditableTextState, StringStorage, TextChanged, text_input};
-use raesir_backend::{model::LibraryGame, mods::Snapshot};
 use std::{collections::HashSet, sync::Arc};
 
 mod nexus_ui;
@@ -225,10 +225,15 @@ impl ModBrowser {
         let backdrop = owner.read(cx).backdrop.clone();
         let return_focus = owner.read(cx).focus.clone();
         window.focus(&return_focus, cx);
-        let mut source =
-            raesir_backend::catalog::entry("thunderstore", &row.id, &row.title, vec![], "mods");
+        let mut source = exposed_games_backend::catalog::entry(
+            "thunderstore",
+            &row.id,
+            &row.title,
+            vec![],
+            "mods",
+        );
         source.client = row.source;
-        let data = raesir_backend::details::Details {
+        let data = exposed_games_backend::details::Details {
             key: source.key.clone(),
             title: row.title,
             description: row.description,

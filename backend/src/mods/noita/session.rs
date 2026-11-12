@@ -59,7 +59,7 @@ impl Manager {
         game: &LibraryGame,
         args: &[String],
     ) -> Result<LaunchTask, String> {
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
             && !super::super::diagnostic_launch_enabled()
         {
             return Err("Game launches are disabled in this diagnostic profile".into());
@@ -75,7 +75,9 @@ impl Manager {
             .map_err(|e| e.to_string())?;
         let lease = self.modification_lease(game)?;
         let slug = community(game).ok_or("Unknown game")?;
+        let _profile_lease = self.profile_lease(slug)?;
         let profile = self.own_path(slug).ok_or("Install a Noita mod first")?;
+        let revision_lease = self.revision_lease(&profile)?;
         let entries = read(&profile)?;
         if entries.is_empty() {
             return Err("This profile has no installed mods".into());
@@ -105,7 +107,7 @@ impl Manager {
                     .is_some()
             {
                 return Err(format!(
-                    "The game already has a manually installed {folder} folder. Move that copy before launching the Raesir profile."
+                    "The game already has a manually installed {folder} folder. Move that copy before launching the Exposed Games profile."
                 ));
             }
         }
@@ -238,6 +240,7 @@ impl Manager {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _lease = lease;
+            let _revision_lease = revision_lease;
             let mut failure = None;
             if children.is_empty() {
                 let deadline = Instant::now() + Duration::from_secs(120);
@@ -646,7 +649,7 @@ mod tests {
         fs::write(saves.join("save00/mod_config.xml"), original_mods).unwrap();
         fs::write(saves.join("save_shared/config.xml"), original_config).unwrap();
         fs::write(saves.join("save00/world.dat"), b"existing world bytes").unwrap();
-        let root = manager.profile_root("noita", "raesir");
+        let root = manager.profile_root("noita", "exposed-games");
         let profile = root.join("revisions/profile-test");
         fs::create_dir_all(profile.join("mods/testmod")).unwrap();
         fs::create_dir_all(profile.join("tools/test")).unwrap();

@@ -4,8 +4,8 @@ use crate::{
     header::{action_button, pill},
     icons::icon,
 };
+use exposed_games_backend::steam_control::{Operation, Phase, Progress};
 use gpui::{prelude::*, *};
-use raesir_backend::steam_control::{Operation, Phase, Progress};
 use std::{cell::Cell, rc::Rc};
 
 pub fn button_label(progress: &Progress) -> String {

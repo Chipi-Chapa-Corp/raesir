@@ -1,5 +1,5 @@
 use super::*;
-use raesir_backend::details::rich::{Block, Span};
+use exposed_games_backend::details::rich::{Block, Span};
 
 #[derive(Default)]
 pub(super) struct AnimationSlot {
@@ -51,7 +51,7 @@ fn text(id: usize, spans: &[Span]) -> Div {
                 StyledText::new(content).with_highlights(highlights),
             )
             .on_click(links, move |index, _, cx| {
-                if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
+                if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
                     cx.open_url(&urls[index]);
                 }
             }),
@@ -181,7 +181,7 @@ impl DetailsPage {
                             .justify_center()
                             .when_some(link.clone(), |d, link| {
                                 d.cursor_pointer().on_click(move |_, _, cx| {
-                                    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
+                                    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
                                         cx.open_url(&link);
                                     }
                                 })

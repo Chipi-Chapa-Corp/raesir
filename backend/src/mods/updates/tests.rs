@@ -65,6 +65,84 @@ fn source(manager: &Manager, slug: &str, id: &str, mods: &[modlist::ProfileMod])
 }
 
 #[test]
+fn installs_and_uninstalls_while_running_keep_the_session_revision_across_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let m = manager(temp.path());
+    let other = manager(temp.path());
+    let game_dir = temp.path().join("game");
+    fs::create_dir_all(&game_dir).unwrap();
+    fs::write(game_dir.join("winhttp.dll"), b"running loader").unwrap();
+    let game = crate::catalog::entry(
+        "steam",
+        "3527290",
+        "Peak",
+        vec![crate::model::Installation {
+            path: game_dir.to_string_lossy().into(),
+            library: temp.path().to_string_lossy().into(),
+            os: crate::model::Os::host(),
+            state: "installed".into(),
+            last_seen: 0,
+        }],
+        "fixture",
+    );
+    let original = source(&m, "peak", "exposed-games", &[entry("Root", "1.0.0")]);
+    fs::write(original.join("running.cfg"), b"session settings").unwrap();
+    let _game_lease = other.game_lease(&game_dir).unwrap();
+    m.active.lock().unwrap().insert(game_dir.clone());
+    let session = m.revision_lease(&original).unwrap();
+    let second_session = other.revision_lease(&original).unwrap();
+    let latest = index(&[
+        ("Root", "1.0.0", vec![]),
+        ("New", "1.0.0", vec!["Owner-Dependency-1.0.0"]),
+        ("Dependency", "1.0.0", vec![]),
+    ]);
+    m.catalogs.lock().unwrap().insert(
+        "peak".into(),
+        Catalog {
+            updated: Instant::now(),
+            index: latest,
+            packages: Arc::new(Vec::new()),
+        },
+    );
+    cache_archive(&m, "New", "1.0.0", b"new mod");
+    cache_archive(&m, "Dependency", "1.0.0", b"new dependency");
+    for _ in 0..3 {
+        m.install(&game, "Owner-New").unwrap();
+        let next = m.own_path("peak").unwrap();
+        assert_ne!(next, original);
+        assert_eq!(
+            fs::read(next.join("BepInEx/plugins/Owner-New/New.dll")).unwrap(),
+            b"new mod"
+        );
+        m.uninstall(&game, "Owner-New").unwrap();
+        let next = m.own_path("peak").unwrap();
+        assert!(!next.join("BepInEx/plugins/Owner-New").exists());
+        assert!(!next.join("BepInEx/plugins/Owner-Dependency").exists());
+    }
+    assert_eq!(modlist::read(&original).unwrap().len(), 1);
+    assert_eq!(
+        fs::read(original.join("running.cfg")).unwrap(),
+        b"session settings"
+    );
+    assert_eq!(
+        fs::read(game_dir.join("winhttp.dll")).unwrap(),
+        b"running loader"
+    );
+    drop(session);
+    other.prune_revisions("peak");
+    assert!(
+        original.is_dir(),
+        "another session still retains the revision"
+    );
+    drop(second_session);
+    other.prune_revisions("peak");
+    assert!(
+        !original.exists(),
+        "unused old revisions can now be removed"
+    );
+}
+
+#[test]
 fn updates_all_owned_profiles_atomically_keeps_selection_disabled_mods_and_install_reasons() {
     let temp = tempfile::tempdir().unwrap();
     let m = manager(temp.path());
@@ -73,7 +151,7 @@ fn updates_all_owned_profiles_atomically_keeps_selection_disabled_mods_and_insta
     let other = m.selected_id("peak");
     let mut old = entry("Root", "1.0.0");
     old.enabled = false;
-    let original = source(&m, "peak", "raesir", &[old.clone()]);
+    let original = source(&m, "peak", "exposed-games", &[old.clone()]);
     let other_path = source(&m, "peak", &other, &[old]);
     let latest = index(&[
         ("Root", "2.0.0", vec!["Owner-Dependency-1.0.0"]),
@@ -90,16 +168,9 @@ fn updates_all_owned_profiles_atomically_keeps_selection_disabled_mods_and_insta
     cache_archive(&m, "Root", "2.0.0", b"new root");
     cache_archive(&m, "Dependency", "1.0.0", b"new dependency");
     let mut refreshed = HashSet::from(["thunderstore:peak".into()]);
-    for (id, path) in [("raesir", &original), (other.as_str(), &other_path)] {
+    for (id, path) in [("exposed-games", &original), (other.as_str(), &other_path)] {
         let (updated, manual) = m
-            .update_profile(
-                &game,
-                &[],
-                id,
-                path,
-                &mut refreshed,
-                &AtomicBool::new(false),
-            )
+            .update_profile(&game, id, path, &mut refreshed, &AtomicBool::new(false))
             .unwrap();
         assert_eq!(updated.len(), 2);
         assert!(manual.is_empty());
@@ -148,11 +219,11 @@ fn updates_all_owned_profiles_atomically_keeps_selection_disabled_mods_and_insta
 }
 
 #[test]
-fn current_mods_are_not_copied_and_offline_or_busy_profiles_keep_their_current_pointer() {
+fn current_mods_are_not_copied_even_while_the_game_is_locked() {
     let temp = tempfile::tempdir().unwrap();
     let m = manager(temp.path());
     let mut game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
-    let original = source(&m, "peak", "raesir", &[entry("Root", "2.0.0")]);
+    let original = source(&m, "peak", "exposed-games", &[entry("Root", "2.0.0")]);
     let latest = index(&[("Root", "2.0.0", vec![])]);
     m.catalogs.lock().unwrap().insert(
         "peak".into(),
@@ -166,8 +237,7 @@ fn current_mods_are_not_copied_and_offline_or_busy_profiles_keep_their_current_p
     let result = m
         .update_profile(
             &game,
-            &[],
-            "raesir",
+            "exposed-games",
             &original,
             &mut refreshed,
             &AtomicBool::new(false),
@@ -188,20 +258,46 @@ fn current_mods_are_not_copied_and_offline_or_busy_profiles_keep_their_current_p
     assert!(
         m.update_profile(
             &game,
-            &[],
-            "raesir",
+            "exposed-games",
             &original,
             &mut refreshed,
             &AtomicBool::new(false)
         )
-        .unwrap_err()
-        .starts_with("Deferred:")
+        .unwrap()
+        .0
+        .is_empty()
     );
     drop(lease);
     assert_eq!(m.own_path("peak").unwrap(), original);
     let before = tree_stamp(&original).unwrap();
     fs::write(original.join("player.cfg"), b"changed").unwrap();
     assert_ne!(tree_stamp(&original).unwrap(), before);
+}
+
+#[test]
+fn deferred_updates_are_retried_without_showing_a_mod_error_banner() {
+    let temp = tempfile::tempdir().unwrap();
+    let m = manager(temp.path());
+    let mut game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
+    source(&m, "peak", "exposed-games", &[entry("Root", "1.0.0")]);
+    let game_dir = temp.path().join("game");
+    fs::create_dir_all(&game_dir).unwrap();
+    game.installations.push(crate::model::Installation {
+        path: game_dir.to_string_lossy().into(),
+        library: temp.path().to_string_lossy().into(),
+        os: crate::model::Os::host(),
+        state: "installed".into(),
+        last_seen: 0,
+    });
+    let _lease = m.profile_lease("peak").unwrap();
+    let report = m
+        .auto_update(&[game.clone()], true, &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(report.issues[0].kind, "deferred");
+    assert!(m.update_warnings(&game).is_empty());
+    let state: State =
+        serde_json::from_slice(&fs::read(m.data.join("update-status.json")).unwrap()).unwrap();
+    assert!(state.profiles["peak/exposed-games"].next_check <= report.checked_at + 60);
 }
 
 #[test]
@@ -227,7 +323,7 @@ fn hourly_schedule_persists_manual_sources_and_catalog_missing_games_without_tou
     let temp = tempfile::tempdir().unwrap();
     let m = manager(temp.path());
     let game = crate::catalog::entry("steam", "881100", "Noita", vec![], "fixture");
-    let root = m.profile_root("noita", "raesir");
+    let root = m.profile_root("noita", "exposed-games");
     let path = root.join("revisions/profile-fixture");
     fs::create_dir_all(&path).unwrap();
     crate::storage::write_json(
@@ -264,8 +360,7 @@ fn hourly_schedule_persists_manual_sources_and_catalog_missing_games_without_tou
 }
 
 #[test]
-fn a_game_starting_or_profile_edit_during_download_defers_publication_without_holding_the_operation_lock()
- {
+fn game_start_during_download_allows_updates_while_profile_edits_defer_publication() {
     use std::{
         io::{Cursor, Read},
         net::TcpListener,
@@ -289,7 +384,7 @@ fn a_game_starting_or_profile_edit_during_download_defers_publication_without_ho
             }],
             "fixture",
         );
-        let original = source(&m, "peak", "raesir", &[entry("Root", "1.0.0")]);
+        let original = source(&m, "peak", "exposed-games", &[entry("Root", "1.0.0")]);
         let socket = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         let latest = index_url(
@@ -339,8 +434,7 @@ fn a_game_starting_or_profile_edit_during_download_defers_publication_without_ho
             let job = scope.spawn(|| {
                 m.update_profile(
                     &game,
-                    &[],
-                    "raesir",
+                    "exposed-games",
                     &original,
                     &mut HashSet::from(["thunderstore:peak".into()]),
                     &AtomicBool::new(false),
@@ -362,15 +456,23 @@ fn a_game_starting_or_profile_edit_during_download_defers_publication_without_ho
                 resume.send(()).unwrap();
             } else {
                 resume.send(()).unwrap();
-                let error = job.join().unwrap().unwrap_err();
-                assert!(error.starts_with("Deferred:"), "{error}");
+                let (updated, _) = job.join().unwrap().unwrap();
+                assert_eq!(updated, ["Owner-Root"]);
+                let current = m.own_path("peak").unwrap();
+                assert_ne!(current, original);
+                assert_eq!(
+                    fs::read(current.join("BepInEx/plugins/Owner-Root/Root.dll")).unwrap(),
+                    b"new version"
+                );
                 drop(lease);
                 return;
             }
             let error = job.join().unwrap().unwrap_err();
             assert!(error.starts_with("Deferred:"), "{error}");
         });
-        assert_eq!(m.own_path("peak").unwrap(), original);
+        if player_edits {
+            assert_eq!(m.own_path("peak").unwrap(), original);
+        }
         assert_eq!(
             modlist::read(&original).unwrap()[0]
                 .version_number
@@ -391,7 +493,7 @@ fn broken_archives_never_publish_a_partially_updated_profile() {
     let temp = tempfile::tempdir().unwrap();
     let m = manager(temp.path());
     let game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
-    let original = source(&m, "peak", "raesir", &[entry("Root", "1.0.0")]);
+    let original = source(&m, "peak", "exposed-games", &[entry("Root", "1.0.0")]);
     let latest = index(&[("Root", "2.0.0", vec![])]);
     m.catalogs.lock().unwrap().insert(
         "peak".into(),
@@ -407,8 +509,7 @@ fn broken_archives_never_publish_a_partially_updated_profile() {
     assert!(
         m.update_profile(
             &game,
-            &[],
-            "raesir",
+            "exposed-games",
             &original,
             &mut HashSet::from(["thunderstore:peak".into()]),
             &AtomicBool::new(false)
@@ -430,14 +531,13 @@ fn cross_process_profile_mutations_are_protected_even_when_the_game_is_uninstall
     let first = manager(temp.path());
     let second = manager(temp.path());
     let game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
-    let original = source(&first, "peak", "raesir", &[entry("Root", "1.0.0")]);
+    let original = source(&first, "peak", "exposed-games", &[entry("Root", "1.0.0")]);
     let busy = first.profile_lease("peak").unwrap();
     assert!(
         second
             .update_profile(
                 &game,
-                &[],
-                "raesir",
+                "exposed-games",
                 &original,
                 &mut HashSet::new(),
                 &AtomicBool::new(false)
@@ -445,10 +545,28 @@ fn cross_process_profile_mutations_are_protected_even_when_the_game_is_uninstall
             .unwrap_err()
             .starts_with("Deferred:")
     );
-    assert!(second.select(&game, "raesir").is_err());
+    assert!(second.try_profile_lease("peak").is_err());
     assert_eq!(first.own_path("peak").unwrap(), original);
-    drop(busy);
-    assert!(second.select(&game, "raesir").is_ok());
+    std::thread::scope(|scope| {
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            ready.send(()).unwrap();
+            done.send(second.select(&game, "exposed-games")).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        // User operations wait their turn instead of failing on a busy profile.
+        let early = result.recv_timeout(Duration::from_millis(50));
+        drop(busy);
+        assert!(matches!(
+            early,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+    });
 }
 
 #[test]
@@ -458,7 +576,12 @@ fn automatic_dependency_updates_cannot_overwrite_a_local_mod() {
     let game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
     let mut local = entry("Local", "1.0.0");
     local.online_source = false;
-    let original = source(&m, "peak", "raesir", &[entry("Root", "1.0.0"), local]);
+    let original = source(
+        &m,
+        "peak",
+        "exposed-games",
+        &[entry("Root", "1.0.0"), local],
+    );
     let latest = index(&[
         ("Root", "2.0.0", vec!["Owner-Local-2.0.0"]),
         ("Local", "2.0.0", vec![]),
@@ -474,8 +597,7 @@ fn automatic_dependency_updates_cannot_overwrite_a_local_mod() {
     let error = m
         .update_profile(
             &game,
-            &[],
-            "raesir",
+            "exposed-games",
             &original,
             &mut HashSet::from(["thunderstore:peak".into()]),
             &AtomicBool::new(false),

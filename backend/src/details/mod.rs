@@ -14,6 +14,7 @@ use std::{
 pub mod media;
 mod providers;
 pub(crate) use providers::{ea_cover, epic_cover};
+pub mod reviews;
 pub mod rich;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -36,6 +37,8 @@ pub struct Details {
     pub media: Vec<Media>,
     pub requirements: Vec<Requirement>,
     pub reviews: Vec<Review>,
+    #[serde(default)]
+    pub steam_reviews: Option<reviews::SteamReviews>,
     pub review_summary: String,
     pub review_source: String,
     pub sources: Vec<String>,
@@ -83,6 +86,20 @@ pub struct Requirement {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Review {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub steam_id: String,
+    #[serde(default)]
+    pub hours_at_review: Option<f64>,
+    #[serde(default)]
+    pub helpful: Option<u64>,
+    #[serde(default)]
+    pub funny: Option<u64>,
+    #[serde(default)]
+    pub steam_purchase: Option<bool>,
+    #[serde(default)]
+    pub received_free: bool,
     pub author: String,
     pub title: String,
     pub text: String,
@@ -239,7 +256,7 @@ pub fn now() -> u64 {
 }
 fn path(game: &LibraryGame, root: &Path) -> PathBuf {
     let mut hash = DefaultHasher::new();
-    (3, &game.key, &game.title, "en-US").hash(&mut hash);
+    (4, &game.key, &game.title, "en-US").hash(&mut hash);
     root.join(format!("{:016x}.json", hash.finish()))
 }
 pub fn cached(game: &LibraryGame, root: &Path) -> Option<Details> {
@@ -252,7 +269,7 @@ pub fn cached(game: &LibraryGame, root: &Path) -> Option<Details> {
     (details.key == game.key).then_some(details)
 }
 pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
         return Err("Game details are offline. Cached information is still available.".into());
     }
     let client = http()?;
@@ -336,6 +353,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
                         details.reviews = other.reviews;
                         details.review_summary = other.review_summary;
                         details.review_source = other.review_source;
+                        details.steam_reviews = other.steam_reviews;
                     }
                     if enriched {
                         details
@@ -385,7 +403,7 @@ fn direct_video(media: &Media) -> bool {
 fn http() -> Result<&'static Client, String> {
     static HTTP: LazyLock<Result<Client, String>> = LazyLock::new(|| {
         Client::builder()
-            .user_agent("Raesir/0.1")
+            .user_agent("ExposedGames/0.1")
             .timeout(Duration::from_secs(12))
             .connect_timeout(Duration::from_secs(4))
             .build()

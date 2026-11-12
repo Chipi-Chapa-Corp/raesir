@@ -208,7 +208,7 @@ impl Lease {
         }
     }
     fn stop(&mut self) -> Result<(), String> {
-        // A user-requested install/removal belongs to Steam and continues after Raesir
+        // A user-requested install/removal belongs to Steam and continues after Exposed Games
         // closes. Only temporary library-lookup sessions are shut down here.
         if self.keep_running {
             let _ = self.child.try_wait();
@@ -259,7 +259,9 @@ impl Lease {
         let until = Instant::now() + Duration::from_secs(2);
         while self.alive(&snapshot()) {
             if Instant::now() > until {
-                return Err("Steam has not exited. Close Steam, then retry closing Raesir.".into());
+                return Err(
+                    "Steam has not exited. Close Steam, then retry closing Exposed Games.".into(),
+                );
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -301,7 +303,7 @@ pub struct Status {
 }
 
 impl Manager {
-    /// A mutation delegated through a client URL must survive Raesir closing too.
+    /// A mutation delegated through a client URL must survive Exposed Games closing too.
     pub fn preserve(&self, root: &str) {
         if let Some(lease) = self
             .lease
@@ -330,7 +332,7 @@ impl Manager {
         }
     }
     pub fn read_library(&self, root: &str) -> Result<OwnedLibrary, String> {
-        if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
+        if env::var_os("EXPOSED_GAMES_DISABLE_STEAM_IPC").is_some() {
             return Err("Steam IPC is disabled for isolated diagnostics".into());
         }
         if !crate::steam_ipc::supported() {
@@ -346,14 +348,14 @@ impl Manager {
         &self,
         client: Client,
         keep_running: bool,
-        probe: impl FnOnce(&str) -> Result<T, String>,
+        mut probe: impl FnMut(&str) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut lock = self
             .lease
             .lock()
             .map_err(|_| "Steam manager is unavailable")?;
         if self.closing.load(Ordering::SeqCst) {
-            return Err("Raesir is shutting down".into());
+            return Err("Exposed Games is shutting down".into());
         }
         if let Some(lease) = lock.as_ref() {
             if lease.client.root != client.root {
@@ -372,6 +374,12 @@ impl Manager {
                 // Stop nor app exit may send shutdown or signals to this client,
                 // even when the lookup fails or the external client exits.
                 return probe(&client.root);
+            }
+            // A sandbox's PID namespace can hide an already-running Steam.
+            // A successful IPC lookup is stronger evidence than an empty process
+            // snapshot. Borrow that session without starting or owning a client.
+            if let Ok(value) = probe(&client.root) {
+                return Ok(value);
             }
             let before = before
                 .processes()
@@ -396,7 +404,7 @@ impl Manager {
             for _ in 0..15 {
                 lock.as_mut().unwrap().capture(&snapshot());
                 if self.closing.load(Ordering::SeqCst) {
-                    return Err("Raesir is shutting down".into());
+                    return Err("Exposed Games is shutting down".into());
                 }
                 thread::sleep(Duration::from_millis(100));
             }
@@ -464,7 +472,7 @@ impl Manager {
         operation: &str,
     ) -> Result<steam_control::Status, steam_control::Error> {
         use steam_control::Error;
-        if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
+        if env::var_os("EXPOSED_GAMES_DISABLE_STEAM_IPC").is_some() {
             return Err(Error::Unavailable);
         }
         let client = clients()
@@ -474,7 +482,10 @@ impl Manager {
         self.read_client(
             client,
             matches!(operation, "install" | "uninstall" | "pause" | "resume"),
-            |root| Ok(self.control_helper(root, appid, operation)),
+            |root| match self.control_helper(root, appid, operation) {
+                Err(Error::Unavailable) => Err("Steam's control interface is not ready".into()),
+                result => Ok(result),
+            },
         )
         .map_err(|_| Error::Unavailable)?
     }
@@ -567,6 +578,40 @@ mod tests {
         drop(manager);
         assert!(external.0.try_wait().unwrap().is_none());
     }
+    #[test]
+    fn running_client_hidden_by_pid_namespace_is_borrowed_without_a_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::default();
+        let client = Client {
+            root: dir.path().to_string_lossy().into(),
+            label: "Steam outside this PID namespace".into(),
+            // A launch attempt is a failure, even though no process is visible.
+            program: dir.path().join("must-not-be-launched"),
+            prefix: vec![],
+        };
+        let mut lookups = 0;
+        let owned = manager
+            .read_client(client.clone(), false, |root| {
+                lookups += 1;
+                assert_eq!(root, client.root);
+                Ok(OwnedLibrary {
+                    steamid: "fixture account".into(),
+                    games: vec![crate::model::OwnedGame {
+                        appid: 42,
+                        name: "Purchased game".into(),
+                        is_demo: false,
+                    }],
+                    source: "steam_client".into(),
+                })
+            })
+            .unwrap();
+        assert_eq!(lookups, 1);
+        assert_eq!(owned.games[0].appid, 42);
+        assert!(manager.lease.lock().unwrap().is_none());
+        manager.stop().unwrap();
+        assert!(manager.lease.lock().unwrap().is_none());
+    }
+
     #[test]
     fn pid_reuse_is_not_a_matching_process_identity() {
         assert_ne!(

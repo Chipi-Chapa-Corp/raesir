@@ -1,8 +1,10 @@
 Additional filter icons:
 
-- `adwaita/input-gaming-symbolic.svg`: GNOME Adwaita Icon Theme, also reused as
-  `build/icon.svg` and rasterized for distributables. See `adwaita/COPYING` for
-  its license and attribution.
+- `adwaita/input-gaming-symbolic.svg`: GNOME Adwaita Icon Theme, used for the
+  installed-games filter. See `adwaita/COPYING` for its license and attribution.
+- `../../build/icon.svg`: original Exposed Games E-gamepad application artwork,
+  distributed under the project’s GPL-3.0-only license. `icon.png` and `icon.ico`
+  in the same directory are generated from it.
 
 - `lucide/puzzle.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/puzzle.svg), ISC, used for mod browsing and modded launch.
 - `lucide/pencil.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/pencil.svg), ISC, used to rename mod profiles.
