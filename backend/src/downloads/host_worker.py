@@ -16,8 +16,11 @@ try:
 except BlockingIOError:
     sys.exit(0)
 request = json.loads((root / "request.json").read_text())
+runtime = request["completion"].get("FerestreRuntime")
+ferestre_game = "Ferestre" in request["completion"]
 progress = dict(operation=request["operation"], phase="starting", percent=None,
-                error=None, controllable=True, detail=None)
+                error=None, controllable=runtime is None and not ferestre_game,
+                detail="Checking the Xbox license and package…" if ferestre_game else None)
 
 def save():
     with tempfile.NamedTemporaryFile(mode="w", dir=root, delete=False) as output:
@@ -28,6 +31,8 @@ def save():
 def revision():
     try:
         kind, data = next(iter(request["completion"].items()))
+        if kind == "FerestreRuntime":
+            return None
         if kind == "Legendary":
             return json.loads((Path(data["profile"]) / "installed.json").read_text())[data["app"]].get("version")
         return json.loads(Path(data["record"]).read_text()).get("package_version")
@@ -36,6 +41,20 @@ def revision():
 
 def installed(before):
     kind, data = next(iter(request["completion"].items()))
+    if kind == "FerestreRuntime":
+        version = request["version"]
+        if version:
+            parts = version.split(".")
+            if not 3 <= len(parts) <= 5 or not all(p.isascii() and p.isdigit() for p in parts):
+                return False
+            folders = (Path(data["state"]) / "runtimes" / version,)
+        else:
+            folders = (Path(data["state"]) / "runtimes").glob("*")
+        return any(
+            folder.name[:1].isdigit() and (folder / "proton").is_file() and
+            (folder / "files/lib/wine/x86_64-windows/xgameruntime.dll").is_file()
+            for folder in folders
+        )
     if kind == "Legendary":
         records = json.loads((Path(data["profile"]) / "installed.json").read_text())
         record = records[data["app"]]
@@ -55,6 +74,101 @@ def installed(before):
             return False
     record = json.loads(Path(data["record"]).read_text())
     return (Path(record["dir"]) / ".xodus-streaming.msixvc").is_file() and (not request["version"] or record.get("package_version") == request["version"])
+
+def runtime_progress(lines):
+    for line in reversed(lines):
+        if line.startswith("-- unpacking runtime "):
+            return "installing", "Extracting the Xbox runtime…"
+        if line.startswith("-- verified the signature of ferestre-runtime-"):
+            return "installing", "Preparing to extract the Xbox runtime…"
+        if line.startswith("-- downloading runtime "):
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            prefix = f".ferestre-runtime-{fields[3]}.tar.xz."
+            sizes = []
+            for path in Path(runtime["cache"]).glob(".*.part"):
+                if path.name.startswith(prefix):
+                    try:
+                        sizes.append(path.stat().st_size)
+                    except OSError:
+                        pass
+            received = max(sizes, default=0)
+            if received >= 1024 * 1024:
+                label = f"Downloading Xbox runtime · {received / (1024 * 1024):.1f} MiB received"
+            elif received:
+                label = f"Downloading Xbox runtime · {received // 1024} KiB received"
+            else:
+                label = "Waiting for the Xbox runtime download…"
+            return "downloading", label
+    return "starting", "Checking the Xbox runtime release…"
+
+def game_progress(lines):
+    for line in reversed(lines):
+        if not line.startswith("FERESTRE_PROGRESS "):
+            continue
+        try:
+            event = json.loads(line.split(" ", 1)[1])
+            if event.get("schema") != 1:
+                continue
+            phase = event.get("phase")
+            can_pause = event.get("canPause") is True
+            if phase == "metadata":
+                progress.update(phase="starting", percent=None, controllable=can_pause,
+                                detail="Checking the Xbox license and package…")
+            elif phase == "downloading":
+                done = event.get("completedBytes", 0)
+                total = event.get("totalBytes")
+                if not isinstance(done, int) or done < 0:
+                    continue
+                if not isinstance(total, int) or total <= 0 or done > total:
+                    total = None
+                mib = 1024 * 1024
+                paused = event.get("paused") is True
+                if paused:
+                    label = "Paused"
+                elif total is not None:
+                    label = f"Downloading · {done / mib:.1f} of {total / mib:.1f} MiB"
+                else:
+                    label = f"Downloading · {done / mib:.1f} MiB received"
+                progress.update(phase="paused" if paused else "downloading", detail=label,
+                                percent=min(99, done * 100 // total) if total else None,
+                                controllable=can_pause)
+            elif phase in ("finalizing", "complete"):
+                progress.update(phase="installing", percent=None, controllable=False,
+                                detail="Finishing the Xbox installation…")
+            return True
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return False
+
+def ferestre_failure(lines):
+    empty_packages = any("the package list came back empty" in line for line in lines)
+    for line in reversed(lines):
+        if line == "Selection failed" or line.startswith("no PC package found"):
+            return "Ferestre could not select a compatible PC package for this Xbox edition"
+        if line.startswith("No .msixvc file found"):
+            if empty_packages:
+                return "The Xbox Store returned no downloadable PC package. Check again before retrying."
+            return "This Xbox game uses a package format that Ferestre cannot install"
+        words = line.split()
+        if len(words) != 3 or words[0] != "FERESTRE_TRANSFER_DIAGNOSTIC_V1":
+            continue
+        stage = words[1]
+        if stage == "authentication":
+            return "Xbox sign-in failed. Sign in again and retry"
+        if stage == "license":
+            return "The Store account could not obtain this Xbox game's license"
+        if stage in ("metadata-invalid", "transfer-integrity"):
+            return "The Xbox game package failed verification"
+        if stage in ("metadata-network", "transfer-connect", "transfer-timeout", "transfer-idle",
+                     "transfer-range", "transfer-eof", "transfer-status"):
+            return "The Xbox download connection failed. Retry to continue"
+        if stage in ("disk-space", "transfer-io"):
+            return "Ferestre could not write the game data. Check free space and permissions"
+        if stage == "installation-busy":
+            return "The game is running or its files are in use"
+    return None
 
 try:
     game_lease = None
@@ -86,13 +200,18 @@ try:
                 continue
     environment = os.environ.copy()
     environment.update(request["env"])
+    if ferestre_game:
+        environment.update(XODUS_PROGRESS="json", FERESTRE_GUI_CANCELLATION="1")
     with os.fdopen(os.open(root / "output.log", os.O_CREAT | os.O_TRUNC | os.O_RDWR, 0o600), "w+b") as output:
         before = request.get("previous_version") or revision()
         process = subprocess.Popen([request["program"], *request["args"]], env=environment,
-                                   stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                   stdin=subprocess.PIPE if ferestre_game else subprocess.DEVNULL,
+                                   stdout=output, stderr=output,
                                    start_new_session=True)
         generation = None
-        progress["phase"] = "downloading"
+        if not ferestre_game and runtime is None:
+            progress["phase"] = "downloading"
+        failure_reason = None
         while True:
             if os.fstat(output.fileno()).st_size > 8 * 1024 * 1024:
                 output.truncate(0)
@@ -101,15 +220,24 @@ try:
                 control = json.loads((root / "control.json").read_text())
                 if control["generation"] != generation:
                     generation = control["generation"]
-                    os.killpg(process.pid, signal.SIGCONT if control["resume"] else signal.SIGSTOP)
-                    progress["phase"] = "downloading" if control["resume"] else "paused"
+                    if ferestre_game:
+                        process.stdin.write(b"r" if control["resume"] else b"p")
+                        process.stdin.flush()
+                    else:
+                        os.killpg(process.pid, signal.SIGCONT if control["resume"] else signal.SIGSTOP)
+                        progress["phase"] = "downloading" if control["resume"] else "paused"
             except (OSError, ValueError, KeyError):
                 pass
-            if progress["phase"] != "paused":
+            if progress["phase"] != "paused" or ferestre_game:
                 with open(root / "output.log", "rb") as log:
                     log.seek(max(0, os.fstat(log.fileno()).st_size - 65536))
                     lines = log.read().decode("utf-8", errors="replace").splitlines()
-                for line in reversed(lines):
+                if runtime is not None:
+                    progress["phase"], progress["detail"] = runtime_progress(lines)
+                structured = ferestre_game and game_progress(lines)
+                if ferestre_game:
+                    failure_reason = ferestre_failure(lines) or failure_reason
+                for line in reversed(lines) if runtime is None and not structured else ():
                     try:
                         if "Progress:" in line:
                             number = float(line.split("Progress:", 1)[1].split("%", 1)[0].strip())
@@ -118,15 +246,27 @@ try:
                             number = counters["done"] * 100 / counters["total"]
                         if 0 <= number <= 100:
                             progress["percent"] = min(99, int(number))
+                            if ferestre_game:
+                                progress.update(phase="downloading", detail=None)
                             break
                     except (ValueError, KeyError, TypeError, ZeroDivisionError):
                         pass
             result = process.poll()
             if result is not None:
+                extracting = progress["phase"] == "installing"
                 progress["phase"] = "complete" if result == 0 and installed(before) else "failed"
                 progress["percent"] = 100 if progress["phase"] == "complete" else None
                 if progress["phase"] == "failed":
-                    progress["detail"] = "The client could not finish this download. Sign in to the client and retry."
+                    if runtime is not None:
+                        progress["detail"] = ("Could not extract or install the Xbox runtime" if extracting
+                                              else "Could not download or verify the Xbox runtime")
+                    elif ferestre_game:
+                        progress["detail"] = failure_reason or "Ferestre did not finish installing this Xbox game"
+                        progress["controllable"] = True
+                    else:
+                        progress["detail"] = "The client could not finish this download. Sign in to the client and retry."
+                else:
+                    progress["detail"] = None
                 save()
                 break
             save()

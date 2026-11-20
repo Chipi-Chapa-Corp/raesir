@@ -228,6 +228,52 @@ mod tests {
             matches!(game.launch.as_ref().unwrap().target, ActionTarget::Command { ref args, .. } if args == &["0123456789abcdef"])
         );
     }
+
+    #[test]
+    fn ferestre_imports_only_the_selected_store_account_and_forgets_previous_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join(".local/state/ferestre");
+        let roles = dir.path().join(".config/ferestre/account-roles.json");
+        let store = "a".repeat(32);
+        let player = "b".repeat(32);
+        let save_roles = |store: &str| {
+            write(
+                &roles,
+                &serde_json::json!({"store":store,"player":player,"generation":1}).to_string(),
+            );
+        };
+        for (folder, id) in [
+            (state.clone(), "9NTESTGAME01"),
+            (state.join("accounts").join(&store), "9NTESTGAME02"),
+            (state.join("accounts").join(&player), "9NTESTGAME03"),
+        ] {
+            write(
+                &folder.join("library.json"),
+                &serde_json::json!({"items":[{"productId":id,"productType":"Game","status":"Active"}]})
+                    .to_string(),
+            );
+        }
+
+        save_roles(&store);
+        let mut previous = report();
+        let mut first = fixture(&previous, dir.path());
+        first.homes[0].local = false;
+        xbox::scan(&mut first);
+        assert!(first.warnings.is_empty());
+        assert_eq!(first.games.len(), 1);
+        assert_eq!(first.games[0].id, "9NTESTGAME02");
+        previous.catalog = first.games;
+
+        save_roles(&player);
+        let mut second = fixture(&previous, dir.path());
+        second.homes[0].local = false;
+        xbox::scan(&mut second);
+        retain(&mut second, &previous);
+        assert!(second.warnings.is_empty());
+        assert_eq!(second.games.len(), 1);
+        assert_eq!(second.games[0].id, "9NTESTGAME03");
+    }
+
     #[test]
     fn lost_generic_sources_preserve_foreign_installs_without_resurrecting_removed_core_games() {
         let mut previous = report();

@@ -1,4 +1,4 @@
-//! User-triggered mounts go through the OS service; no sudo or password capture.
+//! User-authorized mounts go through the OS service.
 use crate::{model::Volume, platform};
 use std::sync::{
     Mutex,
@@ -180,10 +180,13 @@ pub fn mount_options(filesystem: &str) -> Option<&'static str> {
 }
 
 pub fn validate_volume<'a>(volumes: &'a [Volume], id: &str) -> Result<&'a Volume, String> {
-    let volume = volumes
-        .iter()
-        .find(|v| v.id == id)
+    let mut matches = volumes.iter().filter(|volume| volume.id == id);
+    let volume = matches
+        .next()
         .ok_or("The partition changed or disappeared. Rescan first.")?;
+    if matches.next().is_some() {
+        return Err("Multiple partitions share this filesystem UUID. Identify and mount it through the operating system.".into());
+    }
     if !volume.mountpoints.is_empty() {
         return Err("This partition is already mounted. Rescan to read it.".into());
     }
@@ -203,13 +206,20 @@ pub fn validate_volume<'a>(volumes: &'a [Volume], id: &str) -> Result<&'a Volume
 fn system_connection() -> Result<zbus::blocking::Connection, String> {
     use zbus::blocking::{Connection, connection::Builder};
     Connection::system().or_else(|error| {
-        // Toolbx exposes the host system socket here. This is used only after
-        // the explicit mount click; authorization is still enforced by Polkit.
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_HOST_BRIDGE").is_some()
+        // Toolbx exposes the host system socket here. Polkit still authorizes
+        // a mount requested by a click or a remembered choice.
+        if platform::in_flatpak()
+            || std::env::var_os("EXPOSED_GAMES_DISABLE_HOST_BRIDGE").is_some()
             || std::env::var_os("DBUS_SYSTEM_BUS_ADDRESS").is_some()
             || !std::path::Path::new("/run/host/run/dbus/system_bus_socket").exists() { return Err(error); }
         Builder::address("unix:path=/run/host/run/dbus/system_bus_socket")?.build()
-    }).map_err(|_| "Cannot reach UDisks on the system bus. Run Exposed Games in the desktop host session or expose its system bus to this container.".into())
+    }).map_err(|_| {
+        if platform::in_flatpak() {
+            "Cannot reach UDisks from Flatpak. Check that UDisks is running on the host and the application has permission to access it.".into()
+        } else {
+            "Cannot reach UDisks on the system bus. Run Exposed Games in the desktop host session or expose its system bus to this container.".into()
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -238,8 +248,7 @@ fn mount_with_connection(
     }
     let filesystem: String = block.get_property("IdType").map_err(|e| e.to_string())?;
     let uuid: String = block.get_property("IdUUID").map_err(|e| e.to_string())?;
-    if !uuid.is_empty() && !volume.id.is_empty() && volume.id != volume.device && volume.id != uuid
-    {
+    if !volume.id.is_empty() && volume.id != volume.device && volume.id != uuid {
         return Err("The selected partition identity changed; rescan first.".into());
     }
     if !filesystem.eq_ignore_ascii_case(&volume.filesystem) {
@@ -296,6 +305,7 @@ mod tests {
         };
         assert!(validate_volume(&[volume.clone()], "other").is_err());
         assert!(validate_volume(&[volume.clone()], "disk").is_ok());
+        assert!(validate_volume(&[volume.clone(), volume.clone()], "disk").is_err());
         volume.mountpoints.push("/mnt/test".into());
         assert!(validate_volume(&[volume.clone()], "disk").is_err());
         volume.mountpoints.clear();
@@ -343,6 +353,7 @@ mod tests {
             .unwrap();
         let fstab = Arc::new(AtomicBool::new(false));
         let calls = Arc::new(AtomicUsize::new(0));
+        let denied = Arc::new(AtomicBool::new(false));
         let mounted = Arc::new(AtomicBool::new(false));
         let busy = Arc::new(AtomicBool::new(false));
         let unmounts = Arc::new(AtomicUsize::new(0));
@@ -374,6 +385,7 @@ mod tests {
         }
         struct Filesystem {
             calls: Arc<AtomicUsize>,
+            denied: Arc<AtomicBool>,
             mounted: Arc<AtomicBool>,
             busy: Arc<AtomicBool>,
             unmounts: Arc<AtomicUsize>,
@@ -396,6 +408,11 @@ mod tests {
                 if value != Some("ro") || options.len() != 1 {
                     return Err(zbus::fdo::Error::Failed(
                         "unexpected mount arguments".into(),
+                    ));
+                }
+                if self.denied.load(Ordering::SeqCst) {
+                    return Err(zbus::fdo::Error::AccessDenied(
+                        "fixture authorization denied".into(),
                     ));
                 }
                 self.mounted.store(true, Ordering::SeqCst);
@@ -427,6 +444,7 @@ mod tests {
                 path,
                 Filesystem {
                     calls: calls.clone(),
+                    denied: denied.clone(),
                     mounted: mounted.clone(),
                     busy: busy.clone(),
                     unmounts: unmounts.clone(),
@@ -441,6 +459,15 @@ mod tests {
             filesystem: "ntfs".into(),
             ..Volume::default()
         };
+        denied.store(true, Ordering::SeqCst);
+        assert!(
+            mount_with_connection(&volume, &connection)
+                .unwrap_err()
+                .contains("fixture authorization denied")
+        );
+        assert!(!mounted.load(Ordering::SeqCst));
+        assert_eq!(unmounts.load(Ordering::SeqCst), 0);
+        denied.store(false, Ordering::SeqCst);
         let lease = mount_with_connection(&volume, &connection).unwrap();
         assert_eq!(lease.point, "/fixture/mounted-readonly");
         // Already-mounted partitions are never adopted by Exposed Games.
@@ -471,6 +498,6 @@ mod tests {
                 .unwrap_err()
                 .contains("fstab")
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

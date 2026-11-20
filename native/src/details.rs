@@ -1,6 +1,7 @@
 use crate::{
     Launcher,
     backend::Backend,
+    game_activity::PlayButton,
     header::{action_button, button, pill, spinner},
     icons::{icon, rating_image, system_icon},
     smooth_scroll::SmoothWheel,
@@ -24,6 +25,7 @@ pub struct DetailsPage {
     mod_context: Option<ModContext>,
     _mod_subscription: Option<Subscription>,
     download_progress: Option<exposed_games_backend::steam_control::Progress>,
+    play_button: Option<PlayButton>,
     poster: Option<Arc<RenderImage>>,
     backdrop: Entity<crate::backdrop::Backdrop>,
     backdrop_source: String,
@@ -90,6 +92,7 @@ impl DetailsPage {
         Self {
             game: source,
             download_progress,
+            play_button: None,
             poster,
             backdrop,
             backdrop_source: String::new(),
@@ -546,6 +549,7 @@ impl Launcher {
             )
         });
         page.update(cx, |page, cx| {
+            page.update_play_button(self, cx);
             page.load(cx);
             page.load_stats(cx);
         });
@@ -554,6 +558,14 @@ impl Launcher {
     }
 }
 impl DetailsPage {
+    pub(crate) fn update_play_button(&mut self, launcher: &Launcher, cx: &mut Context<Self>) {
+        let play_button = launcher.play_button(&self.game.key);
+        if self.play_button != play_button {
+            self.play_button = play_button;
+            cx.notify();
+        }
+    }
+
     pub fn library_changed(
         &mut self,
         games: &[crate::library::Game],
@@ -689,6 +701,14 @@ impl DetailsPage {
         }));
     }
     fn image(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.request_image(url, false, cx);
+    }
+
+    fn viewer_image(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.request_image(url, true, cx);
+    }
+
+    fn request_image(&mut self, url: &str, full_size: bool, cx: &mut Context<Self>) {
         if url.is_empty() || self.images.contains_key(url) {
             return;
         }
@@ -714,7 +734,11 @@ impl DetailsPage {
                     if achievement {
                         return backend.achievement_icon(&request, true);
                     }
-                    let path = backend.detail_media(&request)?;
+                    let path = if full_size {
+                        backend.detail_viewer_media(&request)?
+                    } else {
+                        backend.detail_media(&request)?
+                    };
                     let image = image_codec::ImageReader::open(path)
                         .map_err(|e| e.to_string())?
                         .with_guessed_format()
@@ -876,7 +900,7 @@ impl DetailsPage {
         } else {
             &media.url
         };
-        self.image(&url, cx);
+        self.viewer_image(&url, cx);
         let first = (-f32::from(self.media_scroll.offset().x)
             / (f32::from(window.rem_size()) * 7.6)) as usize;
         for item in data.media.iter().skip(first).take(12) {
@@ -1169,15 +1193,19 @@ impl Render for DetailsPage {
                     .child(self.game.title.clone()),
             );
         if self.mod_context.is_none() {
+            let handoff = exposed_games_backend::actions::library_handoff_allowed(&self.game);
             let platform = bubble()
                 .id("details-client")
-                .cursor_pointer()
-                .hover(|s| s.bg(rgba(0x303030b3)))
+                .when(handoff, |platform| {
+                    platform.cursor_pointer().hover(|s| s.bg(rgba(0x303030b3)))
+                })
                 .child(icon(client_icon(&self.game.client, &self.game.store)))
                 .child(self.game.client.clone());
             let client_label = format!("Open in {} library", self.game.client);
-            title = title.child(
-                if self
+            title = title
+                .child(if !handoff {
+                    platform
+                } else if self
                     .game
                     .client_os
                     .contains(&exposed_games_backend::model::Os::host())
@@ -1198,8 +1226,37 @@ impl Render for DetailsPage {
                         cx.new(|_| DetailTooltip("Client library is on another OS".into()))
                             .into()
                     })
-                },
-            );
+                })
+                .when_some(
+                    crate::library::xbox_compatibility(
+                        &self.game,
+                        exposed_games_backend::model::Os::host(),
+                    ),
+                    |title, status| {
+                        let mut description = status.description.to_owned();
+                        if status.badge.is_some()
+                            && let Some(test) = self.game.ferestre_test.as_ref()
+                            && let Some(date) = test.last_verified.as_deref()
+                        {
+                            description.push_str(&format!(" Verified {date}."));
+                            if let Some(summary) =
+                                test.summary.as_deref().filter(|s| !s.trim().is_empty())
+                            {
+                                description.push(' ');
+                                description.push_str(summary);
+                            }
+                        }
+                        title.child(
+                            bubble()
+                                .id("details-xbox-compatibility")
+                                .child(icon(status.icon))
+                                .child(status.label)
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| DetailTooltip(description.clone())).into()
+                                }),
+                        )
+                    },
+                );
         } else {
             title = title.child(bubble().child(icon("mods")).child(self.game.client.clone()));
         }
@@ -1240,10 +1297,16 @@ impl Render for DetailsPage {
         }
         if self.mod_context.is_none() {
             let installable = exposed_games_backend::actions::can_install(&self.game);
-            let working = self.download_progress.as_ref().filter(|p| p.blocks_play());
+            let play_button = self.play_button;
+            let working = self.download_progress.as_ref().filter(|p| {
+                play_button.is_none()
+                    && exposed_games_backend::actions::install_limitation(&self.game).is_none()
+                    && p.blocks_play()
+            });
             let primary_action = if installable { "install" } else { "launch" };
-            let primary_tip = working
-                .map(crate::downloads::button_tip)
+            let primary_tip = play_button
+                .map(|button| button.label().to_owned())
+                .or_else(|| working.map(crate::downloads::button_tip))
                 .unwrap_or_else(|| {
                     if installable {
                         self.game
@@ -1260,6 +1323,7 @@ impl Render for DetailsPage {
             if exposed_games_backend::catalog::local(&self.game.installations)
                 && self.game.uninstall.is_some()
                 && working.is_none()
+                && play_button.is_none()
             {
                 title = title.child(
                     action_button("details-uninstall", "trash", "Uninstall")
@@ -1274,44 +1338,60 @@ impl Render for DetailsPage {
                 );
             }
             title = title.when(
-                installable || self.game.launch.is_some() || working.is_some(),
+                installable
+                    || self.game.launch.is_some()
+                    || working.is_some()
+                    || play_button.is_some(),
                 |d| {
                     d.child(
-                        crate::header::button_shell("details-primary-action", false)
-                            .size(rems(3.3))
-                            .bg(rgba(0x101010b8))
-                            .hover(|s| s.bg(rgba(0x303030b3)))
-                            .child(if let Some(progress) = working {
-                                icon(crate::downloads::button_icon(progress))
-                                    .text_color(rgb(0xf0f8f3))
-                                    .into_any_element()
-                            } else {
-                                icon(if installable { "install" } else { "play" })
-                                    .text_color(rgb(0xf0f8f3))
-                                    .into_any_element()
-                            })
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| DetailTooltip(primary_tip.clone())).into()
-                            })
-                            .when_some(
-                                working
-                                    .map(crate::downloads::button_label)
-                                    .filter(|s| !s.is_empty()),
-                                |d, label| d.w_auto().px(rems(1.)).gap(rems(0.5)).child(label),
-                            )
-                            .on_click(move |_, _, cx| {
-                                action_owner
-                                    .update(cx, |this, cx| {
-                                        if !this.primary_download_action(&key, cx) {
-                                            this.action(key.clone(), primary_action, cx);
-                                        }
-                                    })
-                                    .ok();
-                            }),
+                        crate::header::button_shell(
+                            play_button.map_or("details-primary-action", PlayButton::element_id),
+                            false,
+                        )
+                        .role(Role::Button)
+                        .aria_label(primary_tip.clone())
+                        .aria_disabled(play_button.is_some_and(|button| button != PlayButton::Quit))
+                        .size(rems(3.3))
+                        .bg(rgba(0x101010b8))
+                        .hover(|s| s.bg(rgba(0x303030b3)))
+                        .child(if let Some(button) = play_button {
+                            button.glyph(0xf0f8f3)
+                        } else if let Some(progress) = working {
+                            icon(crate::downloads::button_icon(progress))
+                                .text_color(rgb(0xf0f8f3))
+                                .into_any_element()
+                        } else {
+                            icon(if installable { "install" } else { "play" })
+                                .text_color(rgb(0xf0f8f3))
+                                .into_any_element()
+                        })
+                        .tooltip(move |_, cx| cx.new(|_| DetailTooltip(primary_tip.clone())).into())
+                        .when_some(
+                            play_button
+                                .filter(|button| *button != PlayButton::Quit)
+                                .map(|button| button.label().to_owned())
+                                .or_else(|| working.map(crate::downloads::button_label))
+                                .filter(|s| !s.is_empty()),
+                            |d, label| d.w_auto().px(rems(1.)).gap(rems(0.5)).child(label),
+                        )
+                        .on_click(move |_, _, cx| {
+                            action_owner
+                                .update(cx, |this, cx| match play_button {
+                                    Some(PlayButton::Quit) => this.action(key.clone(), "quit", cx),
+                                    None if !this.primary_download_action(&key, cx) => {
+                                        this.action(key.clone(), primary_action, cx);
+                                    }
+                                    _ => {}
+                                })
+                                .ok();
+                        }),
                     )
                 },
             );
-            if working.is_none() && self.game.mods.as_ref().is_some_and(|m| m.launchable) {
+            if play_button.is_none()
+                && working.is_none()
+                && self.game.mods.as_ref().is_some_and(|m| m.launchable)
+            {
                 let owner = self.owner.clone();
                 let key = self.game.key.clone();
                 title = title.child(

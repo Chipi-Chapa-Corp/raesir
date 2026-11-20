@@ -1,4 +1,9 @@
-use crate::{Launcher, header::pill};
+use crate::{
+    Launcher,
+    backend::{PartitionChoice, rememberable_partition},
+    header::pill,
+    library::FerestreSetup,
+};
 use exposed_games_backend::model::Os;
 use gpui::{prelude::*, *};
 
@@ -57,13 +62,36 @@ impl Launcher {
     }
 
     pub fn banners(&self, cx: &mut Context<Self>) -> Div {
-        let xbox_notice = self.report.as_ref().is_some_and(|report| {
-            crate::library::xbox_runtime_notice(
-                report,
-                self.library_scope(),
-                self.store.map(|s| crate::STORES[s]),
-            )
+        let scope = self.library_scope();
+        let store = self.store.map(|s| crate::STORES[s]);
+        let runtime_progress = self
+            .download_operations
+            .get(exposed_games_backend::ferestre::RUNTIME_JOB);
+        let mut ferestre_setup = self
+            .report
+            .as_ref()
+            .and_then(|report| crate::library::ferestre_setup(report, scope, store));
+        if self.host == Os::Linux && store == Some("xbox") && scope != 2
+            && (self.ferestre_task.as_ref().is_some_and(|(action, _)| *action == FerestreSetup::MaintainRuntime)
+                || runtime_progress.is_some_and(|state| {
+                    state.operation == exposed_games_backend::steam_control::Operation::Update
+                        && (state.active() || state.phase == exposed_games_backend::steam_control::Phase::Failed)
+                }))
+        {
+            ferestre_setup = Some(FerestreSetup::MaintainRuntime);
+        }
+        let xbox_link_needed = self.report.as_ref().is_some_and(|report| {
+            report.linux_systems.iter().any(|system| {
+                system.root == "/" && (system.managed_ferestre || system.ferestre_client) && !system.ferestre_library
+            })
         });
+        let xbox_notice = ferestre_setup != Some(FerestreSetup::Install)
+            && self
+                .report
+                .as_ref()
+                .is_some_and(|report| crate::library::xbox_runtime_notice(report, scope, store));
+        let partition_choices = self.backend.partition_choices();
+        let mount_failures = self.backend.partition_mount_failures();
         let volumes: Vec<_> = self
             .report
             .as_ref()
@@ -74,6 +102,14 @@ impl Launcher {
                         v.mountpoints.is_empty()
                             && ["ntfs", "ext4", "btrfs", "linux"]
                                 .contains(&v.filesystem.to_lowercase().as_str())
+                            && !self.ignored_partitions.contains(&v.id)
+                            && match partition_choices.get(&v.id) {
+                                Some(PartitionChoice::Ignore) => false,
+                                Some(PartitionChoice::Mount) => {
+                                    !self.syncing && mount_failures.contains_key(&v.id)
+                                }
+                                None => true,
+                            }
                     })
                     .collect()
             })
@@ -82,10 +118,51 @@ impl Launcher {
             .w_full()
             .pt(rems(5.))
             .px(rems(1.5))
-            .pb(rems(if volumes.is_empty() && !xbox_notice { 0. } else { 1. }))
+            .pb(rems(if volumes.is_empty() && !xbox_notice && ferestre_setup.is_none() { 0. } else { 1. }))
             .flex()
             .flex_col()
             .gap(rems(0.5))
+            .when_some(ferestre_setup, |d, setup| {
+                let action = self.ferestre_task.as_ref().map(|(action, _)| *action);
+                let busy = action == Some(setup);
+                let runtime_setup = matches!(setup, FerestreSetup::Runtime | FerestreSetup::MaintainRuntime);
+                let runtime_active = runtime_setup
+                    && runtime_progress.is_some_and(|state| state.active());
+                let (message, label) = match (setup, busy) {
+                    (FerestreSetup::Install, false) => ("Install support for compatible Xbox PC games on Linux.", "Set up Xbox"),
+                    (FerestreSetup::Install, true) => ("Downloading and verifying Xbox support…", "Installing…"),
+                    (FerestreSetup::SignIn, false) => ("Sign in with the Microsoft account you use for Xbox PC games.", "Sign in to Xbox"),
+                    (FerestreSetup::SignIn, true) => ("Complete Microsoft sign-in in the account window.", "Signing in…"),
+                    (FerestreSetup::Runtime, false) => ("Install the runtime to play compatible Xbox PC games.", "Install Xbox runtime"),
+                    (FerestreSetup::Runtime, true) => ("Starting the Xbox runtime install…", "Starting…"),
+                    (FerestreSetup::MaintainRuntime, false) => ("Update or repair the Xbox runtime.", "Update or repair"),
+                    (FerestreSetup::MaintainRuntime, true) => ("Checking the Xbox runtime release…", "Checking…"),
+                    (FerestreSetup::MaintainCli, _) => ("Checking the Xbox CLI release…", "Checking…"),
+                };
+                let (message, label) = if let Some(state) = runtime_progress
+                    .filter(|state| runtime_setup && !busy
+                        && (state.active() || state.phase == exposed_games_backend::steam_control::Phase::Failed))
+                {
+                    (state.label(), if state.active() { "Installing…" } else { "Retry runtime install" })
+                } else {
+                    (message.to_owned(), label)
+                };
+                d.child(
+                    pill().w_full().rounded(rems(1.4)).px(rems(1.)).py(rems(0.7)).gap(rems(0.8))
+                        .child(div().flex_1().min_w_0().whitespace_normal().child(message))
+                        .child(text_button("configure-ferestre", label).rounded_full().bg(rgba(0xffffff12)).flex_none()
+                            .when(action.is_none() && !runtime_active, |d| d.on_click(cx.listener(move |this, _, _, cx| this.configure_ferestre(setup, cx)))))
+                        .when(runtime_setup && xbox_link_needed, |d| d.child(
+                            text_button("xbox-sign-in-during-runtime",
+                                if action == Some(FerestreSetup::SignIn) { "Signing in…" } else { "Sign in to Xbox" })
+                                .rounded_full().bg(rgba(0xffffff12)).flex_none()
+                                .when(action.is_none(), |d| d.on_click(cx.listener(|this, _, _, cx| {
+                                    this.configure_ferestre(FerestreSetup::SignIn, cx);
+                                })))))
+                        .when(setup == FerestreSetup::Install && !busy, |d| d.child(text_button("nexus-alternative", "Xodus Nexus").rounded_full().bg(rgba(0xffffff12)).flex_none()
+                            .on_click(cx.listener(|this, _, _, cx| this.support_project("nexus", cx)))))
+                )
+            })
             .when(xbox_notice, |d| d.child(
                 pill().w_full().rounded(rems(1.4)).px(rems(1.)).py(rems(0.7)).gap(rems(0.8))
                     .child(crate::icons::icon("warning").flex_none().text_color(rgb(0xffcf70)))
@@ -97,37 +174,150 @@ impl Launcher {
                         })
                     ))
             ))
-            .children(volumes.into_iter().enumerate().map(|(i, volume)| {
+            .children(volumes.into_iter().map(|volume| {
                 let id = volume.id.clone();
-                let os = if volume.os == Os::Windows || volume.filesystem == "ntfs" {
+                let ntfs = volume.filesystem.eq_ignore_ascii_case("ntfs");
+                let os = if volume.os == Os::Windows || ntfs {
                     "windows"
                 } else {
                     "linux"
                 };
+                let title = volume.label.as_deref().unwrap_or(match volume.os {
+                    Os::Windows => "Windows partition",
+                    Os::Linux => "Linux partition",
+                    Os::Unknown if ntfs => "NTFS partition",
+                    Os::Unknown => "Linux filesystem",
+                });
+                let failure = mount_failures.get(&id).cloned()
+                    .filter(|_| partition_choices.get(&id) == Some(&PartitionChoice::Mount));
+                let mut metadata = volume.device.clone();
+                if let Some(bytes) = volume.size_bytes {
+                    let (size, unit) = if bytes >= 1 << 30 {
+                        (bytes as f64 / (1_u64 << 30) as f64, "GiB")
+                    } else {
+                        (bytes as f64 / (1_u64 << 20) as f64, "MiB")
+                    };
+                    metadata.push_str(&format!(" · {size:.1} {unit}"));
+                }
                 pill()
                     .rounded(rems(1.))
                     .px(rems(1.))
                     .py(rems(0.4))
                     .gap(rems(0.8))
                     .child(crate::icons::system_icon(os).size(rems(1.55)))
-                    .child(div().flex_1().text_size(rems(1.125)).child(format!(
-                        "{}{} detected",
-                        if volume.os == Os::Unknown {
-                            "Possible "
-                        } else {
-                            ""
-                        },
-                        if os == "windows" { "Windows" } else { "Linux" }
-                    )))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(rems(0.15)).py(rems(0.35))
+                        .child(div().text_size(rems(1.125)).child(title.to_owned()))
+                        .child(div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal().child(metadata))
+                        .when_some(failure, |d, error| d.child(
+                            div().id(format!("mount-failure-{}", volume.device))
+                                .text_size(rems(0.95))
+                                .text_color(rgb(0xffcf70))
+                                .aria_description(error.clone())
+                                .child("Automatic mount failed")
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::library::ActionTooltip(error.clone())).into()
+                                })
+                        )))
                     .when(self.host == Os::Linux, |d| {
-                        d.child(text_button(("mount", i), "Mount").on_click(
-                            cx.listener(move |this, _, _, cx| this.mount(id.clone(), cx)),
-                        ))
+                        d.child(self.partition_actions(&id, &volume.device, cx))
                     })
                     .when(self.host != Os::Linux, |d| {
                         d.child(div().text_size(rems(1.125)).child(volume.note.clone()))
                     })
             }))
+    }
+
+    fn partition_actions(&self, id: &str, device: &str, cx: &mut Context<Self>) -> Div {
+        let checked = self.remember_partition(id);
+        let busy = self.syncing || self.closing;
+        let can_remember = rememberable_partition(id);
+        let remember_id = id.to_owned();
+        let ignore_id = id.to_owned();
+        let mount_id = id.to_owned();
+        let remember = div()
+            .id(format!("remember-{device}"))
+            .role(Role::CheckBox)
+            .aria_toggled(Toggled::from(checked))
+            .aria_disabled(busy || !can_remember)
+            .flex()
+            .items_center()
+            .gap(rems(0.5))
+            .px(rems(0.65))
+            .py(rems(0.6))
+            .rounded(rems(0.7))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(rems(1.1))
+                    .rounded(rems(0.25))
+                    .border_1()
+                    .border_color(rgba(0xffffff80))
+                    .when(checked, |d| {
+                        d.bg(rgb(0x9ff4bc)).border_color(rgb(0x9ff4bc)).child(
+                            crate::icons::icon("check")
+                                .size(rems(0.9))
+                                .text_color(rgb(0x20342a)),
+                        )
+                    }),
+            )
+            .child("Remember")
+            .when(!can_remember, |d| {
+                d.opacity(0.55).tooltip(|_, cx| {
+                    cx.new(|_| {
+                        crate::library::ActionTooltip(
+                            "This partition has no filesystem UUID".into(),
+                        )
+                    })
+                    .into()
+                })
+            })
+            .when(!busy && can_remember, |d| {
+                d.tab_index(0)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(0xffffff18)))
+                    .focus_visible(|s| s.bg(rgba(0xffffff28)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let checked = this.remember_partition(&remember_id);
+                        this.remember_partitions
+                            .insert(remember_id.clone(), !checked);
+                        cx.notify();
+                    }))
+            });
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(rems(0.45))
+            .when(busy, |d| d.opacity(0.55))
+            .child(remember)
+            .child(
+                text_button(format!("ignore-{device}"), "Ignore")
+                    .role(Role::Button)
+                    .aria_disabled(busy)
+                    .when(busy, |d| d.cursor_default())
+                    .when(!busy, |d| {
+                        d.tab_index(0)
+                            .focus_visible(|s| s.bg(rgba(0xffffff28)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ignore_partition(ignore_id.clone(), cx);
+                            }))
+                    }),
+            )
+            .child(
+                text_button(format!("mount-{device}"), "Mount read-only")
+                    .role(Role::Button)
+                    .aria_disabled(busy)
+                    .when(busy, |d| d.cursor_default())
+                    .when(!busy, |d| {
+                        d.tab_index(0)
+                            .focus_visible(|s| s.bg(rgba(0xffffff28)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mount(mount_id.clone(), cx);
+                            }))
+                    }),
+            )
     }
 
     pub fn settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -137,6 +327,12 @@ impl Launcher {
             .map(|r| r.warnings.clone())
             .unwrap_or_default();
         let automatic = self.backend.automatic_game_updates();
+        let xbox = self.report.as_ref().filter(|report| report.host_os == Os::Linux)
+            .and_then(|report| report.linux_systems.iter().find(|system| system.root == "/"))
+            .filter(|system| system.xbox_runtime && exposed_games_backend::ferestre::setup_supported());
+        let xbox_action = self.ferestre_task.as_ref().map(|(action, _)| *action);
+        let xbox_runtime_busy = self.download_operations.get(exposed_games_backend::ferestre::RUNTIME_JOB)
+            .is_some_and(|progress| progress.active());
         div().absolute().inset_0()
             .child(div().absolute().inset_0().on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {
                 this.menu=false; cx.notify();
@@ -175,6 +371,42 @@ impl Launcher {
                     this.check_game_updates(false,cx);
                     cx.notify();
                 })))
+            .when(xbox.is_some_and(|system| system.managed_ferestre || system.ferestre_client), |d| d.child(
+                div().flex().items_center().justify_between()
+                    .child("Xbox account")
+                    .child(text_button("xbox-sign-in-setting", "Sign in")
+                        .when(self.ferestre_task.is_none(), |d| d.on_click(cx.listener(|this, _, _, cx| {
+                            this.menu = false;
+                            this.configure_ferestre(FerestreSetup::SignIn, cx);
+                        }))))
+            ))
+            .when_some(xbox, |d, system| {
+                let (label, action) = if system.managed_ferestre {
+                    ("Update or repair", FerestreSetup::MaintainCli)
+                } else {
+                    ("Install managed CLI", FerestreSetup::Install)
+                };
+                d.child(
+                    div().flex().items_center().justify_between()
+                        .child("Xbox CLI")
+                        .child(text_button("xbox-cli-setting", if xbox_action == Some(action) { "Working…" } else { label })
+                            .when(xbox_action.is_none() && !xbox_runtime_busy, |d| d.on_click(cx.listener(move |this, _, _, cx| {
+                                this.configure_ferestre(action, cx);
+                            }))))
+                )
+                .when(system.managed_ferestre, |d| d.child(
+                    div().flex().items_center().justify_between()
+                        .child("Xbox runtime")
+                        .child(text_button("xbox-runtime-setting", if xbox_runtime_busy || xbox_action == Some(FerestreSetup::MaintainRuntime) {
+                            "Working…"
+                        } else {
+                            "Update or repair"
+                        })
+                            .when(xbox_action.is_none() && !xbox_runtime_busy, |d| d.on_click(cx.listener(|this, _, _, cx| {
+                                this.configure_ferestre(FerestreSetup::MaintainRuntime, cx);
+                            }))))
+                ))
+            })
             .child(
                 div()
                     .text_size(rems(1.125))
@@ -200,9 +432,11 @@ impl Launcher {
             .download_operations
             .get(key)
             .is_some_and(|p| p.phase != exposed_games_backend::steam_control::Phase::Failed);
-        let local = !busy && game.installed(self.library_scope(), self.host) == 1;
+        let play = self.play_button(key);
+        let local = !busy && play.is_none() && game.installed(self.library_scope(), self.host) == 1;
         let items = [
             ("launch", "Launch", local && game.source.launch.is_some()),
+            ("quit", "Quit game", play == Some(crate::game_activity::PlayButton::Quit) && self.library_scope() != 2),
             (
                 "install",
                 "Install",

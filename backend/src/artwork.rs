@@ -295,18 +295,54 @@ fn json(http: &reqwest::blocking::Client, url: &str) -> Result<Value, String> {
 fn thumbnail_url(url: &str) -> Result<reqwest::Url, String> {
     let mut parsed = reqwest::Url::parse(url).map_err(|_| "Invalid artwork URL")?;
     if parsed.host_str() == Some("store-images.s-microsoft.com") {
-        let pairs: Vec<_> = parsed
-            .query_pairs()
-            .filter(|(k, _)| !matches!(k.as_ref(), "w" | "h" | "q"))
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        parsed.set_query(None);
-        parsed
-            .query_pairs_mut()
-            .extend_pairs(pairs)
-            .append_pair("w", "272");
+        microsoft_image_width(&mut parsed, "272");
     }
     Ok(parsed)
+}
+
+fn microsoft_image_width(url: &mut reqwest::Url, width: &str) {
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(k, _)| !matches!(k.as_ref(), "w" | "h" | "q"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.set_query(None);
+    url.query_pairs_mut()
+        .extend_pairs(pairs)
+        .append_pair("w", width);
+}
+
+pub fn xbox_viewer_url(source: &str) -> Option<reqwest::Url> {
+    let mut url = reqwest::Url::parse(source).ok()?;
+    if url.scheme() != "https" || url.host_str() != Some("store-images.s-microsoft.com") {
+        return None;
+    }
+    microsoft_image_width(&mut url, "1920");
+    url.query_pairs_mut().append_pair("q", "90");
+    Some(url)
+}
+
+pub fn xbox_viewer_image(
+    source: &str,
+    cache: &Path,
+    allow_download: bool,
+) -> Option<Result<String, String>> {
+    let url = xbox_viewer_url(source)?;
+    Some((|| {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        url.as_str().hash(&mut hash);
+        let key = format!("{:016x}", hash.finish());
+        let path = cache.join(format!("{key}.img"));
+        if path.is_file() {
+            return Ok(path.to_string_lossy().into());
+        }
+        if !allow_download || std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+            return Err("The full-size Xbox image is not cached".into());
+        }
+        let bytes = validated_image(remote_image(url, &AtomicBool::new(false))?)?;
+        fs::create_dir_all(cache).map_err(|e| e.to_string())?;
+        save(cache, &key, &bytes, None).map(|image| image.path)
+    })())
 }
 
 fn image(url: &str, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
@@ -331,6 +367,10 @@ fn image(url: &str, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
         }
         bytes = remote_image(parsed, cancel)?;
     }
+    validated_image(bytes)
+}
+
+fn validated_image(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     if bytes.len() > 6 * 1024 * 1024
         || !(bytes.starts_with(b"\xff\xd8\xff")
             || bytes.starts_with(b"\x89PNG\r\n\x1a\n")

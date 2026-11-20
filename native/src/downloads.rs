@@ -6,7 +6,7 @@ use crate::{
 };
 use exposed_games_backend::steam_control::{Operation, Phase, Progress};
 use gpui::{prelude::*, *};
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 pub fn button_label(progress: &Progress) -> String {
     match progress.phase {
@@ -16,14 +16,22 @@ pub fn button_label(progress: &Progress) -> String {
             "Install"
         }
         .into(),
-        Phase::Queued | Phase::Starting => "Queued".into(),
+        Phase::Queued => "Queued".into(),
+        Phase::Starting => "Starting…".into(),
         Phase::Paused => "Resume".into(),
         Phase::Failed if progress.operation == Operation::Update => "Retry update".into(),
         Phase::Removing | Phase::Complete | Phase::Failed => String::new(),
-        _ => progress
+        Phase::Downloading | Phase::Installing => progress
             .percent
             .map(|p| format!("{p}%"))
-            .unwrap_or_else(|| "Queued".into()),
+            .unwrap_or_else(|| {
+                if progress.phase == Phase::Installing {
+                    "Installing…"
+                } else {
+                    "Downloading…"
+                }
+                .into()
+            }),
     }
 }
 
@@ -42,10 +50,7 @@ pub fn button_icon(progress: &Progress) -> &'static str {
 
 pub fn button_tip(progress: &Progress) -> String {
     match progress.phase {
-        Phase::Available => progress
-            .detail
-            .clone()
-            .unwrap_or_else(|| button_label(progress)),
+        Phase::Available => progress.label(),
         Phase::Paused => "Resume download".into(),
         Phase::Failed => "Retry update".into(),
         _ if progress.controllable && progress.operation.downloads() => "Pause download".into(),
@@ -76,10 +81,31 @@ pub fn queue_pill(
         })
 }
 
+fn download_entry(game: &crate::library::Game, progress: &Progress) -> bool {
+    !game.source.xbox_console_only
+        && progress.operation.downloads()
+        && (progress.blocks_play() || progress.phase == Phase::Failed)
+}
+
+fn queue_order(progress: &Progress) -> (u8, u64) {
+    let priority = match progress.phase {
+        Phase::Starting | Phase::Downloading | Phase::Installing => 0,
+        Phase::Queued => 1,
+        Phase::Paused => 2,
+        Phase::Failed => 3,
+        Phase::Available if progress.scheduled_at.is_none() => 4,
+        _ => 5,
+    };
+    (priority, progress.scheduled_at.unwrap_or_default())
+}
+
 impl Launcher {
     pub(crate) fn control_download(&mut self, key: String, resume: bool, cx: &mut Context<Self>) {
         if self.closing || self.pending_action.is_some() {
             return;
+        }
+        if resume {
+            self.download_failures_dismissed.remove(&key);
         }
         self.pending_action = Some(key.clone());
         let backend = self.backend.clone();
@@ -93,8 +119,7 @@ impl Launcher {
                 if let Err(error) = result {
                     this.notice(error, cx);
                 }
-                this.download_operations = this.backend.current_download_progress();
-                this.update_download_details(cx);
+                this.set_download_progress(this.backend.current_download_progress(), cx);
                 this.watch_downloads(cx);
                 cx.notify();
             })
@@ -130,11 +155,25 @@ impl Launcher {
     }
 
     pub(crate) fn download_summary(&self) -> Option<String> {
-        let progress = &self.download_operations;
-        let mut installing: Vec<_> = progress
+        if self.download_operations.is_empty() {
+            return None;
+        }
+        let mut installing: Vec<_> = self
+            .games
             .iter()
-            .filter(|(_, p)| p.operation.downloads() && p.blocks_play())
+            .filter_map(|game| {
+                let key = &game.source.key;
+                let progress = self.download_operations.get(key)?;
+                download_entry(game, progress).then_some((key, progress))
+            })
             .collect();
+        if let Some((key, progress)) = self
+            .download_operations
+            .get_key_value(exposed_games_backend::ferestre::RUNTIME_JOB)
+            .filter(|(_, progress)| progress.active())
+        {
+            installing.push((key, progress));
+        }
         installing.sort_by_key(|(key, _)| *key);
         let (_, state) = installing
             .iter()
@@ -148,102 +187,138 @@ impl Launcher {
     }
 
     pub(crate) fn toggle_downloads(&mut self, cx: &mut Context<Self>) {
-        self.downloads_open = !self.downloads_open;
         if self.downloads_open {
-            self.menu = false;
-            self.game_menu = None;
-            self.wheel
-                .reset(-f32::from(self.rows.scroll_px_offset_for_scrollbar().y) as f64);
-            self.wheel_needs_sync = true;
+            self.close_downloads(cx);
+            return;
+        }
+        self.downloads_open = true;
+        self.menu = false;
+        self.game_menu = None;
+        self.watch_downloads(cx);
+        self.wheel
+            .reset(-f32::from(self.rows.scroll_px_offset_for_scrollbar().y) as f64);
+        self.wheel_needs_sync = true;
+        cx.notify();
+    }
+
+    pub(crate) fn close_downloads(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.downloads_open, false) {
+            return;
+        }
+        let seen = std::mem::take(&mut self.download_failures_seen);
+        if !seen.is_empty() {
+            self.download_failures_dismissed.extend(seen.clone());
+            self.set_download_progress(self.download_operations.clone(), cx);
+            let backend = self.backend.clone();
+            cx.background_executor()
+                .spawn(async move { backend.dismiss_download_failures(&seen) })
+                .detach();
         }
         cx.notify();
     }
 
-    pub(crate) fn request_download_artwork(&mut self, cx: &mut Context<Self>) {
-        if self.downloads_open {
-            let keys = &self.download_operations;
-            let indices: Vec<_> = self
-                .games
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| keys.get(&g.source.key).is_some_and(|p| p.active()))
-                .filter(|(_, g)| self.downloads_visible.contains(&g.source.key))
-                .map(|(i, _)| i)
-                .collect();
-            for i in indices {
-                crate::artwork::request(self, i, cx);
-            }
+    pub(crate) fn set_download_progress(
+        &mut self,
+        mut progress: HashMap<String, Progress>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // A poll started before the popup closed can still return its old failure.
+        self.download_failures_dismissed
+            .retain(|key, seen| progress.get(key).is_none_or(|current| current == seen));
+        progress.retain(|key, state| self.download_failures_dismissed.get(key) != Some(state));
+        if self.download_operations == progress {
+            return false;
         }
+        self.download_operations = progress;
+        self.update_download_details(cx);
+        true
     }
 
-    pub(crate) fn download_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn download_popup(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let progress = &self.download_operations;
+        let runtime = progress
+            .get(exposed_games_backend::ferestre::RUNTIME_JOB)
+            .filter(|state| state.active())
+            .cloned();
         let mut entries: Vec<_> = self
             .games
             .iter()
             .enumerate()
             .filter_map(|(index, game)| {
                 let state = progress.get(&game.source.key)?;
-                (state.operation.downloads() && state.blocks_play())
-                    .then_some((index, state.clone()))
+                download_entry(game, state).then_some((index, state.clone()))
             })
             .collect();
-        entries.sort_by_key(|(index, p)| {
-            (
-                match p.phase {
-                    Phase::Starting | Phase::Downloading | Phase::Installing => 0,
-                    Phase::Queued => 1,
-                    Phase::Paused => 2,
-                    _ => 3,
-                },
-                self.games[*index].title.clone(),
-            )
-        });
+        entries.sort_by_key(|(index, p)| (queue_order(p), self.games[*index].title.clone()));
         let count = entries.len();
+        self.downloads_visible.clear();
+        if self.download_rows.item_count() != count {
+            self.download_rows.reset(count);
+        }
         let bounds = self.downloads_bounds.get();
         let margin = self.zoom * 1.1;
-        let width = (self.zoom * 26.).min((self.header_state.viewport - margin * 2.).max(0.));
+        let width = (self.zoom * 38.).min((self.header_state.viewport - margin * 2.).max(0.));
         let left = (f32::from(bounds.origin.x + bounds.size.width / 2.) - width / 2.).clamp(
             margin,
             (self.header_state.viewport - width - margin).max(margin),
         );
         let top = f32::from(bounds.bottom()) + self.zoom * 0.45;
-        let height = (count as f32 * self.zoom * 5.1)
-            .min((self.viewport_height - top - self.zoom * 4.).max(0.));
-        let list = uniform_list(
-            "download-rows",
-            count,
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                this.downloads_visible.clear();
-                for index in range.clone() {
-                    if let Some((index, _)) = entries.get(index)
-                        && let Some(game) = this.games.get(*index)
-                    {
-                        this.downloads_visible.insert(game.source.key.clone());
-                    }
+        let max_list_height = (self.viewport_height - top - self.zoom * 8.).max(self.zoom * 4.);
+        let rows = if count <= 8 {
+            // Let short queues size to their wrapped text. Large queues retain
+            // virtualization and scroll inside the available window height.
+            for (index, state) in &entries {
+                let key = self.games[*index].source.key.clone();
+                self.downloads_visible.insert(key.clone());
+                if state.phase == Phase::Failed {
+                    self.download_failures_seen.insert(key, state.clone());
                 }
-                range
-                    .filter_map(|row| {
-                        let (index, state) = entries.get(row)?;
+                crate::artwork::request(self, *index, cx);
+            }
+            div()
+                .id("download-rows")
+                .max_h(px(max_list_height))
+                .w_full()
+                .overflow_y_scroll()
+                .children(
+                    entries
+                        .iter()
+                        .map(|(index, state)| self.download_row(&self.games[*index], state, cx)),
+                )
+                .into_any_element()
+        } else {
+            let owner = cx.weak_entity();
+            list(self.download_rows.clone(), move |row, _, cx| {
+                owner
+                    .update(cx, |this, cx| {
+                        let Some((index, state)) = entries.get(row) else {
+                            return div().into_any_element();
+                        };
                         crate::artwork::request(this, *index, cx);
-                        this.games
-                            .get(*index)
-                            .map(|game| this.download_row(game, state, cx))
+                        let Some(game) = this.games.get(*index) else {
+                            return div().into_any_element();
+                        };
+                        this.downloads_visible.insert(game.source.key.clone());
+                        if state.phase == Phase::Failed {
+                            this.download_failures_seen
+                                .insert(game.source.key.clone(), state.clone());
+                        }
+                        this.download_row(game, state, cx)
                     })
-                    .collect()
-            }),
-        )
-        .h(px(height))
-        .w_full()
-        .flex_none();
+                    .unwrap_or_else(|_| div().into_any_element())
+            })
+            .h(px(max_list_height))
+            .w_full()
+            .flex_none()
+            .into_any_element()
+        };
         div()
             .absolute()
             .inset_0()
             .child(div().absolute().inset_0().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.downloads_open = false;
-                    cx.notify();
+                    this.close_downloads(cx);
                 }),
             ))
             .child(
@@ -272,7 +347,22 @@ impl Launcher {
                                 if count == 1 { "game" } else { "games" }
                             ))),
                     )
-                    .when(count == 0, |d| {
+                    .when_some(runtime.as_ref(), |d, state| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(rems(0.25))
+                                .child("Xbox runtime")
+                                .child(
+                                    div()
+                                        .text_color(rgb(0xaabbb2))
+                                        .whitespace_normal()
+                                        .child(state.label()),
+                                ),
+                        )
+                    })
+                    .when(count == 0 && runtime.is_none(), |d| {
                         d.child(
                             div()
                                 .py(rems(1.))
@@ -280,7 +370,7 @@ impl Launcher {
                                 .child("No downloads"),
                         )
                     })
-                    .when(count > 0, |d| d.child(list)),
+                    .when(count > 0, |d| d.child(rows)),
             )
             .into_any_element()
     }
@@ -291,19 +381,21 @@ impl Launcher {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = game.source.key.clone();
-        let queued = matches!(
-            state.phase,
-            Phase::Available | Phase::Failed | Phase::Starting | Phase::Queued | Phase::Paused
-        );
-        let label = if state.detail.is_some() || state.phase == Phase::Available {
+        let ferestre = !exposed_games_backend::actions::library_handoff_allowed(&game.source);
+        let steam_update = game.source.store == "steam"
+            && state.operation == Operation::Update
+            && !state.controllable;
+        let update_now = state.phase == Phase::Available && state.operation == Operation::Update;
+        let blocked = exposed_games_backend::actions::install_limitation(&game.source);
+        let label = if let Some(reason) = blocked {
+            reason.into()
+        } else if state.detail.is_some() || state.phase == Phase::Available {
             state.label()
         } else if let Some(error) = state.error {
             error.message().into()
-        } else if state.phase == Phase::Paused {
-            "Paused".into()
-        } else if queued {
-            "Queued".into()
-        } else if let Some(percent) = state.percent {
+        } else if matches!(state.phase, Phase::Downloading | Phase::Installing)
+            && let Some(percent) = state.percent
+        {
             format!(
                 "{} · {percent}%",
                 if state.phase == Phase::Installing {
@@ -320,7 +412,7 @@ impl Launcher {
         div()
             .id(SharedString::from(format!("download-{key}")))
             .w_full()
-            .h(rems(5.1))
+            .min_h(rems(5.1))
             .py(rems(0.45))
             .flex()
             .items_center()
@@ -352,26 +444,53 @@ impl Launcher {
                     .gap(rems(0.4))
                     .child(
                         div()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(game.title.clone()),
-                    )
-                    .child(div().truncate().text_color(rgb(0xaabbb2)).child(label))
-                    .child(
-                        div()
-                            .w_full()
-                            .h(rems(0.3))
-                            .rounded_full()
-                            .bg(rgba(0xffffff1a))
-                            .overflow_hidden()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(rems(0.55))
                             .child(
                                 div()
-                                    .h_full()
+                                    .whitespace_normal()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(game.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(rems(0.25))
+                                    .px(rems(0.4))
+                                    .py(rems(0.15))
                                     .rounded_full()
-                                    .bg(rgb(0x9ff4bc))
-                                    .w(relative(state.percent.unwrap_or(0) as f32 / 100.)),
+                                    .bg(rgba(0xffffff15))
+                                    .text_size(rems(0.85))
+                                    .child(icon(crate::STORES[game.store]).size(rems(1.)))
+                                    .child(crate::STORE_NAMES[game.store]),
                             ),
-                    ),
+                    )
+                    .child(
+                        div()
+                            .whitespace_normal()
+                            .text_color(rgb(0xaabbb2))
+                            .child(label),
+                    )
+                    .when_some(state.percent, |d, percent| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .h(rems(0.3))
+                                .rounded_full()
+                                .bg(rgba(0xffffff1a))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded_full()
+                                        .bg(rgb(0x9ff4bc))
+                                        .w(relative(percent as f32 / 100.)),
+                                ),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -379,18 +498,23 @@ impl Launcher {
                     .flex_none()
                     .gap(rems(0.15))
                     .when(
-                        matches!(
-                            state.phase,
-                            Phase::Available | Phase::Paused | Phase::Failed
-                        ) && (state.controllable || state.phase == Phase::Available),
+                        blocked.is_none()
+                            && !steam_update
+                            && matches!(
+                                state.phase,
+                                Phase::Available | Phase::Paused | Phase::Failed
+                            )
+                            && (state.controllable || state.phase == Phase::Available),
                         |d| {
                             d.child(
                                 action_button(
                                     SharedString::from(format!("start-{key}")),
                                     "install",
-                                    if state.phase == Phase::Available {
+                                    if state.phase == Phase::Failed {
+                                        "Retry download"
+                                    } else if state.phase == Phase::Available {
                                         if state.operation == Operation::Update {
-                                            "Update"
+                                            "Update now"
                                         } else {
                                             "Install"
                                         }
@@ -398,6 +522,14 @@ impl Launcher {
                                         "Resume download"
                                     },
                                 )
+                                .when(update_now, |button| {
+                                    button
+                                        .w_auto()
+                                        .px(rems(0.65))
+                                        .gap(rems(0.35))
+                                        .text_size(rems(0.9))
+                                        .child("Update now")
+                                })
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         this.control_download(start_key.clone(), true, cx);
@@ -407,10 +539,12 @@ impl Launcher {
                         },
                     )
                     .when(
-                        !matches!(
-                            state.phase,
-                            Phase::Available | Phase::Paused | Phase::Failed
-                        ) && state.controllable,
+                        blocked.is_none()
+                            && !matches!(
+                                state.phase,
+                                Phase::Available | Phase::Paused | Phase::Failed
+                            )
+                            && state.controllable,
                         |d| {
                             d.child(
                                 action_button(
@@ -427,17 +561,39 @@ impl Launcher {
                         },
                     )
                     .when(
-                        !state.controllable && state.phase != Phase::Available,
+                        blocked.is_none()
+                            && (steam_update
+                                || (!ferestre
+                                    && !state.controllable
+                                    && state.phase != Phase::Available)),
                         |d| {
                             let key = key.clone();
                             d.child(
                                 action_button(
                                     SharedString::from(format!("client-{key}")),
                                     "external",
-                                    "Open in game client",
+                                    if steam_update {
+                                        "Open Steam Downloads"
+                                    } else {
+                                        "Open in game client"
+                                    },
                                 )
+                                .when(steam_update, |button| {
+                                    button
+                                        .w_auto()
+                                        .px(rems(0.65))
+                                        .gap(rems(0.35))
+                                        .text_size(rems(0.9))
+                                        .child("Steam Downloads")
+                                })
                                 .on_click(cx.listener(
-                                    move |this, _, _, cx| this.action(key.clone(), "library", cx),
+                                    move |this, _, _, cx| {
+                                        if steam_update {
+                                            this.control_download(key.clone(), true, cx);
+                                        } else {
+                                            this.action(key.clone(), "library", cx);
+                                        }
+                                    },
                                 )),
                             )
                         },

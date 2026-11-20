@@ -98,6 +98,27 @@ pub fn scan_mount(path: &Path) -> bool {
         .any(|p| path.starts_with(p))
 }
 
+/// Toolbx can expose the same host mount at both its original path and under
+/// /run/host. Compare inode identity before preferring the original path.
+pub(crate) fn host_mount_alias(path: &str) -> Option<&str> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let original = path.strip_prefix("/run/host")?;
+        if !original.starts_with('/') || !scan_mount(Path::new(path)) {
+            return None;
+        }
+        let alias = fs::metadata(path).ok()?;
+        let native = fs::metadata(original).ok()?;
+        (alias.dev() == native.dev() && alias.ino() == native.ino()).then_some(original)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Bounded, known locations only. Never recursively crawl game payloads or follow
 /// a foreign /home symlink into the running OS's /home.
 pub fn sources_at(root: &Path, hint: Os) -> Vec<Source> {
@@ -190,12 +211,23 @@ pub fn unreadable_note(host: Os, filesystem: &str, driver_present: bool) -> Stri
 pub fn volumes() -> (Vec<Volume>, Vec<String>) {
     #[cfg(target_os = "linux")]
     {
-        match Command::new("lsblk").args(["--json", "--output", "PATH,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINTS"]).output() {
+        let flatpak = in_flatpak();
+        if flatpak && env::var_os("EXPOSED_GAMES_DISABLE_HOST_BRIDGE").is_some() {
+            return (
+                Vec::new(),
+                vec!["Flatpak host partition discovery is disabled.".into()],
+            );
+        }
+        match lsblk_command(flatpak).output() {
             Ok(out) if out.status.success() => match serde_json::from_slice::<Value>(&out.stdout) {
                 Ok(v) => return (parse_lsblk(&v), Vec::new()),
                 Err(_) => return (Vec::new(), vec!["Could not parse lsblk output; automatic partition discovery is unavailable. Add readable paths manually.".into()]),
             },
-            _ => return (Vec::new(), vec!["lsblk is missing or failed; automatic partition discovery is unavailable. Install util-linux or add readable paths manually.".into()]),
+            _ => return (Vec::new(), vec![if flatpak {
+                "Host lsblk could not run through Flatpak; automatic partition discovery is unavailable. Check that util-linux is installed on the host or add readable paths manually.".into()
+            } else {
+                "lsblk is missing or failed; automatic partition discovery is unavailable. Install util-linux or add readable paths manually.".into()
+            }]),
         }
     }
     #[cfg(windows)]
@@ -209,14 +241,44 @@ pub fn volumes() -> (Vec<Volume>, Vec<String>) {
     )
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn in_flatpak() -> bool {
+    Path::new("/.flatpak-info").is_file()
+}
+
+#[cfg(target_os = "linux")]
+fn lsblk_command(flatpak: bool) -> Command {
+    // lsblk needs the host's device metadata and mount namespace to report
+    // filesystem UUIDs and mounts for devices outside the sandbox.
+    let mut command = if flatpak {
+        let mut command = Command::new("flatpak-spawn");
+        command.args(["--host", "lsblk"]);
+        command
+    } else {
+        Command::new("lsblk")
+    };
+    command.args([
+        "--json",
+        "--bytes",
+        "--output",
+        "PATH,FSTYPE,LABEL,UUID,PARTTYPE,SIZE,MOUNTPOINTS",
+    ]);
+    command
+}
+
 pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
     fn visit(value: &Value, output: &mut Vec<Volume>) {
         let filesystem = value["fstype"].as_str().unwrap_or("");
+        let partition_type = value["parttype"].as_str().unwrap_or("");
+        // Windows RE uses a designated GPT type or MBR type 0x27.
+        let recovery = partition_type.eq_ignore_ascii_case("de94bba4-06d1-4d40-a16a-bfd50179d6ac")
+            || partition_type.eq_ignore_ascii_case("0x27");
         if ["ntfs", "btrfs", "ext4", "crypto_LUKS", "BitLocker"]
             .iter()
             .any(|s| s.eq_ignore_ascii_case(filesystem))
+            && !recovery
         {
-            let mounts: Vec<String> = value["mountpoints"]
+            let mut mounts: Vec<String> = value["mountpoints"]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -224,6 +286,10 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
                 .filter(|p| Path::new(p).is_dir())
                 .map(String::from)
                 .collect();
+            let known = mounts.clone();
+            mounts.retain(|path| {
+                host_mount_alias(path).is_none_or(|original| !known.iter().any(|p| p == original))
+            });
             let os = mounts
                 .iter()
                 .map(|p| os_at(Path::new(p)))
@@ -242,6 +308,14 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
                     .into(),
                 device: value["path"].as_str().unwrap_or("unknown").into(),
                 filesystem: filesystem.into(),
+                label: value["label"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned),
+                size_bytes: value["size"]
+                    .as_u64()
+                    .or_else(|| value["size"].as_str()?.parse().ok()),
                 mountpoints: mounts,
                 os,
                 note,
@@ -334,6 +408,7 @@ ConvertTo-Json -Depth 4 -Compress -InputObject $rows
             mountpoints: mounts,
             os,
             note,
+            ..Volume::default()
         });
     }
     (result, Vec::new())
@@ -361,6 +436,20 @@ fn probe_linux_filesystem(disk: u64, offset: u64) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_discovery_runs_the_same_lsblk_query_on_the_host() {
+        let native = lsblk_command(false);
+        let flatpak = lsblk_command(true);
+        let mut host_args = flatpak.get_args();
+        assert_eq!(native.get_program(), "lsblk");
+        assert_eq!(flatpak.get_program(), "flatpak-spawn");
+        assert_eq!(host_args.next().unwrap(), "--host");
+        assert_eq!(host_args.next().unwrap(), "lsblk");
+        assert!(host_args.eq(native.get_args()));
+    }
+
     #[test]
     fn unmounted_partition_is_not_a_confirmed_windows_install() {
         let data = serde_json::json!({"blockdevices":[{"path":"/dev/test", "children":[
@@ -370,6 +459,23 @@ mod tests {
         assert_eq!(volumes.len(), 1);
         assert_eq!(volumes[0].os, Os::Unknown);
         assert!(volumes[0].note.contains("not yet verified"));
+    }
+
+    #[test]
+    fn linux_discovery_identifies_data_partitions_and_excludes_windows_recovery() {
+        let data = serde_json::json!({"blockdevices":[
+            {"path":"/dev/test1","fstype":"ntfs","label":"Games","size":602825523200_u64},
+            {"path":"/dev/test2","fstype":"ntfs","parttype":"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"},
+            {"path":"/dev/test3","fstype":"ntfs","parttype":"0x27"},
+            {"path":"/dev/test4","fstype":"ntfs","size":"1073741824"}
+        ]});
+        let volumes = parse_lsblk(&data);
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].device, "/dev/test1");
+        assert_eq!(volumes[0].label.as_deref(), Some("Games"));
+        assert_eq!(volumes[0].size_bytes, Some(602825523200));
+        assert_eq!(volumes[1].device, "/dev/test4");
+        assert_eq!(volumes[1].size_bytes, Some(1073741824));
     }
     #[test]
     fn missing_reader_has_actionable_message() {

@@ -34,6 +34,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       - name: Install test dependencies
         run: |
@@ -66,22 +67,16 @@ jobs:
 
   windows:
     name: Windows x64
-    needs: validate
     runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_STRIP: symbols
     defaults:
       run:
         shell: msys2 {0}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Cache Cargo downloads
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@v2
@@ -101,14 +96,38 @@ jobs:
             mingw-w64-ucrt-x86_64-libarchive
             mingw-w64-ucrt-x86_64-nsis
 
-      - name: Test Windows client download peer verification
-        run: cargo test --locked --package exposed-games-backend client_downloads::peer::tests
+      - name: Identify the UCRT64 toolchain and Cargo paths
+        id: ucrt64
+        run: |
+          set -euo pipefail
+          toolchain="$( { rustc -vV; pacman -Q; } | sha256sum | cut -d' ' -f1)"
+          cargo_home="$(cygpath -am "${CARGO_HOME:-$USERPROFILE/.cargo}")"
+          printf 'CARGO_HOME=%s\n' "$cargo_home" >> "$GITHUB_ENV"
+          {
+            printf 'toolchain=%s\n' "$toolchain"
+            printf 'cargo-home=%s\n' "$cargo_home"
+            printf 'cargo-target=%s\n' "$(cygpath -am "${CARGO_TARGET_DIR:-$PWD/target}")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cache Windows release build dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ steps.ucrt64.outputs.cargo-home }}/registry
+            ${{ steps.ucrt64.outputs.cargo-home }}/git
+            ${{ steps.ucrt64.outputs.cargo-target }}/release/.fingerprint
+            ${{ steps.ucrt64.outputs.cargo-target }}/release/build
+            ${{ steps.ucrt64.outputs.cargo-target }}/release/deps
+          key: cargo-ucrt64-release-${{ steps.ucrt64.outputs.toolchain }}-${{ hashFiles('native/Cargo.toml', 'backend/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'scripts/package-windows.sh') }}
+          restore-keys: cargo-ucrt64-release-${{ steps.ucrt64.outputs.toolchain }}-
+
+      - name: Test Windows client download and Steam ownership bridges
+        run: |
+          cargo test --release --locked --package exposed-games-backend --lib -- \
+            client_downloads::peer::tests steam_ipc::tests
 
       - name: Build and verify NSIS installer
         run: ./scripts/package-windows.sh
-
-      - name: Test Windows Steam ownership bridge
-        run: cargo test --locked --package exposed-games-backend steam_ipc::tests
 
       - name: Verify installation
         shell: pwsh
@@ -141,7 +160,6 @@ jobs:
 
   linux:
     name: Linux x64 Flatpak
-    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -157,6 +175,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       - name: Install Flatpak tooling and SDK
         run: |
@@ -173,22 +192,54 @@ jobs:
           appstreamcli validate --strict --explain build/com.chipichapa.exposedgames.metainfo.xml
           desktop-file-validate build/com.chipichapa.exposedgames.desktop
 
+      - name: Identify the Flatpak build environment
+        id: flatpak-sdk
+        run: |
+          sdk="$( {
+            flatpak-builder --version
+            flatpak info --system --show-commit org.freedesktop.Platform//25.08
+            flatpak info --system --show-commit org.freedesktop.Sdk//25.08
+            flatpak info --system --show-commit org.freedesktop.Sdk.Extension.rust-stable//25.08
+          } | sha256sum | cut -d' ' -f1)"
+          printf 'revision=%s\n' "$sdk" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Flatpak modules
+        uses: actions/cache@v5
+        with:
+          path: |
+            .flatpak-builder/cache
+            .flatpak-builder/downloads
+          key: flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.exposedgames.json') }}
+
+      - name: Cache Flatpak Rust build dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            .flatpak-builder/cargo-target/release/.fingerprint
+            .flatpak-builder/cargo-target/release/build
+            .flatpak-builder/cargo-target/release/deps
+          key: cargo-flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.exposedgames.json') }}-${{ hashFiles('native/Cargo.toml', 'backend/Cargo.toml', 'Cargo.toml', 'Cargo.lock') }}
+          restore-keys: cargo-flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.exposedgames.json') }}-
+
       - name: Build Flatpak bundle
+        env:
+          EXPOSED_GAMES_FLATPAK_STATE_DIR: .flatpak-builder
         run: ./scripts/package-flatpak.sh
 
       - name: Build Flatpak update repository
-        run: ./scripts/package-flatpak-repository.sh
-
-      - name: Verify artifact
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
-          test -f dist/exposed-games-linux-x64.flatpak
-          test -f dist/exposed-games.flatpakrepo
+          ./scripts/package-flatpak-repository.sh
           test -f dist/flatpak-pages/flatpak/summary
           test -f dist/flatpak-pages/flatpak/exposed-games.flatpakref
           flatpak remote-add --user --no-gpg-verify exposed-games-build \
             "file://${GITHUB_WORKSPACE}/dist/flatpak-pages/flatpak"
           flatpak remote-info --user exposed-games-build com.chipichapa.exposedgames
-          flatpak install --user --assumeyes --noninteractive --no-deps exposed-games-build com.chipichapa.exposedgames
+
+      - name: Verify Flatpak installation
+        run: |
+          cmp build/exposed-games.flatpakrepo dist/exposed-games.flatpakrepo
+          flatpak install --user --assumeyes --noninteractive --no-deps --bundle dist/exposed-games-linux-x64.flatpak
           app_location="$(flatpak info --user --show-location com.chipichapa.exposedgames)"
           cmp LICENSE "${app_location}/files/share/licenses/com.chipichapa.exposedgames/LICENSE"
           # No windows, accounts, or game clients are opened by these checks.
@@ -219,7 +270,7 @@ jobs:
   flatpak-pages:
     name: Publish Flatpak repository
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: linux
+    needs: [validate, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -239,7 +290,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, flatpak-pages]
+    needs: [validate, windows, linux, flatpak-pages]
     runs-on: ubuntu-latest
     permissions:
       contents: write

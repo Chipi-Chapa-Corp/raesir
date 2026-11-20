@@ -15,8 +15,15 @@ pub fn assets() -> AssetRegistry {
         asset!("macos", "macos.svg"),
         asset!("spinner", "lucide/loader-circle.svg"),
         asset!("mods", "lucide/puzzle.svg"),
+        asset!("joystick", "lucide/joystick.svg"),
         asset!("edit", "lucide/pencil.svg"),
         asset!("check", "adwaita/object-select-symbolic.svg"),
+        asset!("verified-symbolic", "verified-symbolic.svg"),
+        asset!("face-sad-symbolic", "adwaita/face-sad-symbolic.svg"),
+        asset!(
+            "face-smile-big-symbolic",
+            "adwaita/face-smile-big-symbolic.svg"
+        ),
         asset!("calendar", "adwaita/x-office-calendar-symbolic.svg"),
         asset!("esrb-e", "ratings/esrb-e.svg"),
         asset!("esrb-e10", "ratings/esrb-e10.svg"),

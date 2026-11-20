@@ -10,7 +10,9 @@ pub mod downloads;
 pub mod ea;
 pub mod epic;
 pub mod epic_online;
+pub mod ferestre;
 pub mod game_pass;
+pub mod game_sessions;
 pub mod inventory;
 pub mod linux_support;
 pub mod model;
@@ -22,9 +24,11 @@ pub mod player_stats;
 pub mod runtime;
 pub mod steam;
 pub mod steam_control;
+pub mod steam_deck;
 pub mod steam_ipc;
 pub mod storage;
 mod vdf;
+mod xbox_store;
 
 #[cfg(all(test, unix))]
 mod test_process;

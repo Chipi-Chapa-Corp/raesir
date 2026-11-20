@@ -119,6 +119,8 @@ pub struct Progress {
     pub controllable: bool,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<u64>,
 }
 
 impl Progress {
@@ -134,6 +136,7 @@ impl Progress {
             error: None,
             controllable: true,
             detail: None,
+            scheduled_at: None,
         }
     }
     pub fn active(&self) -> bool {
@@ -150,6 +153,15 @@ impl Progress {
     pub fn label(&self) -> String {
         if let Some(detail) = &self.detail {
             return detail.clone();
+        }
+        if self.phase == Phase::Available
+            && let Some(scheduled) = self.scheduled_at
+        {
+            let now = std::time::UNIX_EPOCH
+                .elapsed()
+                .unwrap_or_default()
+                .as_secs();
+            return schedule_label(scheduled.saturating_sub(now));
         }
         match self.phase {
             Phase::Available => if self.operation == Operation::Update {
@@ -180,6 +192,16 @@ impl Progress {
             }
             .into(),
         }
+    }
+}
+
+fn schedule_label(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60);
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => "Scheduled to start now".into(),
+        (0, minutes) => format!("Scheduled in {minutes}m"),
+        (hours, 0) => format!("Scheduled in {hours}h"),
+        (hours, minutes) => format!("Scheduled in {hours}h {minutes}m"),
     }
 }
 
@@ -293,13 +315,22 @@ fn manifest_progress(app: &vdf::Value, operation: Operation) -> Progress {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0)
     };
-    state_progress(
+    let mut progress = state_progress(
         number("StateFlags"),
         number("UpdateResult") as u32,
         number("BytesDownloaded"),
         number("BytesToDownload"),
         operation,
-    )
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let scheduled = number("ScheduledAutoUpdate");
+    if progress.phase == Phase::Available && scheduled > now {
+        progress.scheduled_at = Some(scheduled);
+    }
+    progress
 }
 
 fn state_progress(
@@ -485,13 +516,36 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
             session.pipe,
             c"CLIENTAPPMANAGER_INTERFACE_VERSION001".as_ptr(),
         );
+        // InstallApp, UninstallApp, GetAppInstallState, GetAppLibraryFolder,
+        // GetUpdateInfo, and ChangeAppDownloadQueuePlacement. Require a full
+        // matching proxy profile. The November 2026 client changed the wire IDs
+        // while retaining these slots, arguments, and the update record size.
+        const SLOTS: [usize; 6] = [0, 1, 4, 82, 20, 56];
+        const PROFILES: [[[u32; 2]; 6]; 2] = [
+            [
+                [0xdd9af16a, 0xdfc1c497],
+                [0x4505e2cd, 0x47325f11],
+                [0xeaf261b3, 0xed1250c4],
+                [0x166ebab8, 0x18c97bb8],
+                [0x27b7a56e, 0x29ecbed5],
+                [0x9bd943b1, 0x9e250174],
+            ],
+            [
+                [0xdd9af161, 0xdfbf8d85],
+                [0x4505e2d4, 0x4730280f],
+                [0xeaf26188, 0xed101990],
+                [0x166ebaa1, 0x18c74498],
+                [0x27b7a577, 0x29ea87d5],
+                [0x9bd943ae, 0x9e22ca68],
+            ],
+        ];
         if !identity(manager)
-            || !signature(manager, 0, [0xdd9af16a, 0xdfc1c497])
-            || !signature(manager, 1, [0x4505e2cd, 0x47325f11])
-            || !signature(manager, 4, [0xeaf261b3, 0xed1250c4])
-            || !signature(manager, 82, [0x166ebab8, 0x18c97bb8])
-            || !signature(manager, 20, [0x27b7a56e, 0x29ecbed5])
-            || !signature(manager, 56, [0x9bd943b1, 0x9e250174])
+            || !PROFILES.into_iter().any(|profile| {
+                SLOTS
+                    .into_iter()
+                    .zip(profile)
+                    .all(|(slot, ids)| signature(manager, slot, ids))
+            })
         {
             return Err(Error::Unavailable);
         }
@@ -637,6 +691,22 @@ mod tests {
     }
 
     #[test]
+    fn steam_scheduled_updates_are_reported_as_available() {
+        let value = vdf::parse(
+            r#""AppState" { "StateFlags" "6" "UpdateResult" "0"
+             "BytesToDownload" "1234567" "ScheduledAutoUpdate" "4102444800" }"#,
+        )
+        .unwrap();
+        let progress = manifest_progress(value.get("AppState").unwrap(), Operation::Update);
+        assert_eq!(progress.phase, Phase::Available);
+        assert_eq!(progress.scheduled_at, Some(4102444800));
+        assert!(progress.label().starts_with("Scheduled in "));
+        assert!(progress.error.is_none());
+        assert_eq!(schedule_label(54 * 60 + 1), "Scheduled in 55m");
+        assert_eq!(schedule_label(14 * 3600 + 27 * 60), "Scheduled in 14h 27m");
+    }
+
+    #[test]
     fn download_completion_waits_for_commit_and_pauses_are_not_errors() {
         for (flags, result, expected) in [
             (2 | 1048576, 0, Phase::Downloading),
@@ -742,12 +812,19 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn native_control_checks_ownership_identity_running_state_and_releases_its_pipe() {
+        verify_native_control(&[]);
+        verify_native_control(&["-DFIXTURE_NEW_PROXY"]);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn verify_native_control(compiler_flags: &[&str]) {
         use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("linux64")).unwrap();
         let path = dir.path().join("linux64/steamclient.so");
         assert!(
             Command::new("cc")
+                .args(compiler_flags)
                 .args(["-shared", "-fPIC", "-o"])
                 .arg(&path)
                 .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/steamcontrol.c"))
@@ -774,7 +851,15 @@ mod tests {
             assert_eq!(mutations(), 1);
             assert_eq!(request(dir.path(), 42, "install").unwrap().state, 4);
             assert_eq!(mutations(), 2);
-            set_state(2 | 256 | 1024);
+            set_state(2 | 4);
+            assert_eq!(
+                request(dir.path(), 42, "resume")
+                    .unwrap()
+                    .progress(Operation::Update)
+                    .phase,
+                Phase::Available
+            );
+            assert_eq!(mutations(), 3);
             let live = request(dir.path(), 42, "status").unwrap();
             assert_eq!(live.downloaded, Some(450));
             assert_eq!(live.download_total, Some(1000));
@@ -800,19 +885,19 @@ mod tests {
                 request(dir.path(), 43, "resume").unwrap_err(),
                 Error::NotOwned
             );
-            assert_eq!(mutations(), 4);
+            assert_eq!(mutations(), 5);
             set_state(4 | 8192);
             assert_eq!(
                 request(dir.path(), 42, "uninstall").unwrap_err(),
                 Error::Running
             );
-            assert_eq!(mutations(), 4);
+            assert_eq!(mutations(), 5);
             incompatible();
             assert_eq!(
                 request(dir.path(), 42, "uninstall").unwrap_err(),
                 Error::Unavailable
             );
-            assert_eq!(mutations(), 4);
+            assert_eq!(mutations(), 5);
             assert_eq!(
                 request(dir.path(), 42, "unexpected").unwrap_err(),
                 Error::Rejected

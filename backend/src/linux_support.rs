@@ -1,27 +1,36 @@
-use crate::{discovery, model::*, platform};
+use crate::{discovery, ferestre, model::*, platform};
 use std::{collections::BTreeSet, fs, path::Path};
 
 const CLIENTS: [&str; 3] = ["ferestre", "xodus-nexus", "xodus-nexus-launcher"];
+
+pub(crate) fn local_runtime() -> bool {
+    let home = platform::home();
+    CLIENTS
+        .iter()
+        .any(|name| discovery::program(name).is_some())
+        || discovery::desktop_command("ferestre").is_some()
+        || discovery::desktop_command("xodus").is_some()
+        || installed(Path::new("/"), home.as_deref().as_slice())
+        || (Path::new("/.flatpak-info").is_file() && installed(Path::new("/run/host"), &[]))
+}
 
 pub fn scan(report: &Report) -> Vec<LinuxSystem> {
     let homes = discovery::homes(report);
     let mut systems = Vec::new();
     let mut seen = BTreeSet::new();
     if report.host_os == Os::Linux {
-        let local_homes = homes
-            .iter()
-            .filter(|h| h.local && h.os == Os::Linux)
-            .map(|h| h.path.as_path())
-            .collect::<Vec<_>>();
-        let runtime = CLIENTS
-            .iter()
-            .any(|name| discovery::program(name).is_some())
-            || discovery::desktop_command("ferestre").is_some()
-            || discovery::desktop_command("xodus").is_some()
-            || installed(Path::new("/"), &local_homes);
+        let managed_ferestre = ferestre::managed_installed();
+        let ferestre_client = ferestre::Client::discover().is_some();
+        let home = platform::home();
         systems.push(LinuxSystem {
             root: "/".into(),
-            xbox_runtime: runtime,
+            xbox_runtime: managed_ferestre || local_runtime(),
+            managed_ferestre,
+            ferestre_client,
+            ferestre_runtime: managed_ferestre
+                && home.as_deref().is_some_and(ferestre::runtime_installed),
+            ferestre_library: ferestre_client
+                && home.as_deref().is_some_and(ferestre::library_cached),
         });
         seen.insert(Path::new("/").canonicalize().unwrap_or_default());
     }
@@ -48,7 +57,19 @@ pub fn scan(report: &Report) -> Vec<LinuxSystem> {
                 .collect::<Vec<_>>();
             systems.push(LinuxSystem {
                 root: root.to_string_lossy().into_owned(),
-                xbox_runtime: installed(&root, &foreign_homes),
+                xbox_runtime: installed(&root, &foreign_homes)
+                    || foreign_homes.iter().any(|home| {
+                        resolve_file(
+                            &root,
+                            &ferestre::cli_directory(&home.join(".local/share"))
+                                .join("usr/bin/ferestre"),
+                        )
+                        .is_some()
+                    }),
+                managed_ferestre: false,
+                ferestre_client: false,
+                ferestre_runtime: false,
+                ferestre_library: false,
             });
         }
     }
@@ -175,11 +196,10 @@ mod tests {
             .into_iter()
             .map(|root| Volume {
                 id: root.to_string_lossy().into(),
-                device: String::new(),
                 filesystem: "btrfs".into(),
                 mountpoints: vec![root.to_string_lossy().into()],
                 os: Os::Linux,
-                note: String::new(),
+                ..Volume::default()
             })
             .collect();
         let systems = scan(&report);

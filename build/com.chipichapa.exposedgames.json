@@ -15,7 +15,8 @@
     "--device=dri",
     "--filesystem=host",
     "--filesystem=~/.var/app",
-    "--talk-name=org.freedesktop.Flatpak"
+    "--talk-name=org.freedesktop.Flatpak",
+    "--system-talk-name=org.freedesktop.UDisks2"
   ],
   "build-options": {
     "append-path": "/usr/lib/sdk/rust-stable/bin",
@@ -58,7 +59,7 @@
       "buildsystem": "simple",
       "build-commands": [
         "cargo build --release --locked --offline --package exposed-games --bin exposed-games",
-        "install -Dm755 target/release/exposed-games /app/bin/exposed-games",
+        "install -Dm755 \"${CARGO_TARGET_DIR:-target}/release/exposed-games\" /app/bin/exposed-games",
         "install -Dm755 build/host-command /app/bin/host-command",
         "for tool in flatpak steam lutris heroic bottles-cli wine wine64 protontricks xdg-open legendary ferestre; do ln -s host-command /app/bin/$tool; done",
         "install -Dm644 build/com.chipichapa.exposedgames.desktop /app/share/applications/com.chipichapa.exposedgames.desktop",

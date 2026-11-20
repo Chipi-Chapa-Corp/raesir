@@ -1,4 +1,4 @@
-use crate::{Launcher, library::Game};
+use crate::{Launcher, backend::PartitionChoice, library::Game};
 use exposed_games_backend::{catalog, model::Report};
 use gpui::*;
 use std::{collections::HashMap, sync::Arc};
@@ -25,6 +25,9 @@ impl Launcher {
         if self.closing {
             return;
         }
+        // A slower refresh callback can arrive after the Xbox import has
+        // published a newer inventory. Render the backend's current snapshot.
+        let report = self.backend.latest_report().unwrap_or(report);
         let top = self.rows.logical_scroll_top();
         let anchor = self
             .visible
@@ -60,8 +63,7 @@ impl Launcher {
         self.report = Some(report);
         self.start_mod_updates(cx);
         self.start_game_updates(cx);
-        self.download_operations = self.backend.current_download_progress();
-        self.update_download_details(cx);
+        self.set_download_progress(self.backend.current_download_progress(), cx);
         self.watch_downloads(cx);
         self.starting = false;
         self.load_error = None;
@@ -102,6 +104,52 @@ impl Launcher {
         .detach();
     }
 
+    pub fn configure_ferestre(
+        &mut self,
+        setup: crate::library::FerestreSetup,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing || self.ferestre_task.is_some() {
+            return;
+        }
+        if matches!(
+            setup,
+            crate::library::FerestreSetup::Install
+                | crate::library::FerestreSetup::MaintainCli
+                | crate::library::FerestreSetup::MaintainRuntime
+                | crate::library::FerestreSetup::Runtime
+        ) && self.game_activity.keys().any(|key| key.starts_with("xbox:"))
+        {
+            self.notice("Quit your Xbox games before changing Xbox support.".into(), cx);
+            return;
+        }
+        let backend = self.backend.clone();
+        self.ferestre_task = Some((
+            setup,
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { backend.configure_ferestre(setup) })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.ferestre_task = None;
+                    match result {
+                        Ok((report, result)) => {
+                            this.apply_report(report, cx);
+                            if let Err(error) = result {
+                                this.notice(error, cx);
+                            }
+                        }
+                        Err(error) => this.notice(error, cx),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }),
+        ));
+        cx.notify();
+    }
+
     pub fn refresh_on_focus(&mut self, cx: &mut Context<Self>) {
         if self.last_refresh.elapsed().as_secs() > 90 {
             self.start_refresh(false, cx);
@@ -116,11 +164,17 @@ impl Launcher {
         let backend = self.backend.clone();
         self.sync_task = Some(cx.spawn(async move |this, cx| {
             let scan = backend.clone();
-            let result = cx
+            let (result, mut error) = cx
                 .background_executor()
-                .spawn(async move { scan.scan() })
+                .spawn(async move {
+                    let error = if full {
+                        scan.refresh_ferestre().err()
+                    } else {
+                        None
+                    };
+                    (scan.scan(), error)
+                })
                 .await;
-            let mut error = None;
             match result {
                 Ok(report) => {
                     if this
@@ -210,16 +264,21 @@ impl Launcher {
             return;
         }
         self.syncing = true;
+        let remember = self.remember_partition(&id);
         let backend = self.backend.clone();
         self.sync_task = Some(cx.spawn(async move |this, cx| {
+            let partition = id.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.mount(&id) })
+                .spawn(async move { backend.mount(&partition, remember) })
                 .await;
             this.update(cx, |this, cx| {
                 this.syncing = false;
                 match result {
-                    Ok(report) => this.apply_report(report, cx),
+                    Ok(report) => {
+                        this.remember_partitions.remove(&id);
+                        this.apply_report(report, cx);
+                    }
                     Err(e) => this.notice(e, cx),
                 }
                 cx.notify();
@@ -229,8 +288,41 @@ impl Launcher {
         cx.notify();
     }
 
+    pub fn remember_partition(&self, id: &str) -> bool {
+        self.remember_partitions
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| {
+                self.backend.partition_choices().get(id) == Some(&PartitionChoice::Mount)
+            })
+    }
+
+    pub fn ignore_partition(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.syncing || self.closing {
+            return;
+        }
+        let remember = self.remember_partition(&id);
+        self.remember_partitions.remove(&id);
+        if self
+            .backend
+            .set_partition_choice(&id, remember.then_some(PartitionChoice::Ignore))
+        {
+            let backend = self.backend.clone();
+            cx.background_executor()
+                .spawn(async move { backend.save_ui() })
+                .detach();
+        }
+        self.ignored_partitions.insert(id);
+        cx.notify();
+    }
+
     pub fn action(&mut self, key: String, kind: &'static str, cx: &mut Context<Self>) {
         if self.closing || self.pending_action.is_some() {
+            return;
+        }
+        if kind == "quit" {
+            self.game_menu = None;
+            self.quit_running_game(key, cx);
             return;
         }
         if matches!(kind, "launch" | "launch-modded" | "install" | "uninstall")
@@ -255,7 +347,19 @@ impl Launcher {
         if self.closing || self.pending_action.is_some() {
             return;
         }
+        let launching = matches!(kind, "launch" | "launch-modded");
+        if (launching || kind == "uninstall") && self.game_activity.contains_key(&key) {
+            return;
+        }
         self.pending_action = Some(key.clone());
+        if launching {
+            self.game_activity.insert(
+                key.clone(),
+                crate::game_activity::Activity::Starting(std::time::Instant::now()),
+            );
+            self.refresh_game_activity(cx);
+            self.watch_game_activity(cx);
+        }
         let steam_operation = if kind == "update" {
             Some(exposed_games_backend::steam_control::Operation::Update)
         } else if kind == "install" {
@@ -280,6 +384,7 @@ impl Launcher {
                 })
         };
         if let Some(operation) = steam_operation {
+            self.download_failures_dismissed.remove(&key);
             self.download_operations.insert(
                 key.clone(),
                 exposed_games_backend::steam_control::Progress::starting(operation),
@@ -288,17 +393,21 @@ impl Launcher {
         }
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
+            let action_key = key.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.action(&key, kind) })
+                .spawn(async move { backend.action(&action_key, kind) })
                 .await;
             let refresh = result.is_ok() && kind == "uninstall" && steam_operation.is_none();
             let modded = result.is_ok() && kind == "launch-modded";
             this.update(cx, |this, cx| {
                 this.pending_action = None;
+                if launching && result.is_err() {
+                    this.game_activity.remove(&key);
+                    this.refresh_game_activity(cx);
+                }
                 if steam_operation.is_some() {
-                    this.download_operations = this.backend.current_download_progress();
-                    this.update_download_details(cx);
+                    this.set_download_progress(this.backend.current_download_progress(), cx);
                     this.watch_downloads(cx);
                     if let Err(error) = result {
                         this.notice(error, cx);
@@ -343,8 +452,7 @@ impl Launcher {
                 .spawn(async move { backend.check_game_updates(force) })
                 .await;
             this.update(cx, |this, cx| {
-                this.download_operations = progress;
-                this.update_download_details(cx);
+                this.set_download_progress(progress, cx);
                 this.watch_downloads(cx);
                 if let Some(error) = errors.first() {
                     if force || this.game_update_notice.as_ref() != Some(error) {
@@ -499,17 +607,28 @@ impl Launcher {
         .detach();
     }
 
+    fn downloads_need_polling(&self) -> bool {
+        use exposed_games_backend::steam_control::Phase;
+        !self.closing
+            && (self.download_operations.iter().any(|(key, progress)| {
+                progress.active()
+                    || self.downloads_open
+                        && key.starts_with("steam:")
+                        && progress.phase == Phase::Available
+            }) || self.backend.watch_client_downloads())
+    }
+
     pub(crate) fn watch_downloads(&mut self, cx: &mut Context<Self>) {
-        if self.downloads_watching
-            || self.closing
-            || !(self.download_operations.values().any(|p| p.active())
-                || self.backend.watch_client_downloads())
-        {
+        if self.downloads_watching || !self.downloads_need_polling() {
             return;
         }
         self.downloads_watching = true;
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
+            let mut last_poll = std::time::UNIX_EPOCH
+                .elapsed()
+                .unwrap_or_default()
+                .as_secs();
             loop {
                 cx.background_executor().timer(millis(1000)).await;
                 let poll = backend.clone();
@@ -520,15 +639,26 @@ impl Launcher {
                 let complete = progress
                     .values()
                     .any(|p| p.phase == exposed_games_backend::steam_control::Phase::Complete);
+                let now = std::time::UNIX_EPOCH
+                    .elapsed()
+                    .unwrap_or_default()
+                    .as_secs();
                 let stop = this
                     .update(cx, |this, cx| {
                         if this.closing {
                             this.downloads_watching = false;
                             return true;
                         }
-                        if this.download_operations != progress {
-                            this.download_operations = progress;
-                            this.update_download_details(cx);
+                        if this.set_download_progress(progress, cx) {
+                            cx.notify();
+                        } else if this.downloads_open
+                            && this.download_operations.values().any(|job| {
+                                job.scheduled_at.is_some_and(|time| {
+                                    time.saturating_sub(last_poll).div_ceil(60)
+                                        != time.saturating_sub(now).div_ceil(60)
+                                })
+                            })
+                        {
                             cx.notify();
                         }
                         false
@@ -537,6 +667,7 @@ impl Launcher {
                 if stop {
                     return;
                 }
+                last_poll = now;
                 if complete {
                     let scan = backend.clone();
                     let result = cx
@@ -557,9 +688,7 @@ impl Launcher {
                 // clears the flag, so a newly queued job always has a watcher.
                 let active = this
                     .update(cx, |this, _| {
-                        let active = !this.closing
-                            && (this.download_operations.values().any(|p| p.active())
-                                || this.backend.watch_client_downloads());
+                        let active = this.downloads_need_polling();
                         if !active {
                             this.downloads_watching = false;
                         }

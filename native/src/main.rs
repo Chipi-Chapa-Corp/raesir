@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use exposed_games_backend::model::{Os, Report};
+use exposed_games_backend::model::{FerestreState, Os, Report};
+use game_activity::PlayButton;
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{
     EditableTextState, StringStorage, TextChanged,
@@ -21,9 +22,11 @@ mod backend;
 mod controller;
 mod details;
 mod downloads;
+mod game_activity;
 mod header;
 mod icons;
 mod library;
+mod steam_deck;
 mod video;
 mod views;
 use header::{Header, HeaderState, button_shell, pill};
@@ -36,7 +39,16 @@ use smooth_scroll::SmoothWheel;
 mod benchmark;
 
 const STORES: [&str; 6] = ["steam", "epic", "ea", "ubisoft", "xbox", "wargaming"];
+const STORE_NAMES: [&str; 6] = [
+    "Steam",
+    "Epic Games",
+    "EA",
+    "Ubisoft Connect",
+    "Xbox",
+    "Wargaming",
+];
 const CARD_TITLE_HEIGHT: f32 = 4.;
+const CARD_TITLE_FONT_SIZE: f32 = 1.125;
 const CARD_TITLE_OVERLAP: f32 = 0.08;
 const CARD_POSTER_RATIO: f32 = 1.5;
 
@@ -49,9 +61,12 @@ struct Launcher {
     closing: bool,
     load_error: Option<String>,
     load_task: Option<Task<()>>,
+    ferestre_task: Option<(library::FerestreSetup, Task<()>)>,
     _activation: Subscription,
     last_refresh: Instant,
     pending_action: Option<String>,
+    game_activity: HashMap<String, game_activity::Activity>,
+    game_activity_task: Option<Task<()>>,
     download_operations: HashMap<String, exposed_games_backend::steam_control::Progress>,
     downloads_watching: bool,
     mods_watching: bool,
@@ -60,8 +75,11 @@ struct Launcher {
     game_update_notice: Option<String>,
     mod_update_notice: Option<String>,
     downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
+    download_rows: ListState,
     downloads_open: bool,
     downloads_visible: HashSet<String>,
+    download_failures_seen: HashMap<String, exposed_games_backend::steam_control::Progress>,
+    download_failures_dismissed: HashMap<String, exposed_games_backend::steam_control::Progress>,
     game_menu: Option<(String, Point<Pixels>)>,
     details: Option<Entity<details::DetailsPage>>,
     mods: Option<Entity<mods::ModBrowser>>,
@@ -69,6 +87,7 @@ struct Launcher {
     artwork_pending: HashMap<String, artwork::Job>,
     artwork_attempted: HashSet<String>,
     artwork_cache: artwork::Cache,
+    steam_deck: steam_deck::Ratings,
     games: Vec<Game>,
     search: Entity<EditableTextState>,
     _search_subscription: Subscription,
@@ -93,6 +112,8 @@ struct Launcher {
     menu: bool,
     syncing: bool,
     sync_task: Option<Task<()>>,
+    ignored_partitions: HashSet<String>,
+    remember_partitions: HashMap<String, bool>,
     zoom: f32,
     wheel: SmoothWheel,
     wheel_needs_sync: bool,
@@ -157,9 +178,12 @@ impl Launcher {
             closing: false,
             load_error: None,
             load_task: None,
+            ferestre_task: None,
             _activation: activation,
             last_refresh: Instant::now(),
             pending_action: None,
+            game_activity: HashMap::new(),
+            game_activity_task: None,
             download_operations: HashMap::new(),
             downloads_watching: false,
             mods_watching: false,
@@ -168,8 +192,11 @@ impl Launcher {
             game_update_notice: None,
             mod_update_notice: None,
             downloads_bounds,
+            download_rows: ListState::new(0, ListAlignment::Top, px(600.)),
             downloads_open: false,
             downloads_visible: HashSet::new(),
+            download_failures_seen: HashMap::new(),
+            download_failures_dismissed: HashMap::new(),
             game_menu: None,
             details: None,
             mods: None,
@@ -177,6 +204,7 @@ impl Launcher {
             artwork_pending: HashMap::new(),
             artwork_attempted: HashSet::new(),
             artwork_cache: artwork::Cache::default(),
+            steam_deck: steam_deck::Ratings::default(),
             games: vec![],
             search,
             _search_subscription: search_subscription,
@@ -201,6 +229,8 @@ impl Launcher {
             menu: false,
             syncing: false,
             sync_task: None,
+            ignored_partitions: HashSet::new(),
+            remember_partitions: HashMap::new(),
             zoom,
             wheel: SmoothWheel::default(),
             wheel_needs_sync: true,
@@ -210,6 +240,12 @@ impl Launcher {
     }
 
     fn filter(&mut self, cx: &mut Context<Self>) {
+        if self.store.is_some_and(|store| STORES[store] == "xbox")
+            && self.status == 1
+            && self.access == 1
+        {
+            self.access = 0;
+        }
         let filters = (self.status, self.os, self.store, self.access);
         if filters != self.saved_filters {
             self.saved_filters = filters;
@@ -386,28 +422,76 @@ impl Launcher {
         let playable = installed_here && g.source.launch.is_some();
         let modded = playable && g.source.mods.as_ref().is_some_and(|m| m.launchable);
         let installable = scope != 2 && exposed_games_backend::actions::can_install(&g.source);
+        let play_button = (scope != 2)
+            .then(|| self.play_button(&g.source.key))
+            .flatten();
+        let console_only = g.source.xbox_console_only;
+        let unsupported = g.source.ferestre_unsupported_package;
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
-        let working = progress.as_ref().filter(|p| p.blocks_play());
+        let working = progress
+            .as_ref()
+            .filter(|p| play_button.is_none() && !console_only && !unsupported && p.blocks_play());
         let error = progress.as_ref().and_then(|p| p.error);
-        let action_tip = error.map(|e| e.message().to_owned()).or_else(|| {
-            if let Some(progress) = working {
-                Some(downloads::button_tip(progress))
-            } else if installable {
-                Some(
-                    g.source
-                        .install
-                        .as_ref()
-                        .and_then(|a| a.note.clone())
-                        .unwrap_or_else(|| "Install".into()),
-                )
-            } else if playable {
-                Some("Play".into())
-            } else {
-                None
-            }
-        });
+        let action_tip = play_button
+            .map(|state| state.label().into())
+            .or_else(|| error.map(|e| e.message().to_owned()))
+            .or_else(|| {
+                if let Some(progress) = working {
+                    Some(downloads::button_tip(progress))
+                } else if installable {
+                    Some(
+                        g.source
+                            .install
+                            .as_ref()
+                            .and_then(|a| a.note.clone())
+                            .unwrap_or_else(|| "Install".into()),
+                    )
+                } else if playable {
+                    Some("Play".into())
+                } else {
+                    None
+                }
+            });
         let duplicate_systems = g.duplicate_systems(self.host);
+        let ferestre_state = g.source.ferestre_test.as_ref().map(|test| test.state);
+        let compatibility_icon = if self.host != Os::Linux {
+            None
+        } else if g.source.store == "xbox" && !console_only && !unsupported {
+            match ferestre_state {
+                Some(FerestreState::Playable) => {
+                    Some(("verified-symbolic", "Playable in Ferestre tests"))
+                }
+                Some(FerestreState::PlayableWithIssues) => Some((
+                    "verified-symbolic",
+                    "Playable with issues in Ferestre tests",
+                )),
+                None | Some(FerestreState::Untested) if !g.source.ferestre_pc_package => Some((
+                    "face-sad-symbolic",
+                    "Package availability and gameplay compatibility are unknown",
+                )),
+                _ => None,
+            }
+        } else {
+            use exposed_games_backend::steam_deck::Compatibility;
+            match self.steam_deck.for_game(g) {
+                Some(Compatibility::Verified) => Some(("verified-symbolic", "Steam Deck Verified")),
+                Some(Compatibility::Playable) => {
+                    Some(("face-smile-big-symbolic", "Steam Deck Playable"))
+                }
+                Some(Compatibility::Unsupported) => {
+                    Some(("face-sad-symbolic", "Steam Deck Unsupported"))
+                }
+                None => None,
+            }
+        };
+        let compatibility_badge = if duplicate_systems.is_empty() {
+            crate::library::xbox_compatibility(&g.source, self.host)
+                .filter(|status| status.badge.is_some())
+                .filter(|_| ferestre_state != Some(FerestreState::Playable))
+        } else {
+            None
+        };
         let key = g.key.clone();
         let uninstall_key = key.clone();
         let modded_key = key.clone();
@@ -453,13 +537,26 @@ impl Launcher {
                     .rounded_t(rems(0.8))
                     .overflow_hidden()
                     .when_some(g.card_poster.clone(), |d, poster| {
-                        d.child(
+                        let cover = |poster| {
                             img(poster)
                                 .size_full()
                                 .rounded_t(rems(0.8))
                                 .object_fit(ObjectFit::Cover)
-                                .grayscale(!installed_here),
-                        )
+                        };
+                        d.child(cover(poster.clone()).when(!installed_here, |image| {
+                            image
+                                .grayscale(true)
+                                .group_hover("game-card", |s| s.invisible())
+                        }))
+                        .when(!installed_here, |d| {
+                            d.child(
+                                cover(poster)
+                                    .absolute()
+                                    .inset_0()
+                                    .invisible()
+                                    .group_hover("game-card", |s| s.visible()),
+                            )
+                        })
                     })
                     .child(div().absolute().inset_0().rounded_t(rems(0.8)).when(
                         !installed_here,
@@ -490,13 +587,42 @@ impl Launcher {
                             .absolute()
                             .top(rems(0.5))
                             .left(rems(0.5))
-                            .size(rems(1.9))
-                            .rounded_full()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .bg(rgba(0x101010b3))
-                            .child(icon(STORES[g.store])),
+                            .gap(rems(0.3))
+                            .child(
+                                div()
+                                    .size(rems(1.9))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(rgba(0x101010b3))
+                                    .child(icon(STORES[g.store])),
+                            )
+                            .when_some(compatibility_icon, |d, (glyph, reason)| {
+                                d.child(
+                                    div()
+                                        .id(("linux-compatibility", i))
+                                        .size(rems(1.9))
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(rgba(0x101010b3))
+                                        .child(icon(glyph).size(rems(1.4)).text_color(rgb(
+                                            match glyph {
+                                                "verified-symbolic" => 0x9ff4bc,
+                                                "face-smile-big-symbolic" => 0xf6d48b,
+                                                _ => 0xd8d8d8,
+                                            },
+                                        )))
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| crate::library::ActionTooltip(reason.into()))
+                                                .into()
+                                        }),
+                                )
+                            }),
                     )
                     .when(!duplicate_systems.is_empty(), |d| {
                         d.child(
@@ -519,8 +645,74 @@ impl Launcher {
                                 })),
                         )
                     })
+                    .when_some(compatibility_badge, |d, status| {
+                        d.child(
+                            div()
+                                .id(("xbox-compatibility", i))
+                                .absolute()
+                                .top(rems(0.5))
+                                .right(rems(0.5))
+                                .px(rems(0.4))
+                                .py(rems(0.3))
+                                .gap(rems(0.25))
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .bg(rgba(0x101010e6))
+                                .text_size(rems(0.75))
+                                .child(icon(status.icon).size(rems(0.82)))
+                                .child(status.badge.unwrap_or_default())
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| {
+                                        crate::library::ActionTooltip(status.description.into())
+                                    })
+                                    .into()
+                                }),
+                        )
+                    })
+                    .when(!installed_here && (console_only || unsupported), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id(("xbox-platform", i))
+                                        .size(rems(2.5))
+                                        .rounded_full()
+                                        .bg(rgba(0x101010b3))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            icon(if console_only { "joystick" } else { "windows" })
+                                                .size(rems(1.8)),
+                                        )
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| {
+                                                crate::library::ActionTooltip(
+                                                    if console_only {
+                                                        "Xbox console only"
+                                                    } else {
+                                                        "Windows package unsupported by Ferestre"
+                                                    }
+                                                    .into(),
+                                                )
+                                            })
+                                            .into()
+                                        }),
+                                ),
+                        )
+                    })
                     .when(
-                        !installed_here && scope != 1 && g.other_os(self.host).is_some(),
+                        !installed_here
+                            && !(installable && g.source.client == "Ferestre")
+                            && !unsupported
+                            && scope != 1
+                            && g.other_os(self.host).is_some(),
                         |d| {
                             d.child(
                                 div()
@@ -544,11 +736,17 @@ impl Launcher {
                         d.child(
                             div()
                                 .absolute()
-                                .bottom(rems(if playable || installable || working.is_some() {
-                                    4.4
-                                } else {
-                                    2.8
-                                }))
+                                .bottom(rems(
+                                    if playable
+                                        || installable
+                                        || working.is_some()
+                                        || play_button.is_some()
+                                    {
+                                        4.4
+                                    } else {
+                                        2.8
+                                    },
+                                ))
                                 .left(rems(0.85))
                                 .right(rems(0.75))
                                 .text_size(rems(1.2))
@@ -572,7 +770,10 @@ impl Launcher {
                         )
                     })
                     .when(
-                        installed_here && g.source.uninstall.is_some() && working.is_none(),
+                        installed_here
+                            && g.source.uninstall.is_some()
+                            && working.is_none()
+                            && play_button.is_none(),
                         |d| {
                             d.child(
                                 button_shell(("uninstall", i), false)
@@ -602,7 +803,7 @@ impl Launcher {
                             )
                         },
                     )
-                    .when(modded && working.is_none(), |d| {
+                    .when(modded && working.is_none() && play_button.is_none(), |d| {
                         d.child(
                             button_shell(("launch-modded", i), false)
                                 .child(icon("mods").text_color(rgb(0xf0f0f0)))
@@ -624,10 +825,21 @@ impl Launcher {
                                 })),
                         )
                     })
-                    .when(playable || installable || working.is_some(), |d| {
-                        d.child(
-                            button_shell(("action", i), false)
-                                .child(if let Some(progress) = working {
+                    .when(
+                        playable || installable || working.is_some() || play_button.is_some(),
+                        |d| {
+                            d.child(
+                                button_shell(
+                                    (play_button.map_or("action", PlayButton::element_id), i),
+                                    false,
+                                )
+                                .role(Role::Button)
+                                .aria_disabled(
+                                    play_button.is_some_and(|button| button != PlayButton::Quit),
+                                )
+                                .child(if let Some(button) = play_button {
+                                    button.glyph(0x202020)
+                                } else if let Some(progress) = working {
                                     icon(downloads::button_icon(progress))
                                         .text_color(rgb(0x202020))
                                         .into_any_element()
@@ -637,15 +849,17 @@ impl Launcher {
                                         .into_any_element()
                                 })
                                 .when_some(
-                                    working
-                                        .map(downloads::button_label)
+                                    play_button
+                                        .filter(|button| *button != PlayButton::Quit)
+                                        .map(|button| button.label().to_owned())
+                                        .or_else(|| working.map(downloads::button_label))
                                         .filter(|s| !s.is_empty()),
                                     |d, label| {
                                         d.w_auto().px(rems(0.7)).gap(rems(0.35)).child(label)
                                     },
                                 )
                                 .text_color(rgb(0x202020))
-                                .text_size(rems(1.125))
+                                .text_size(rems(CARD_TITLE_FONT_SIZE))
                                 .absolute()
                                 .bottom(px(self.zoom * 0.55
                                     + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
@@ -653,19 +867,28 @@ impl Launcher {
                                 .bg(rgba(0xdcece4f2))
                                 .hover(|s| s.bg(rgba(0xf0f8f3ff)))
                                 .when_some(action_tip, |d, tip| {
-                                    d.tooltip(move |_, cx| {
+                                    d.aria_label(tip.clone()).tooltip(move |_, cx| {
                                         cx.new(|_| crate::library::ActionTooltip(tip.clone()))
                                             .into()
                                     })
                                 })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if !this.primary_download_action(&key, cx) {
-                                        this.action(key.to_string(), action, cx);
-                                    }
-                                })),
-                        )
-                    }),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        match play_button {
+                                            Some(PlayButton::Quit) => {
+                                                this.action(key.to_string(), "quit", cx)
+                                            }
+                                            None if !this.primary_download_action(&key, cx) => {
+                                                this.action(key.to_string(), action, cx);
+                                            }
+                                            _ => {}
+                                        }
+                                    },
+                                )),
+                            )
+                        },
+                    ),
             )
             .child(
                 div()
@@ -744,7 +967,6 @@ impl Render for Launcher {
             self.reset_rows();
         }
         artwork::maintain(self, window, cx);
-        self.request_download_artwork(cx);
         let this = cx.weak_entity();
         let rows = list(self.rows.clone(), move |row, _, cx| {
             this.update(cx, |this, cx| {
@@ -759,6 +981,7 @@ impl Render for Launcher {
                     .copied()
                     .collect();
                 for &i in &indices {
+                    steam_deck::request(this, i, cx);
                     artwork::request(this, i, cx);
                 }
                 div()
@@ -807,7 +1030,7 @@ impl Render for Launcher {
             .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
                 if this.mods.is_some() && (this.menu || this.downloads_open) {
                     this.menu = false;
-                    this.downloads_open = false;
+                    this.close_downloads(cx);
                     cx.stop_propagation();
                     cx.notify();
                     return;
@@ -874,7 +1097,7 @@ impl Render for Launcher {
                 if key.key == "escape" {
                     if this.mods.is_some() && (this.menu || this.downloads_open) {
                         this.menu = false;
-                        this.downloads_open = false;
+                        this.close_downloads(cx);
                         cx.stop_propagation();
                         cx.notify();
                         return;
@@ -892,7 +1115,7 @@ impl Render for Launcher {
                         return;
                     }
                     if this.downloads_open {
-                        this.downloads_open = false;
+                        this.close_downloads(cx);
                         cx.stop_propagation();
                         cx.notify();
                         return;
@@ -933,22 +1156,31 @@ impl Render for Launcher {
                                     .child(icon("empty-search").size(rems(2.)))
                                     .child(if self.load_error.is_some() {
                                         "Could not load library"
+                                    } else if self.store.is_some_and(|index| STORES[index] == "xbox")
+                                        && self.status == 1
+                                    {
+                                        "No installed Xbox games match these filters"
                                     } else if self.games.is_empty() {
                                         "No games found"
                                     } else {
                                         "No matching games"
                                     })
-                                    .child(
-                                        div()
-                                            .text_size(rems(1.125))
-                                            .text_color(rgb(0xaabdb4))
-                                            .child(if self.load_error.is_some() {
-                                                "Refresh to try again."
-                                            } else if self.games.is_empty() {
-                                                "Refresh after signing in to a supported client."
-                                            } else {
-                                                "Try a different filter or search."
-                                            }),
+                                    .when(
+                                        self.load_error.is_some()
+                                            || !self.games.is_empty()
+                                            || self.store.map(|index| STORES[index]) != Some("xbox"),
+                                        |d| d.child(
+                                            div()
+                                                .text_size(rems(1.125))
+                                                .text_color(rgb(0xaabdb4))
+                                                .child(if self.load_error.is_some() {
+                                                    "Refresh to try again."
+                                                } else if self.games.is_empty() {
+                                                    "Refresh after signing in to a supported client."
+                                                } else {
+                                                    "Try a different filter or search."
+                                                }),
+                                        ),
                                     ),
                             ),
                     )

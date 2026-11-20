@@ -23,6 +23,157 @@ fn transfer_counters_are_bounded_and_never_claim_commit_from_percentage_alone() 
 }
 
 #[test]
+fn download_failures_are_visible_until_dismissed_or_restarted() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Manager::new(temp.path());
+    let key = "xbox:9NRLQNVKCGWC";
+    let request = Request {
+        key: key.into(),
+        operation: Operation::Install,
+        program: "must-not-run".into(),
+        args: vec![],
+        env: Default::default(),
+        completion: Completion::Ferestre {
+            record: temp.path().join("installed.json"),
+        },
+        version: String::new(),
+        previous_version: None,
+        game_dir: None,
+        game_lock: None,
+    };
+    manager.available(request).unwrap();
+    let path = manager.directory(key).join("progress.json");
+    let mut progress = Progress::starting(Operation::Install);
+    progress.phase = Phase::Failed;
+    progress.detail = Some(crate::ferestre::CONSOLE_ONLY_MESSAGE.into());
+    storage::write_json(&path, &progress).unwrap();
+    assert!(!manager.snapshot().contains_key(key));
+
+    progress.detail = Some("Xbox Store could not complete the download.".into());
+    storage::write_json(&path, &progress).unwrap();
+    assert_eq!(manager.snapshot().get(key), Some(&progress));
+
+    let seen = HashMap::from([(key.into(), progress.clone())]);
+    let mut resumed = progress.clone();
+    resumed.phase = Phase::Paused;
+    storage::write_json(&path, &resumed).unwrap();
+    manager.dismiss_failed(&seen);
+    assert_eq!(manager.snapshot().get(key), Some(&resumed));
+
+    storage::write_json(&path, &progress).unwrap();
+    let log = path.with_file_name("output.log");
+    fs::write(&log, "diagnostics").unwrap();
+    manager.dismiss_failed(&seen);
+    assert!(!path.exists());
+    assert!(log.is_file());
+
+    storage::write_json(&path, &progress).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(60))
+        .unwrap();
+    let reopened = Manager::new(temp.path());
+    assert!(!reopened.snapshot().contains_key(key));
+    assert!(!path.exists());
+    assert!(log.is_file());
+
+    storage::write_json(&path, &resumed).unwrap();
+    let reopened = Manager::new(temp.path());
+    assert_eq!(reopened.snapshot().get(key), Some(&resumed));
+}
+
+#[cfg(unix)]
+#[test]
+fn ferestre_workers_show_bytes_and_pause_the_downloader_without_a_terminal() {
+    for host in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Manager::new(temp.path());
+        let program = temp.path().join("client.py");
+        let record = temp.path().join("installed.json");
+        fs::write(&program, r#"import json, os, select, sys
+from pathlib import Path
+assert os.getsid(0) == os.getpid()
+assert os.environ['XODUS_PROGRESS'] == 'json'
+assert os.environ['FERESTRE_GUI_CANCELLATION'] == '1'
+def report(paused):
+    print('FERESTRE_PROGRESS ' + json.dumps(dict(schema=1, phase='downloading',
+          completedBytes=16*1024*1024, totalBytes=64*1024*1024, paused=paused, canPause=True)), flush=True)
+def control():
+    assert select.select([sys.stdin], [], [], 5)[0]
+    return sys.stdin.buffer.read(1)
+report(False)
+assert control() == b'p'
+report(True)
+assert control() == b'r'
+record = Path(sys.argv[1])
+(record.parent/'.xodus-streaming.msixvc').touch()
+record.write_text(json.dumps(dict(dir=str(record.parent))))
+"#).unwrap();
+        let key = "xbox:9NTESTGAME01";
+        manager
+            .available(Request {
+                key: key.into(),
+                operation: Operation::Install,
+                program: "python3".into(),
+                args: vec![
+                    program.to_string_lossy().into(),
+                    record.to_string_lossy().into(),
+                ],
+                env: Default::default(),
+                completion: Completion::Ferestre { record },
+                version: String::new(),
+                previous_version: None,
+                game_dir: None,
+                game_lock: None,
+            })
+            .unwrap();
+        let dir = manager.directory(key);
+        let worker = std::thread::spawn(move || {
+            if host {
+                assert!(
+                    Command::new("python3")
+                        .arg(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("src/downloads/host_worker.py")
+                        )
+                        .arg(dir)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                worker::run(&dir);
+            }
+        });
+        let wait = |phase| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let progress = manager.snapshot().remove(key).unwrap();
+                if progress.phase == phase {
+                    return progress;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "expected {phase:?}, got {progress:?}"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        };
+        let downloading = wait(Phase::Downloading);
+        assert!(downloading.controllable);
+        assert_eq!(downloading.percent, Some(25));
+        assert!(downloading.label().contains("16.0 of 64.0 MiB"));
+        manager.control(key, false).unwrap();
+        assert_eq!(wait(Phase::Paused).label(), "Paused");
+        manager.control(key, true).unwrap();
+        assert_eq!(wait(Phase::Complete).percent, Some(100));
+        worker.join().unwrap();
+    }
+}
+
+#[test]
 fn epic_update_plan_matches_exact_app_profile_platform_and_version() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("legendary");
@@ -131,6 +282,103 @@ fn a_client_refreshing_a_queued_manifest_commits_the_newer_version() {
 #[test]
 fn the_flatpak_worker_accepts_a_confirmed_newer_manifest_too() {
     worker_flow(true, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_progress_and_completion_are_readable_after_reopening() {
+    for host_worker in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Manager::new(temp.path());
+        let state = temp.path().join("state");
+        let cache = temp.path().join("cache");
+        let program = temp.path().join("runtime.py");
+        fs::write(
+            &program,
+            r#"import sys,time
+from pathlib import Path
+root=Path(sys.argv[1])
+cache=root/'cache'
+cache.mkdir()
+archive=cache/'.ferestre-runtime-11.0.0.tar.xz.42-0.part'
+with archive.open('wb') as output:
+    output.truncate(8*1024*1024)
+print('-- downloading runtime 11.0.0 (this is a one-time download)',file=sys.stderr,flush=True)
+deadline=time.monotonic()+5
+while not (root/'extract').exists() and time.monotonic()<deadline:
+    time.sleep(.025)
+print('-- unpacking runtime 11.0.0',file=sys.stderr,flush=True)
+while not (root/'finish').exists() and time.monotonic()<deadline:
+    time.sleep(.025)
+runtime=root/'state/runtimes/11.0.0'
+dll=runtime/'files/lib/wine/x86_64-windows/xgameruntime.dll'
+dll.parent.mkdir(parents=True)
+dll.touch()
+(runtime/'proton').touch()
+"#,
+        )
+        .unwrap();
+        let key = crate::ferestre::RUNTIME_JOB;
+        manager
+            .available(Request {
+                key: key.into(),
+                operation: Operation::Install,
+                program: "python3".into(),
+                args: vec![
+                    program.to_string_lossy().into(),
+                    temp.path().to_string_lossy().into(),
+                ],
+                env: Default::default(),
+                completion: Completion::FerestreRuntime { state, cache },
+                version: String::new(),
+                previous_version: None,
+                game_dir: None,
+                game_lock: None,
+            })
+            .unwrap();
+        let dir = manager.directory(key);
+        let worker = std::thread::spawn(move || {
+            if host_worker {
+                assert!(
+                    Command::new("python3")
+                        .arg(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("src/downloads/host_worker.py")
+                        )
+                        .arg(dir)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                worker::run(&dir);
+            }
+        });
+        drop(manager);
+        let reopened = Manager::new(temp.path());
+        let wait = |phase| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let progress = reopened.snapshot().remove(key).unwrap();
+                if progress.phase == phase {
+                    return progress;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "expected {phase:?}, got {progress:?}"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        };
+        let download = wait(Phase::Downloading);
+        assert!(download.label().ends_with("8.0 MiB received"));
+        assert!(!download.controllable && download.percent.is_none());
+        fs::write(temp.path().join("extract"), b"").unwrap();
+        assert!(wait(Phase::Installing).label().starts_with("Extracting"));
+        fs::write(temp.path().join("finish"), b"").unwrap();
+        assert_eq!(wait(Phase::Complete).percent, Some(100));
+        worker.join().unwrap();
+    }
 }
 
 #[cfg(unix)]

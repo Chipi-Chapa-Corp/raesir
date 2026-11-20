@@ -110,7 +110,7 @@ impl Launcher {
         });
         self.mods = Some(page);
         self.menu = false;
-        self.downloads_open = false;
+        self.close_downloads(cx);
         self.game_menu = None;
         cx.notify();
     }

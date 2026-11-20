@@ -22,6 +22,7 @@ pub fn scan(
     report.warnings.extend(warnings);
     let (catalog, warnings) = adapters::scan(&report, previous, prefixes);
     report.catalog = catalog;
+    crate::catalog::remove_host_mount_aliases(&mut report.catalog);
     report.linux_systems = crate::linux_support::scan(&report);
     crate::catalog::hydrate_os(&mut report);
     crate::catalog::hydrate_install_actions(&mut report);

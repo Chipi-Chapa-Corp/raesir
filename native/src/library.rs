@@ -1,24 +1,105 @@
-use exposed_games_backend::model::{LibraryGame, Os};
+use exposed_games_backend::model::{FerestreState, LibraryGame, Os};
 use gpui::RenderImage;
 use std::sync::Arc;
 
 pub struct ActionTooltip(pub String);
 
+pub struct XboxCompatibility {
+    pub badge: Option<&'static str>,
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub description: &'static str,
+}
+
+pub fn xbox_compatibility(game: &LibraryGame, host: Os) -> Option<XboxCompatibility> {
+    if game.store != "xbox" {
+        return None;
+    }
+    let (badge, label, icon, description) = if game.xbox_console_only {
+        (
+            None,
+            "Xbox console only",
+            "joystick",
+            "This Store edition only has Xbox console packages.",
+        )
+    } else if host != Os::Linux {
+        return None;
+    } else if game.ferestre_unsupported_package {
+        (
+            None,
+            "Windows package unsupported by Ferestre",
+            "windows",
+            "Microsoft lists a Windows package in a format Ferestre cannot install.",
+        )
+    } else {
+        match game.ferestre_test.as_ref().map(|test| test.state) {
+            Some(FerestreState::Playable) => (
+                Some("Tested"),
+                "Playable in Ferestre tests",
+                "verified-symbolic",
+                "Ferestre reports reaching gameplay for this Store edition.",
+            ),
+            Some(FerestreState::PlayableWithIssues) => (
+                Some("With issues"),
+                "Playable with issues in Ferestre tests",
+                "warning",
+                "Ferestre reports gameplay with known issues.",
+            ),
+            Some(FerestreState::Menus) => (
+                Some("Menus only"),
+                "Menus only in Ferestre tests",
+                "warning",
+                "Ferestre reached the menus. Gameplay was unavailable.",
+            ),
+            Some(FerestreState::Broken) => (
+                Some("Does not run"),
+                "Does not run in Ferestre tests",
+                "not-installed",
+                "Ferestre reports that this edition fails to start.",
+            ),
+            _ if game.ferestre_pc_package => (
+                None,
+                "PC package found · Gameplay unverified",
+                "install",
+                "Microsoft lists an MSIXVC PC package. Ferestre has no verified gameplay result for this edition.",
+            ),
+            _ => (
+                None,
+                "Compatibility unknown",
+                "face-sad-symbolic",
+                "No supported PC package or gameplay result has been verified for this Store edition.",
+            ),
+        }
+    };
+    Some(XboxCompatibility {
+        badge,
+        label,
+        icon,
+        description,
+    })
+}
+
 impl gpui::Render for ActionTooltip {
     fn render(
         &mut self,
-        _: &mut gpui::Window,
+        window: &mut gpui::Window,
         _: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
         use gpui::{prelude::*, *};
+        let rem = window.rem_size();
+        let max_width = (rem * 26.)
+            .min(window.viewport_size().width - rem)
+            .max(Pixels::ZERO);
         crate::header::pill()
+            .block()
             .rounded(rems(0.8))
             .px(rems(0.85))
             .py(rems(0.55))
-            .max_w(rems(26.))
+            .max_w(max_width)
             .whitespace_normal()
-            .text_size(rems(0.95))
-            .child(self.0.clone())
+            .text_size(rems(crate::CARD_TITLE_FONT_SIZE))
+            .line_height(rems(1.45))
+            .child(div().min_w_0().child(self.0.clone()))
     }
 }
 
@@ -40,6 +121,42 @@ pub fn xbox_runtime_notice(
             .linux_systems
             .iter()
             .any(|system| !system.xbox_runtime)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FerestreSetup {
+    Install,
+    SignIn,
+    Runtime,
+    MaintainCli,
+    MaintainRuntime,
+}
+
+pub fn ferestre_setup(
+    report: &exposed_games_backend::model::Report,
+    scope: u8,
+    store: Option<&str>,
+) -> Option<FerestreSetup> {
+    if store != Some("xbox")
+        || scope == 2
+        || report.host_os != Os::Linux
+        || !exposed_games_backend::ferestre::setup_supported()
+    {
+        return None;
+    }
+    let host = report
+        .linux_systems
+        .iter()
+        .find(|system| system.root == "/")?;
+    if host.managed_ferestre && !host.ferestre_runtime {
+        Some(FerestreSetup::Runtime)
+    } else if (host.managed_ferestre || host.ferestre_client) && !host.ferestre_library {
+        Some(FerestreSetup::SignIn)
+    } else if !host.xbox_runtime {
+        Some(FerestreSetup::Install)
+    } else {
+        None
+    }
 }
 
 pub struct Game {
@@ -143,10 +260,22 @@ impl Game {
             return true;
         }
         let systems = &self.source.client_os;
-        if scope == 1 && (host == Os::Unknown || !systems.contains(&host)) {
+        let unsupported_here = host == Os::Linux
+            && self.source.ferestre_unsupported_package
+            && self.installed(1, host) != 1;
+        if scope == 1
+            && (self.source.xbox_console_only
+                || unsupported_here
+                || host == Os::Unknown
+                || !systems.contains(&host))
+        {
             return false;
         }
-        if scope == 2 && !systems.iter().any(|os| *os != host && *os != Os::Unknown) {
+        if scope == 2
+            && !self.source.xbox_console_only
+            && !(host != Os::Windows && self.source.ferestre_unsupported_package)
+            && !systems.iter().any(|os| *os != host && *os != Os::Unknown)
+        {
             return false;
         }
         status == 0 || (status == 1) == (self.installed(scope, host) != 0)
@@ -181,6 +310,35 @@ mod tests {
         assert!(!xbox_runtime_notice(&report, 0, None));
         report.linux_systems.clear();
         assert!(!xbox_runtime_notice(&report, 0, None));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn ferestre_setup_targets_only_the_current_linux_installation() {
+        let mut report: exposed_games_backend::model::Report =
+            serde_json::from_value(serde_json::json!({
+                "host_os":"linux","games":[],"libraries":[],"volumes":[],"warnings":[],
+                "owned_account":null,
+                "linux_systems":[{"root":"/","xbox_runtime":false},
+                                 {"root":"/mounted/linux","xbox_runtime":true}]
+            }))
+            .unwrap();
+        assert!(ferestre_setup(&report, 0, None).is_none());
+        assert!(ferestre_setup(&report, 2, Some("xbox")).is_none());
+        assert!(ferestre_setup(&report, 1, Some("xbox")) == Some(FerestreSetup::Install));
+        report.linux_systems[0].xbox_runtime = true;
+        assert!(ferestre_setup(&report, 0, Some("xbox")).is_none());
+        report.linux_systems[0].managed_ferestre = true;
+        assert!(ferestre_setup(&report, 0, Some("xbox")) == Some(FerestreSetup::Runtime));
+        report.linux_systems[0].ferestre_runtime = true;
+        assert!(ferestre_setup(&report, 0, Some("xbox")) == Some(FerestreSetup::SignIn));
+        report.linux_systems[0].ferestre_runtime = false;
+        report.linux_systems[0].ferestre_library = true;
+        assert!(ferestre_setup(&report, 0, Some("xbox")) == Some(FerestreSetup::Runtime));
+        report.linux_systems[0].ferestre_runtime = true;
+        assert!(ferestre_setup(&report, 0, Some("xbox")).is_none());
+        report.host_os = Os::Windows;
+        assert!(ferestre_setup(&report, 0, Some("xbox")).is_none());
     }
 
     fn game(client: Vec<Os>, installed: Vec<(Os, &str)>) -> Game {
@@ -249,6 +407,20 @@ mod tests {
         let foreign = game(vec![Os::Windows], vec![]);
         assert!(!foreign.matches("", None, 0, 1, Os::Linux));
         assert!(foreign.matches("", None, 0, 2, Os::Linux));
+    }
+
+    #[test]
+    fn unsupported_xbox_pc_packages_are_visible_under_other_os_on_linux() {
+        let mut xbox = game(vec![Os::Linux], vec![]);
+        xbox.source.ferestre_unsupported_package = true;
+        assert!(xbox.matches("", None, 0, 0, Os::Linux));
+        assert!(!xbox.matches("", None, 0, 1, Os::Linux));
+        assert!(xbox.matches("", None, 0, 2, Os::Linux));
+        assert!(!xbox.matches("", None, 1, 2, Os::Linux));
+
+        let mut installed = game(vec![Os::Linux], vec![(Os::Linux, "installed")]);
+        installed.source.ferestre_unsupported_package = true;
+        assert!(installed.matches("", None, 1, 1, Os::Linux));
     }
 
     #[test]

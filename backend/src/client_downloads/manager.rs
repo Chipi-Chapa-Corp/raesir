@@ -59,6 +59,7 @@ impl Manager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        jobs.retain(|_, job| job.progress.phase != Phase::Failed);
         for job in jobs.values_mut() {
             job.progress.controllable = false;
             if job.progress.phase == Phase::Starting && job.progress.operation == Operation::Update
@@ -109,7 +110,20 @@ impl Manager {
 
     fn save(&self) {
         let jobs = self.jobs.read().unwrap_or_else(|e| e.into_inner());
-        let _ = storage::write_json(&self.file, &*jobs);
+        let active: HashMap<_, _> = jobs
+            .iter()
+            .filter(|(_, job)| job.progress.phase != Phase::Failed)
+            .collect();
+        let _ = storage::write_json(&self.file, &active);
+    }
+
+    pub fn dismiss_failed(&self, seen: &HashMap<String, Progress>) {
+        self.jobs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, job| {
+                job.progress.phase != Phase::Failed || seen.get(key) != Some(&job.progress)
+            });
     }
 
     fn discover(state: &mut State, report: &Report) {
@@ -651,6 +665,7 @@ fn progress(client: Client, row: &Value, operation: Operation, paused: bool) -> 
         error: None,
         controllable,
         detail: None,
+        scheduled_at: None,
     })
 }
 

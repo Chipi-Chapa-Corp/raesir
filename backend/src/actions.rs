@@ -63,6 +63,9 @@ pub fn resolve(report: &Report, key: &str, kind: &str) -> Result<GameAction, Str
         .iter()
         .find(|g| g.key == key)
         .ok_or("Game is no longer in the library")?;
+    if kind == "install" {
+        check_install(game)?;
+    }
     let library = (kind == "library")
         .then(|| library_action(game))
         .transpose()?;
@@ -85,21 +88,39 @@ pub fn resolve(report: &Report, key: &str, kind: &str) -> Result<GameAction, Str
     {
         return Err("This Steam action no longer matches the selected game".into());
     }
-    if kind == "install" {
-        check_install(game)?;
-    }
     if ["launch", "uninstall"].contains(&kind) && !crate::catalog::local(&game.installations) {
         return Err("This game is not installed on this OS".into());
     }
     Ok(action.clone())
 }
 
+pub fn install_limitation(game: &LibraryGame) -> Option<&'static str> {
+    if game.xbox_console_only {
+        Some(crate::ferestre::CONSOLE_ONLY_MESSAGE)
+    } else if game.ferestre_unsupported_package {
+        Some(crate::ferestre::UNSUPPORTED_PACKAGE_MESSAGE)
+    } else {
+        None
+    }
+}
+
 fn check_install(game: &LibraryGame) -> Result<(), String> {
+    if let Some(reason) = install_limitation(game) {
+        return Err(reason.into());
+    }
     if !game.in_library || !game.client_os.contains(&Os::host()) {
         return Err("This game is not available to install on this OS".into());
     }
     if crate::catalog::local(&game.installations) {
         return Err("This game is already installed on this OS".into());
+    }
+    if let Some(action) = &game.install
+        && action.client == "Ferestre"
+        && !matches!(&action.target, ActionTarget::Command { args, .. }
+            if matches!(args.as_slice(), [.., operation, id]
+                if operation == "install" && id == &game.id))
+    {
+        return Err("Refresh the Xbox library to install this game".into());
     }
     Ok(())
 }
@@ -124,7 +145,18 @@ pub(crate) fn install_action(game: &LibraryGame) -> Result<GameAction, String> {
     Ok(action)
 }
 
+pub fn library_handoff_allowed(game: &LibraryGame) -> bool {
+    game.client != "Ferestre"
+        && game
+            .library
+            .as_ref()
+            .is_none_or(|action| action.client != "Ferestre")
+}
+
 fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
+    if !library_handoff_allowed(game) {
+        return Err("Manage this Xbox game in Exposed Games".into());
+    }
     if !game.client_os.contains(&Os::host()) {
         return Err("This game's client library is on another OS".into());
     }
@@ -159,7 +191,6 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
         "Epic" | "Epic Preview" => "epic",
         "Lutris" => "lutris",
         "Bottles" => "bottles",
-        "Ferestre" => "ferestre",
         "Xodus Nexus" | "Nexus" => "nexus",
         _ => return Err("No client library navigation is available on this OS".into()),
     };
@@ -374,6 +405,26 @@ pub fn support(project: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_ferestre_library_handoffs_cannot_open_the_launcher() {
+        let mut game = crate::catalog::entry("xbox", "9NTESTGAME01", "Fixture", vec![], "fixture");
+        game.in_library = true;
+        game.client_os.push(Os::host());
+        let old_handoff =
+            crate::catalog::command("Ferestre", "/fixture/ferestre.AppImage".into(), vec![]);
+        game.library = Some(old_handoff.clone());
+        game.install = Some(old_handoff);
+        assert!(library_action(&game).is_err());
+        assert!(!can_install(&game));
+
+        game.install = Some(crate::catalog::command(
+            "Ferestre",
+            "/fixture/ferestre".into(),
+            vec!["install".into(), game.id.clone()],
+        ));
+        assert!(can_install(&game));
+    }
 
     #[test]
     fn steam_launch_url_preserves_argument_boundaries_and_url_delimiters() {

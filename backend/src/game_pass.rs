@@ -1,10 +1,10 @@
 //! Public PC Game Pass catalog. Catalog membership is separate from purchases.
-use crate::{catalog, model::*, storage};
+use crate::{catalog, ferestre, model::*, storage};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::Path,
@@ -12,13 +12,20 @@ use std::{
 };
 
 pub(crate) const SOURCE: &str = "game-pass:pc";
+const COMPATIBILITY_VERSION: u8 = 3;
 // Same PC collection, platform and subscription context as Xbox's catalog page.
 const LIST: &str = "https://catalog.gamepass.com/sigls/v3?id=97c6c862-d28a-4907-a3d5-c401f2296a53&language=en-us&market=US&platformContext=pc&subscriptionContext=cfq7ttc0khs0";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct Catalog {
     updated: u64,
     games: Vec<LibraryGame>,
+    #[serde(default)]
+    bundle_products: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    ferestre_bundles: Option<BTreeSet<String>>,
+    #[serde(default)]
+    compatibility_version: u8,
 }
 
 fn now() -> u64 {
@@ -43,7 +50,14 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
     if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
         return Ok(false);
     }
-    if !force && cached(dir).is_some_and(|c| now().saturating_sub(c.updated) < 24 * 60 * 60) {
+    if !force
+        && cached(dir).is_some_and(|c| {
+            c.bundle_products.is_some()
+                && c.ferestre_bundles.is_some()
+                && c.compatibility_version == COMPATIBILITY_VERSION
+                && now().saturating_sub(c.updated) < 24 * 60 * 60
+        })
+    {
         return Ok(false);
     }
     let client = Client::builder()
@@ -54,28 +68,84 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
         .map_err(|e| e.to_string())?;
     let ids = product_ids(&json(&client, LIST)?)?;
     let mut games = Vec::with_capacity(ids.len());
+    let mut bundle_products = BTreeMap::new();
+    let mut unmarked_bundles = BTreeMap::new();
     for batch in ids.chunks(50) {
-        let url = format!(
-            "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds={}&market=US&languages=en-US",
-            batch.join(",")
-        );
-        let response = json(&client, &url)?;
-        let products = response["Products"]
-            .as_array()
-            .ok_or("Invalid Game Pass product metadata")?;
-        games.extend(products.iter().filter_map(product));
+        for value in products(&client, batch)? {
+            if let Some(game) = product(&value) {
+                let members = bundle_members(&value);
+                let mut primary = members.iter().filter(|(_, marked)| **marked);
+                match (primary.next(), primary.next()) {
+                    (Some((id, _)), None) => {
+                        bundle_products.insert(game.id.clone(), (*id).to_owned());
+                    }
+                    (None, None) if game.store == "xbox" && !members.is_empty() => {
+                        unmarked_bundles.insert(
+                            game.id.clone(),
+                            members.into_keys().map(str::to_owned).collect::<Vec<_>>(),
+                        );
+                    }
+                    _ => {}
+                }
+                games.push(game);
+            }
+        }
     }
     let received: BTreeSet<_> = games.iter().map(|g| g.id.as_str()).collect();
     if ids.iter().any(|id| !received.contains(id.as_str())) {
         return Err("Game Pass returned an incomplete catalog; keeping the previous list".into());
     }
+    let primary_ids: Vec<_> = games
+        .iter()
+        .filter(|game| game.store == "xbox")
+        .filter_map(|game| bundle_products.get(&game.id))
+        .chain(unmarked_bundles.values().flatten())
+        .filter(|id| !received.contains(id.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut primary_games = Vec::new();
+    for batch in primary_ids.chunks(50) {
+        primary_games.extend(products(&client, batch)?.iter().filter_map(product));
+    }
+    let products_by_id: BTreeMap<_, _> = games
+        .iter()
+        .chain(&primary_games)
+        .map(|game| (game.id.as_str(), game))
+        .collect();
+    for (bundle, members) in unmarked_bundles {
+        if let Some(id) = matching_bundle_game(
+            products_by_id[bundle.as_str()],
+            members
+                .iter()
+                .filter_map(|id| products_by_id.get(id.as_str()).copied()),
+        ) {
+            bundle_products.insert(bundle, id.to_owned());
+        }
+    }
+    let ferestre_bundles =
+        ferestre_bundles(&games, &bundle_products, products_by_id.values().copied());
     let catalog = Catalog {
         updated: now(),
         games,
+        bundle_products: Some(bundle_products),
+        ferestre_bundles: Some(ferestre_bundles),
+        compatibility_version: COMPATIBILITY_VERSION,
     };
     storage::write_json(&dir.join("game-pass.json"), &catalog)?;
     apply(report, &catalog);
     Ok(true)
+}
+
+fn products(client: &Client, ids: &[String]) -> Result<Vec<Value>, String> {
+    let url = format!(
+        "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds={}&market=US&languages=en-US",
+        ids.join(",")
+    );
+    let mut response = json(client, &url)?;
+    serde_json::from_value(response["Products"].take())
+        .map_err(|_| "Invalid Game Pass product metadata".into())
 }
 
 fn json(client: &Client, url: &str) -> Result<Value, String> {
@@ -143,6 +213,14 @@ fn product(value: &Value) -> Option<LibraryGame> {
     game.is_game = Some(true);
     game.client = "Xbox".into();
     game.client_os = vec![Os::Windows];
+    if game.store == "xbox" {
+        use crate::ferestre::PackageSupport;
+        let support = crate::ferestre::package_support(value);
+        game.xbox_console_only = support == PackageSupport::ConsoleOnly;
+        game.ferestre_unsupported_package =
+            cfg!(target_os = "linux") && support == PackageSupport::Unsupported;
+        game.ferestre_pc_package = support == PackageSupport::Msixvc;
+    }
     let images = localized["Images"].as_array();
     game.cover = images
         .and_then(|images| {
@@ -178,6 +256,47 @@ fn product(value: &Value) -> Option<LibraryGame> {
     Some(game)
 }
 
+fn bundle_members(value: &Value) -> BTreeMap<&str, bool> {
+    let mut members = BTreeMap::new();
+    let rows = value["DisplaySkuAvailabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| &row["Sku"]["Properties"])
+        .filter(|properties| properties["IsBundle"] == true)
+        .filter_map(|properties| properties["BundledSkus"].as_array())
+        .flatten();
+    for row in rows {
+        if let Some(id) = row["BigId"].as_str().filter(|id| store_id(id)) {
+            let primary = members.entry(id).or_insert(false);
+            *primary |= row["IsPrimary"] == true;
+        }
+    }
+    members
+}
+
+fn bundle_title_key(title: &str) -> String {
+    let title = title.to_lowercase();
+    let title = title.strip_suffix(" + launcher").unwrap_or(&title);
+    let title = title
+        .strip_suffix(" for windows")
+        .or_else(|| title.strip_suffix(" - windows"))
+        .unwrap_or(title);
+    title_key(title)
+}
+
+fn matching_bundle_game<'a>(
+    bundle: &LibraryGame,
+    members: impl Iterator<Item = &'a LibraryGame>,
+) -> Option<&'a str> {
+    let title = bundle_title_key(&bundle.title);
+    let mut matching = members.filter(|game| {
+        game.store == "xbox" && game.id != bundle.id && bundle_title_key(&game.title) == title
+    });
+    let game = matching.next()?;
+    matching.next().is_none().then_some(game.id.as_str())
+}
+
 fn title_key(title: &str) -> String {
     let title = title.to_lowercase().replace('&', " and ");
     let mut key: String = title
@@ -204,16 +323,95 @@ fn title_key(title: &str) -> String {
     key
 }
 
+fn ferestre_bundles<'a>(
+    games: &[LibraryGame],
+    bundle_products: &BTreeMap<String, String>,
+    primary_games: impl Iterator<Item = &'a LibraryGame>,
+) -> BTreeSet<String> {
+    let pc_games: BTreeMap<_, _> = primary_games
+        .filter(|game| game.store == "xbox" && game.ferestre_pc_package)
+        .map(|game| (game.id.as_str(), bundle_title_key(&game.title)))
+        .collect();
+    games
+        .iter()
+        .filter(|game| {
+            game.store == "xbox"
+                && bundle_products
+                    .get(&game.id)
+                    .and_then(|id| pc_games.get(id.as_str()))
+                    .is_some_and(|title| *title == bundle_title_key(&game.title))
+        })
+        .map(|game| game.id.clone())
+        .collect()
+}
+
+fn local_ferestre(host: Os) -> Option<ferestre::Client> {
+    if host != Os::Linux || !ferestre::library_cached(&crate::platform::home()?) {
+        return None;
+    }
+    ferestre::Client::discover()
+}
+
 fn apply(report: &mut Report, pass: &Catalog) {
+    let client = local_ferestre(report.host_os);
+    apply_with_install_actions(report, pass, |id| {
+        Some(client.as_ref()?.action(vec!["install".into(), id.into()]))
+    });
+}
+
+fn apply_with_install_actions(
+    report: &mut Report,
+    pass: &Catalog,
+    ferestre_install: impl Fn(&str) -> Option<GameAction>,
+) {
     report.catalog.retain(|game| game.source != SOURCE);
     // Reset catalog-derived flags before applying the current membership list.
     for game in report.catalog.iter_mut().filter(|g| g.store == "xbox") {
+        if game.game_pass_only
+            && game
+                .install
+                .as_ref()
+                .is_some_and(|a| a.client == "Ferestre")
+        {
+            game.install = None;
+            if game.launch.is_none() {
+                game.client = "Xbox".into();
+                if !game.installations.iter().any(|i| i.os == Os::Linux) {
+                    game.client_os.retain(|os| *os != Os::Linux);
+                }
+            }
+        }
         game.game_pass = false;
     }
-    for incoming in &pass.games {
+    let bundle_product = |game: &LibraryGame| pass.bundle_products.as_ref()?.get(&game.id);
+    // Visit base products first so catalog entries can share the same card
+    // even when the base game is not installed.
+    for incoming in pass
+        .games
+        .iter()
+        .filter(|game| bundle_product(game).is_none())
+        .chain(
+            pass.games
+                .iter()
+                .filter(|game| bundle_product(game).is_some()),
+        )
+    {
+        let primary = bundle_product(incoming);
+        let ferestre_primary = primary.filter(|_| {
+            report.host_os == Os::Linux
+                && pass
+                    .ferestre_bundles
+                    .as_ref()
+                    .is_some_and(|bundles| bundles.contains(&incoming.id))
+        });
         let existing = report.catalog.iter_mut().find(|game| {
             game.store == incoming.store
                 && (game.id == incoming.id
+                    || (game.store == "xbox"
+                        && primary.is_some_and(|id| id == &game.id)
+                        && (ferestre_primary.is_some()
+                            || game.title == game.id
+                            || game.title.eq_ignore_ascii_case(&incoming.title)))
                     || (matches!(game.store.as_str(), "ubisoft" | "ea")
                         && title_key(&game.title) == title_key(&incoming.title)))
         });
@@ -231,8 +429,50 @@ fn apply(report: &mut Report, pass: &Catalog) {
             if game.cover.is_none() {
                 game.cover = incoming.cover.clone();
             }
+            if game.store == "xbox" && game.id == incoming.id {
+                // A dated account catalog already provides package evidence.
+                // Fill gaps for titles that only had a Windows install record.
+                if !game.xbox_console_only
+                    && !game.ferestre_unsupported_package
+                    && !game.ferestre_pc_package
+                {
+                    game.ferestre_pc_package = incoming.ferestre_pc_package;
+                    game.ferestre_unsupported_package = incoming.ferestre_unsupported_package;
+                    game.xbox_console_only =
+                        incoming.xbox_console_only && game.installations.is_empty();
+                }
+            }
+            if ferestre_primary == Some(&game.id)
+                && !game.xbox_console_only
+                && !game.ferestre_unsupported_package
+            {
+                game.ferestre_pc_package = true;
+            }
         } else {
-            report.catalog.push(incoming.clone());
+            let mut game = incoming.clone();
+            if let Some(id) = ferestre_primary {
+                game.id.clone_from(id);
+                game.key = format!("xbox:{id}");
+                game.ferestre_pc_package = true;
+            }
+            report.catalog.push(game);
+        }
+    }
+    if report.host_os == Os::Linux {
+        for game in report.catalog.iter_mut().filter(|game| {
+            game.store == "xbox"
+                && game.game_pass
+                && game.game_pass_only
+                && game.ferestre_pc_package
+                && !game.xbox_console_only
+                && !game.ferestre_unsupported_package
+                && !catalog::local(&game.installations)
+        }) {
+            if let Some(action) = ferestre_install(&game.id) {
+                game.client = action.client.clone();
+                catalog::add_os(&mut game.client_os, Os::Linux);
+                game.install = Some(action);
+            }
         }
     }
     report
@@ -308,6 +548,7 @@ mod tests {
         let pass = Catalog {
             updated: 1,
             games: vec![incoming],
+            ..Catalog::default()
         };
         for _ in 0..3 {
             apply(&mut report, &pass);
@@ -324,6 +565,7 @@ mod tests {
             &Catalog {
                 updated: 2,
                 games: vec![],
+                ..Catalog::default()
             },
         );
         assert!(!report.catalog[0].game_pass);
@@ -332,6 +574,179 @@ mod tests {
             "losing Game Pass access does not prove a purchase"
         );
         assert_eq!(report.catalog[0].installations.len(), 1);
+    }
+
+    #[test]
+    fn xbox_catalog_bundle_uses_the_installed_primary_product_card() {
+        let mut report: Report = serde_json::from_value(json!({"host_os":"linux",
+            "games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null}))
+        .unwrap();
+        let mut bundle = fixture();
+        bundle["Properties"]["PackageIdentityName"] = json!("");
+        bundle["DisplaySkuAvailabilities"] = json!([{"Sku": {"Properties": {
+            "IsBundle": true, "BundledSkus": [
+                {"BigId": "9P5786PJB9RP", "IsPrimary": true},
+                {"BigId": "9PGW18NPBZV5", "IsPrimary": false}
+            ]
+        }}}]);
+        let incoming = product(&bundle).unwrap();
+        let primary = bundle_members(&bundle)
+            .into_iter()
+            .find(|(_, marked)| *marked)
+            .unwrap()
+            .0;
+        let mut installed = catalog::entry("xbox", primary, &incoming.title, vec![], "installed");
+        installed.installations.push(Installation {
+            library: "installed".into(),
+            path: "fixture".into(),
+            os: Os::Windows,
+            state: "installed".into(),
+            last_seen: 0,
+        });
+        report.catalog.push(installed);
+        let pass = Catalog {
+            updated: 1,
+            bundle_products: Some(BTreeMap::from([(incoming.id.clone(), primary.to_owned())])),
+            games: vec![incoming],
+            ..Catalog::default()
+        };
+        apply(&mut report, &pass);
+        assert_eq!(report.catalog.len(), 1);
+        assert_eq!(report.catalog[0].id, primary);
+        assert_eq!(report.catalog[0].installations.len(), 1);
+        assert!(report.catalog[0].game_pass_only);
+    }
+
+    #[test]
+    fn unmarked_bundle_resolves_the_game_with_the_matching_title() {
+        let value = json!({
+            "ProductId": "9NM395CH685J",
+            "ProductKind": "Game",
+            "LocalizedProperties": [{"ProductTitle": "Minecraft Legends for Windows + Launcher"}],
+            "DisplaySkuAvailabilities": [{"Sku": {"Properties": {
+                "IsBundle": true,
+                "BundledSkus": [
+                    {"BigId": "9PGW18NPBZV5", "IsPrimary": false},
+                    {"BigId": "9N98Z825TNFW", "IsPrimary": false}
+                ]
+            }}}]
+        });
+        let bundle = product(&value).unwrap();
+        let mut game = catalog::entry(
+            "xbox",
+            "9N98Z825TNFW",
+            "Minecraft Legends - Windows",
+            vec![],
+            "fixture",
+        );
+        game.ferestre_pc_package = true;
+        let launcher = catalog::entry(
+            "xbox",
+            "9PGW18NPBZV5",
+            "Minecraft Launcher",
+            vec![],
+            "fixture",
+        );
+        let members = bundle_members(&value);
+        assert_eq!(
+            members,
+            BTreeMap::from([(game.id.as_str(), false), (launcher.id.as_str(), false)])
+        );
+        assert_eq!(
+            matching_bundle_game(&bundle, [&launcher, &game].into_iter()),
+            Some(game.id.as_str())
+        );
+        assert_eq!(matching_bundle_game(&bundle, [&launcher].into_iter()), None);
+        let alternate = catalog::entry(
+            "xbox",
+            "9ALTGAME0001",
+            "Minecraft Legends",
+            vec![],
+            "fixture",
+        );
+        assert_eq!(
+            matching_bundle_game(&bundle, [&game, &alternate].into_iter()),
+            None
+        );
+        let primary = BTreeMap::from([(bundle.id.clone(), game.id.clone())]);
+        let expected = BTreeSet::from([bundle.id.clone()]);
+        assert_eq!(
+            ferestre_bundles(&[bundle], &primary, [&game, &launcher].into_iter()),
+            expected
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compatible_game_pass_bundle_installs_the_primary_product_through_ferestre() {
+        let mut report: Report = serde_json::from_value(json!({"host_os":"linux",
+            "games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null}))
+        .unwrap();
+        let bundle = "9PM3J18QM4Q3";
+        let primary = "9P5786PJB9RP";
+        let mut game_pass = catalog::entry("xbox", bundle, "Minecraft Dungeons II", vec![], SOURCE);
+        game_pass.client = "Xbox".into();
+        game_pass.client_os = vec![Os::Windows];
+        game_pass.in_library = true;
+        game_pass.game_pass = true;
+        game_pass.game_pass_only = true;
+
+        let mut base = catalog::entry("xbox", primary, &game_pass.title, vec![], "fixture");
+        base.ferestre_pc_package = true;
+        let mut windows_install = base.clone();
+        windows_install.client = "Xbox".into();
+        windows_install.client_os.push(Os::Windows);
+        windows_install.installations.push(Installation {
+            library: "fixture".into(),
+            path: "fixture".into(),
+            os: Os::Windows,
+            state: "unavailable".into(),
+            last_seen: 0,
+        });
+        report.catalog.push(windows_install);
+
+        let action = |id: &str| {
+            Some(catalog::command(
+                "Ferestre",
+                "ferestre-fixture".into(),
+                vec!["install".into(), id.into()],
+            ))
+        };
+        let mut pass = Catalog {
+            games: vec![game_pass],
+            bundle_products: Some(BTreeMap::from([(bundle.into(), primary.into())])),
+            ..Catalog::default()
+        };
+        // A previous catalog can reuse package evidence already discovered for the base game.
+        apply_with_install_actions(&mut report, &pass, action);
+        assert_eq!(report.catalog[0].id, primary);
+        assert!(crate::actions::can_install(&report.catalog[0]));
+        assert_eq!(report.catalog[0].installations.len(), 1);
+
+        apply_with_install_actions(&mut report, &pass, |_| None);
+        assert_eq!(report.catalog[0].client_os, vec![Os::Windows]);
+        assert!(!crate::actions::can_install(&report.catalog[0]));
+
+        // Without a local record, Microsoft package metadata resolves the same edition.
+        pass.ferestre_bundles = Some(ferestre_bundles(
+            &pass.games,
+            pass.bundle_products.as_ref().unwrap(),
+            std::iter::once(&base),
+        ));
+        report.catalog.clear();
+        for _ in 0..2 {
+            apply_with_install_actions(&mut report, &pass, action);
+            assert_eq!(report.catalog.len(), 1);
+            let game = &report.catalog[0];
+            assert!(game.game_pass && game.game_pass_only);
+            assert!(game.client_os.contains(&Os::Linux));
+            assert!(
+                matches!(crate::actions::resolve(&report, &game.key, "install").unwrap().target,
+                    ActionTarget::Command { args, .. } if args == ["install", primary])
+            );
+        }
+        apply_with_install_actions(&mut report, &Catalog::default(), action);
+        assert!(report.catalog.is_empty());
     }
 
     #[test]
@@ -349,6 +764,7 @@ mod tests {
         let pass = Catalog {
             updated: 1,
             games: vec![product(&fixture()).unwrap(), xbox],
+            ..Catalog::default()
         };
         apply(&mut report, &pass);
         assert_eq!(report.catalog.len(), 2);
@@ -362,6 +778,7 @@ mod tests {
             &Catalog {
                 updated: 2,
                 games: vec![],
+                ..Catalog::default()
             },
         );
         assert_eq!(report.catalog.len(), 1);

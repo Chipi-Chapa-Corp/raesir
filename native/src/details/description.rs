@@ -153,13 +153,15 @@ impl DetailsPage {
                     );
                 }
                 Block::Image { url, alt, link } => {
+                    let viewer_url = exposed_games_backend::artwork::xbox_viewer_url(url);
+                    let url = viewer_url.as_ref().map_or(url.as_str(), |url| url.as_str());
                     if self.failed.contains(url) {
                         if !alt.is_empty() {
                             body = body.child(muted(alt.clone()));
                         }
                         continue;
                     }
-                    self.image(url, cx);
+                    self.viewer_image(url, cx);
                     let image = self.images.get(url).cloned();
                     let ratio = image
                         .as_ref()
@@ -210,15 +212,19 @@ impl DetailsPage {
                     let player = slot.player.clone();
                     let error = slot.error.clone();
                     let loading = slot.loading;
+                    let poster_url = poster
+                        .as_deref()
+                        .and_then(exposed_games_backend::artwork::xbox_viewer_url);
+                    let poster = poster_url
+                        .as_ref()
+                        .map(|url| url.as_str())
+                        .or(poster.as_deref());
                     if visible.get()
                         && let Some(poster) = poster
                     {
-                        self.image(poster, cx);
+                        self.viewer_image(poster, cx);
                     }
-                    let poster = poster
-                        .as_ref()
-                        .and_then(|url| self.images.get(url))
-                        .cloned();
+                    let poster = poster.and_then(|url| self.images.get(url)).cloned();
                     let owner = cx.weak_entity();
                     let url = url.clone();
                     let dimensions = *dimensions;

@@ -38,6 +38,24 @@ pub fn local(installs: &[Installation]) -> bool {
         .any(|i| i.os == Os::host() && ["installed", "external"].contains(&i.state.as_str()))
 }
 
+pub(crate) fn remove_host_mount_aliases(games: &mut [LibraryGame]) {
+    for game in games.iter_mut().filter(|game| game.installations.len() > 1) {
+        let originals: Vec<_> = game
+            .installations
+            .iter()
+            .filter(|install| !install.path.starts_with("/run/host/"))
+            .map(|install| (install.path.clone(), install.os))
+            .collect();
+        game.installations.retain(|install| {
+            crate::platform::host_mount_alias(&install.path).is_none_or(|original| {
+                !originals
+                    .iter()
+                    .any(|(path, os)| path == original && *os == install.os)
+            })
+        });
+    }
+}
+
 /// Also recognize old snapshots that predate Steam's explicit demo metadata.
 pub fn demo_title(title: &str) -> bool {
     let words: Vec<_> = title
@@ -74,6 +92,10 @@ pub fn entry(
         installations: installs,
         client: store.into(),
         client_os,
+        xbox_console_only: false,
+        ferestre_unsupported_package: false,
+        ferestre_pc_package: false,
+        ferestre_test: None,
         cover: None,
         launch: None,
         library: None,
@@ -254,29 +276,31 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
 }
 
 fn steam_cover(id: &str, libraries: &[Source]) -> String {
-    for source in libraries {
-        let library = Path::new(&source.path);
-        let root = if library.file_name().is_some_and(|n| n == "steamapps") {
-            library.parent().unwrap_or(library)
-        } else {
-            library
-        };
-        let cache = root.join("appcache/librarycache");
-        for path in [
-            cache.join(format!("{id}_library_600x900.jpg")),
-            cache.join(id).join("library_600x900.jpg"),
-        ] {
-            if path.is_file() {
-                return path.to_string_lossy().into_owned();
+    for name in ["library_600x900.jpg", "library_capsule.jpg"] {
+        for source in libraries {
+            let library = Path::new(&source.path);
+            let root = if library.file_name().is_some_and(|n| n == "steamapps") {
+                library.parent().unwrap_or(library)
+            } else {
+                library
+            };
+            let cache = root.join("appcache/librarycache");
+            for path in [
+                cache.join(format!("{id}_{name}")),
+                cache.join(id).join(name),
+            ] {
+                if path.is_file() {
+                    return path.to_string_lossy().into_owned();
+                }
             }
-        }
-        if let Ok(entries) = std::fs::read_dir(cache.join(id)) {
-            let mut paths: Vec<_> = entries
+            if let Some(path) = std::fs::read_dir(cache.join(id))
+                .into_iter()
                 .flatten()
-                .map(|e| e.path().join("library_600x900.jpg"))
-                .collect();
-            paths.sort();
-            if let Some(path) = paths.into_iter().find(|p| p.is_file()) {
+                .flatten()
+                .map(|entry| entry.path().join(name))
+                .filter(|path| path.is_file())
+                .min()
+            {
                 return path.to_string_lossy().into_owned();
             }
         }
@@ -413,7 +437,12 @@ pub fn visible(game: &LibraryGame) -> bool {
 /// Populate client install handoffs, including snapshots saved before install actions existed.
 pub fn hydrate_install_actions(report: &mut Report) {
     for game in &mut report.catalog {
-        if !game.in_library || !game.client_os.contains(&Os::host()) || local(&game.installations) {
+        if game.xbox_console_only
+            || game.ferestre_unsupported_package
+            || !game.in_library
+            || !game.client_os.contains(&Os::host())
+            || local(&game.installations)
+        {
             game.install = None;
         } else if game.install.is_none() {
             game.install = crate::actions::install_action(game).ok();
@@ -483,6 +512,12 @@ mod tests {
         let cache = dir.path().join("appcache/librarycache");
         let portrait = cache.join("3527290/asset-hash/library_600x900.jpg");
         std::fs::create_dir_all(portrait.parent().unwrap()).unwrap();
+        let capsule = portrait.with_file_name("library_capsule.jpg");
+        std::fs::write(&capsule, b"capsule").unwrap();
+        assert_eq!(
+            steam_cover("3527290", &libraries),
+            capsule.to_string_lossy()
+        );
         std::fs::write(&portrait, b"portrait").unwrap();
         assert_eq!(
             steam_cover("3527290", &libraries),

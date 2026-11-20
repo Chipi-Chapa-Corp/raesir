@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 pub(super) fn busy(dir: &Path) -> bool {
     fs::OpenOptions::new()
@@ -44,6 +45,11 @@ fn run_inner(dir: &Path) -> Result<(), String> {
         return Err("Downloads are disabled in diagnostics".into());
     }
     let mut progress = Progress::starting(request.operation);
+    let ferestre_game = request.completion.is_ferestre_game();
+    progress.controllable = !request.completion.is_runtime() && !ferestre_game;
+    if ferestre_game {
+        progress.detail = Some("Checking the Xbox license and package…".into());
+    }
     let _game_lease = if let Some(path) = &request.game_lock {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -91,10 +97,25 @@ fn run_inner(dir: &Path) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log);
+    if ferestre_game {
+        command
+            .env("XODUS_PROGRESS", "json")
+            .env("FERESTRE_GUI_CANCELLATION", "1")
+            .stdin(Stdio::piped());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        // A downloader may try to open /dev/tty even when its standard input
+        // is redirected. An unattended job must never inherit that terminal.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     #[cfg(windows)]
     {
@@ -108,9 +129,12 @@ fn run_inner(dir: &Path) -> Result<(), String> {
     let mut child = command
         .spawn()
         .map_err(|_| "Could not start the installed game client helper")?;
-    progress.phase = Phase::Downloading;
+    if !ferestre_game && !request.completion.is_runtime() {
+        progress.phase = Phase::Downloading;
+    }
     let mut generation = serde_json::Value::Null;
     let mut suspended = vec![];
+    let mut ferestre_error = None;
     loop {
         if log_position
             .metadata()
@@ -124,32 +148,44 @@ fn run_inner(dir: &Path) -> Result<(), String> {
         {
             generation = control["generation"].clone();
             let resume = control["resume"].as_bool().unwrap_or(true);
-            match suspend(child.id(), !resume, &mut suspended) {
-                Ok(()) => {
-                    progress.phase = if resume {
-                        Phase::Downloading
-                    } else {
-                        Phase::Paused
-                    };
-                    progress.detail = None;
+            if ferestre_game {
+                if let Some(input) = child.stdin.as_mut() {
+                    let _ = input.write_all(if resume { b"r" } else { b"p" });
                 }
-                Err(_) => progress.detail = Some("Could not change the download state".into()),
+            } else {
+                match suspend(child.id(), !resume, &mut suspended) {
+                    Ok(()) => {
+                        progress.phase = if resume {
+                            Phase::Downloading
+                        } else {
+                            Phase::Paused
+                        };
+                        progress.detail = None;
+                    }
+                    Err(_) => progress.detail = Some("Could not change the download state".into()),
+                }
             }
         }
-        if progress.phase != Phase::Paused {
+        if progress.phase != Phase::Paused || ferestre_game {
             if let Ok(mut file) = fs::File::open(dir.join("output.log")) {
                 let length = file.metadata().map(|m| m.len()).unwrap_or(0);
                 let _ = file.seek(SeekFrom::Start(length.saturating_sub(65536)));
                 let mut bytes = Vec::new();
                 if file.take(65536).read_to_end(&mut bytes).is_ok() {
                     let text = String::from_utf8_lossy(&bytes);
-                    if let Some(percent) = text.lines().rev().find_map(parse_progress) {
+                    if let Completion::FerestreRuntime { cache, .. } = &request.completion {
+                        runtime_progress(cache, &text, &mut progress);
+                    } else if ferestre_game {
+                        update_ferestre_progress(&text, &mut progress);
+                        ferestre_error = ferestre_failure(&text).or(ferestre_error);
+                    } else if let Some(percent) = text.lines().rev().find_map(parse_progress) {
                         progress.percent = Some(percent);
                     }
                 }
             }
         }
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            let extracting = progress.phase == Phase::Installing;
             progress.phase = if status.success()
                 && request
                     .completion
@@ -160,8 +196,24 @@ fn run_inner(dir: &Path) -> Result<(), String> {
                 Phase::Failed
             };
             progress.detail = (progress.phase == Phase::Failed).then(|| {
-                "The client could not finish this download. Sign in to the client and retry.".into()
+                if request.completion.is_runtime() {
+                    if extracting {
+                        "Could not extract or install the Xbox runtime".into()
+                    } else {
+                        "Could not download or verify the Xbox runtime".into()
+                    }
+                } else if ferestre_game {
+                    ferestre_error
+                        .unwrap_or("Ferestre did not finish installing this Xbox game")
+                        .into()
+                } else {
+                    "The client could not finish this download. Sign in to the client and retry."
+                        .into()
+                }
             });
+            if ferestre_game && progress.phase == Phase::Failed {
+                progress.controllable = true;
+            }
             progress.percent = (progress.phase == Phase::Complete).then_some(100);
             storage::write_json(&dir.join("progress.json"), &progress)?;
             break;
@@ -170,6 +222,148 @@ fn run_inner(dir: &Path) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(400));
     }
     Ok(())
+}
+
+fn update_ferestre_progress(log: &str, progress: &mut Progress) {
+    let Some(event) = log.lines().rev().find_map(|line| {
+        let event: serde_json::Value =
+            serde_json::from_str(line.strip_prefix("FERESTRE_PROGRESS ")?).ok()?;
+        (event["schema"].as_u64() == Some(1)).then_some(event)
+    }) else {
+        // Older clients may emit only simple transfer counters.
+        if let Some(percent) = log.lines().rev().find_map(parse_progress) {
+            progress.phase = Phase::Downloading;
+            progress.percent = Some(percent);
+            progress.detail = None;
+        }
+        return;
+    };
+    progress.controllable = event["canPause"] == true;
+    progress.percent = None;
+    let (phase, label) = match event["phase"].as_str() {
+        Some("metadata") => (
+            Phase::Starting,
+            "Checking the Xbox license and package…".into(),
+        ),
+        Some("downloading") => {
+            let done = event["completedBytes"].as_u64().unwrap_or_default();
+            let total = event["totalBytes"]
+                .as_u64()
+                .filter(|&total| total > 0 && done <= total);
+            progress.percent = total.map(|total| (done.saturating_mul(100) / total).min(99) as u8);
+            let mib = 1024. * 1024.;
+            let label = if event["paused"] == true {
+                "Paused".into()
+            } else if let Some(total) = total {
+                format!(
+                    "Downloading · {:.1} of {:.1} MiB",
+                    done as f64 / mib,
+                    total as f64 / mib
+                )
+            } else {
+                format!("Downloading · {:.1} MiB received", done as f64 / mib)
+            };
+            (
+                if event["paused"] == true {
+                    Phase::Paused
+                } else {
+                    Phase::Downloading
+                },
+                label,
+            )
+        }
+        Some("finalizing" | "complete") => {
+            (Phase::Installing, "Finishing the Xbox installation…".into())
+        }
+        _ => return,
+    };
+    progress.phase = phase;
+    progress.detail = Some(label);
+}
+
+fn ferestre_failure(log: &str) -> Option<&'static str> {
+    log.lines().rev().find_map(|line| {
+        if line == "Selection failed" || line.starts_with("no PC package found") {
+            return Some("Ferestre could not select a compatible PC package for this Xbox edition");
+        }
+        if line.starts_with("No .msixvc file found") {
+            if log.contains("the package list came back empty") {
+                return Some("The Xbox Store returned no downloadable PC package. Check again before retrying.");
+            }
+            return Some("This Xbox game uses a package format that Ferestre cannot install");
+        }
+        let stage = line
+            .strip_prefix("FERESTRE_TRANSFER_DIAGNOSTIC_V1 ")?
+            .split_whitespace()
+            .next()?;
+        match stage {
+            "authentication" => Some("Xbox sign-in failed. Sign in again and retry"),
+            "license" => Some("The Store account could not obtain this Xbox game's license"),
+            "metadata-invalid" | "transfer-integrity" => {
+                Some("The Xbox game package failed verification")
+            }
+            "metadata-network" | "transfer-connect" | "transfer-timeout" | "transfer-idle"
+            | "transfer-range" | "transfer-eof" | "transfer-status" => {
+                Some("The Xbox download connection failed. Retry to continue")
+            }
+            "disk-space" | "transfer-io" => {
+                Some("Ferestre could not write the game data. Check free space and permissions")
+            }
+            "installation-busy" => Some("The game is running or its files are in use"),
+            _ => None,
+        }
+    })
+}
+
+/// Ferestre reports runtime stages on stderr. Its current CLI does not emit a
+/// byte total, so use the size of its partial archive without guessing a percent.
+fn runtime_progress(cache: &Path, log: &str, progress: &mut Progress) {
+    let (phase, detail) = log
+        .lines()
+        .rev()
+        .find_map(|line| {
+            if line.starts_with("-- unpacking runtime ") {
+                Some((Phase::Installing, "Extracting the Xbox runtime…".into()))
+            } else if line.starts_with("-- verified the signature of ferestre-runtime-") {
+                Some((
+                    Phase::Installing,
+                    "Preparing to extract the Xbox runtime…".into(),
+                ))
+            } else {
+                let version = line
+                    .strip_prefix("-- downloading runtime ")?
+                    .split_whitespace()
+                    .next()?;
+                let prefix = format!(".ferestre-runtime-{version}.tar.xz.");
+                let bytes = fs::read_dir(cache)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with(&prefix) && name.ends_with(".part")
+                    })
+                    .filter_map(|entry| entry.metadata().ok().filter(|metadata| metadata.is_file()))
+                    .map(|metadata| metadata.len())
+                    .max()
+                    .unwrap_or_default();
+                let detail = if bytes == 0 {
+                    "Waiting for the Xbox runtime download…".into()
+                } else if bytes < 1024 * 1024 {
+                    format!("Downloading Xbox runtime · {} KiB received", bytes / 1024)
+                } else {
+                    format!(
+                        "Downloading Xbox runtime · {:.1} MiB received",
+                        bytes as f64 / (1024. * 1024.)
+                    )
+                };
+                Some((Phase::Downloading, detail))
+            }
+        })
+        .unwrap_or_else(|| (Phase::Starting, "Checking the Xbox runtime release…".into()));
+    progress.phase = phase;
+    progress.detail = Some(detail);
 }
 
 #[cfg(unix)]

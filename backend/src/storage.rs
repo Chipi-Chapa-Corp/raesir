@@ -55,7 +55,9 @@ pub fn cached(dir: &Path) -> Option<Report> {
         report.catalog = crate::catalog::from_report(&report);
     }
     report.catalog.retain(crate::catalog::visible);
+    crate::catalog::remove_host_mount_aliases(&mut report.catalog);
     crate::adapters::hydrate_game_pass(&mut report.catalog);
+    crate::xbox_store::load(dir, &mut report);
     crate::game_pass::load(dir, &mut report);
     crate::catalog::hydrate_os(&mut report);
     crate::catalog::hydrate_install_actions(&mut report);
@@ -135,6 +137,7 @@ pub fn scan_and_save(dir: &Path, options: &ScanOptions) -> Report {
     let online = load::<Vec<EpicOnlineLibrary>>(&dir.join("epic-owned.json"), &mut warnings)
         .unwrap_or_default();
     let mut report = inventory::scan(options, &owned, &online, previous.as_ref());
+    crate::xbox_store::refresh(dir, &mut report);
     crate::game_pass::load(dir, &mut report);
     report.warnings.extend(warnings);
     if let Err(e) = write_json(&dir.join("inventory.json"), &report) {

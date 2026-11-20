@@ -39,6 +39,18 @@ pub struct Backend {
     handoff_scan: Mutex<std::time::Instant>,
     game_checking: AtomicBool,
     mounts: mount::Manager,
+    partition_mounts: Mutex<HashMap<String, Result<(), String>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PartitionChoice {
+    Mount,
+    Ignore,
+}
+
+pub fn rememberable_partition(id: &str) -> bool {
+    // Linux discovery falls back to a device path when there is no filesystem UUID.
+    !id.is_empty() && id != "unknown" && !id.starts_with("/dev/")
 }
 
 #[derive(Clone)]
@@ -103,6 +115,7 @@ impl Backend {
             handoff_scan: Mutex::new(std::time::Instant::now()),
             game_checking: AtomicBool::new(false),
             mounts: Default::default(),
+            partition_mounts: Default::default(),
         })
     }
 
@@ -119,6 +132,7 @@ impl Backend {
             report.warnings.extend(self.mod_manager.recover_staging());
             self.steam_actions(&mut report);
             self.observe_handoffs(&report);
+            exposed_games_backend::ferestre::mark_tested_titles(&mut report);
         }
         for game in &mut report.catalog {
             game.mods = self.mod_manager.summary(game);
@@ -141,6 +155,13 @@ impl Backend {
         report
     }
 
+    pub(crate) fn latest_report(&self) -> Option<Arc<Report>> {
+        self.report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn cached(&self) -> Result<Option<Arc<Report>>, String> {
         let report = if let Some(path) = &self.fixture {
             Some(
@@ -148,7 +169,13 @@ impl Backend {
                     .map_err(|e| e.to_string())?,
             )
         } else {
-            storage::cached(&self.data)
+            storage::cached(&self.data).map(|mut report| {
+                // Volume state can change between sessions while the catalog stays cached.
+                if report.host_os == Os::Linux {
+                    report.volumes = exposed_games_backend::platform::volumes().0;
+                }
+                report
+            })
         };
         Ok(report.map(|r| self.set(r)))
     }
@@ -159,7 +186,73 @@ impl Backend {
         if self.fixture.is_some() {
             return self.cached()?.ok_or("No fixture library".into());
         }
-        Ok(self.set(storage::scan_and_save(&self.data, &ScanOptions::default())))
+        let warnings = self.mount_remembered_partitions();
+        Ok(self.scan_inventory(warnings))
+    }
+
+    fn scan_inventory(&self, warnings: Vec<String>) -> Arc<Report> {
+        let mut report = storage::scan_and_save(&self.data, &ScanOptions::default());
+        report.warnings.extend(warnings);
+        self.set(report)
+    }
+
+    fn mount_remembered_partitions(&self) -> Vec<String> {
+        if Os::host() != Os::Linux || std::env::var_os("EXPOSED_GAMES_DISABLE_MOUNTS").is_some() {
+            return Vec::new();
+        }
+        let choices = self.partition_choices();
+        if !choices
+            .values()
+            .any(|choice| *choice == PartitionChoice::Mount)
+        {
+            return Vec::new();
+        }
+        let (volumes, _) = exposed_games_backend::platform::volumes();
+        self.apply_remembered_mounts(&volumes, &choices, |id| self.mounts.mount(id).map(|_| ()))
+    }
+
+    fn apply_remembered_mounts(
+        &self,
+        volumes: &[Volume],
+        choices: &HashMap<String, PartitionChoice>,
+        mount: impl Fn(&str) -> Result<(), String>,
+    ) -> Vec<String> {
+        volumes
+            .iter()
+            .filter(|volume| {
+                volume.mountpoints.is_empty()
+                    && rememberable_partition(&volume.id)
+                    && choices.get(&volume.id) == Some(&PartitionChoice::Mount)
+                    && !self
+                        .partition_mounts
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains_key(&volume.id)
+            })
+            .filter_map(|volume| {
+                let result = mount(&volume.id);
+                self.record_partition_mount(&volume.id, &result);
+                result
+                    .err()
+                    .map(|error| format!("Automatic mount failed for {}. {error}", volume.device))
+            })
+            .collect()
+    }
+
+    fn record_partition_mount(&self, id: &str, result: &Result<(), String>) {
+        self.partition_mounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.into(), result.clone());
+    }
+
+    pub fn partition_mount_failures(&self) -> HashMap<String, String> {
+        self.partition_mounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|(id, result)| Some((id.clone(), result.as_ref().err()?.clone())))
+            .collect()
     }
 
     pub fn refresh_game_pass(&self, force: bool) -> Result<Option<Arc<Report>>, String> {
@@ -240,7 +333,8 @@ impl Backend {
         self.scan()
     }
 
-    pub fn mount(&self, id: &str) -> Result<Arc<Report>, String> {
+    pub fn mount(&self, id: &str, remember: bool) -> Result<Arc<Report>, String> {
+        let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         self.ready()?;
         if self.fixture.is_some() {
             return Err("Mounting is disabled in the fixture profile".into());
@@ -248,8 +342,13 @@ impl Backend {
         if std::env::var_os("EXPOSED_GAMES_DISABLE_MOUNTS").is_some() {
             return Err("Mounting is disabled in this diagnostic profile".into());
         }
-        self.mounts.mount(id)?;
-        self.scan()
+        let result = self.mounts.mount(id).map(|_| ());
+        self.record_partition_mount(id, &result);
+        result?;
+        if self.set_partition_choice(id, remember.then_some(PartitionChoice::Mount)) {
+            self.save_ui();
+        }
+        Ok(self.scan_inventory(Vec::new()))
     }
 
     pub fn action(&self, key: &str, kind: &str) -> Result<String, String> {
@@ -308,9 +407,13 @@ impl Backend {
                 .remove(key)
                 .filter(|p| p.operation == Operation::Update && !matches!(p.phase, Phase::Complete))
                 .ok_or("This game has no available update")?;
-            let _ = progress;
             self.control_download(key, true)?;
-            return Ok("Update started".into());
+            return Ok(if key.starts_with("steam:") && !progress.controllable {
+                "Opened Steam Downloads"
+            } else {
+                "Update requested"
+            }
+            .into());
         }
         let action = actions::resolve(&report, key, kind)?;
         if kind == "install"
@@ -411,16 +514,49 @@ impl Backend {
         Ok(result)
     }
 
+    pub(crate) fn running_games(
+        &self,
+        keys: impl Iterator<Item = String>,
+    ) -> Result<HashMap<String, Vec<exposed_games_backend::game_sessions::ProcessId>>, String> {
+        let report = self.latest_report().ok_or("Library is still loading")?;
+        exposed_games_backend::game_sessions::running(
+            keys.filter_map(|key| report.catalog.iter().find(|game| game.key == key)),
+        )
+    }
+
+    pub(crate) fn quit_game(
+        &self,
+        key: &str,
+        processes: &[exposed_games_backend::game_sessions::ProcessId],
+    ) -> Result<(), String> {
+        self.ready()?;
+        if self.fixture.is_some() && !exposed_games_backend::mods::diagnostic_launch_enabled() {
+            return Err("Game actions are disabled in this fixture profile".into());
+        }
+        let report = self.latest_report().ok_or("Library is still loading")?;
+        let game = report
+            .catalog
+            .iter()
+            .find(|game| game.key == key)
+            .ok_or("Game is no longer in the library")?;
+        exposed_games_backend::game_sessions::quit(game, processes)
+    }
+
     fn save_handoffs(&self) {
         let handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = storage::write_json(&self.data.join("client-downloads.json"), &*handoffs);
+        let active: HashMap<_, _> = handoffs
+            .iter()
+            .filter(|(_, progress)| progress.phase != Phase::Failed)
+            .collect();
+        let _ = storage::write_json(&self.data.join("client-downloads.json"), &active);
     }
 
     fn observe_handoffs(&self, report: &Report) {
         self.handoffs_loaded.get_or_init(|| {
             if let Ok(bytes) = std::fs::read(self.data.join("client-downloads.json"))
-                && let Ok(saved) = serde_json::from_slice::<HashMap<String, Progress>>(&bytes)
+                && let Ok(mut saved) = serde_json::from_slice::<HashMap<String, Progress>>(&bytes)
             {
+                saved.retain(|_, progress| progress.phase != Phase::Failed);
                 *self.handoffs.lock().unwrap_or_else(|e| e.into_inner()) = saved;
             }
         });
@@ -529,9 +665,11 @@ impl Backend {
             // Adopt downloads already in progress, including after restarting
             // Exposed Games. A missing payload by itself is not a download operation.
             if !jobs.contains_key(&game.key)
-                || jobs
-                    .get(&game.key)
-                    .is_some_and(|job| job.progress.phase == Phase::Available)
+                || jobs.get(&game.key).is_some_and(|job| {
+                    job.progress.phase == Phase::Available
+                        || (!job.progress.controllable
+                            && job.progress.operation == Operation::Update)
+                })
             {
                 let operation = if steam_control::installed_payload(Path::new(&client.root), appid)
                 {
@@ -615,7 +753,7 @@ impl Backend {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .filter(|(_, job)| job.progress.active())
+            .filter(|(_, job)| job.progress.active() || job.progress.phase == Phase::Available)
             .map(|(key, job)| (key.clone(), job.clone()))
             .collect();
         for (key, snapshot) in pending {
@@ -630,7 +768,9 @@ impl Backend {
                 snapshot.appid,
                 snapshot.progress.operation,
             );
-            let live = if snapshot.progress.operation.downloads() && snapshot.progress.controllable
+            let live = if snapshot.progress.operation.downloads()
+                && snapshot.progress.controllable
+                && snapshot.progress.phase != Phase::Available
             {
                 self.steam
                     .control(&snapshot.root, snapshot.appid, "status")
@@ -644,9 +784,18 @@ impl Backend {
             if progress.phase == Phase::Available && snapshot.progress.phase == Phase::Starting {
                 progress.phase = Phase::Starting;
             }
-            if progress.phase == Phase::Starting && snapshot.started.elapsed().as_secs() > 60 {
+            if progress.phase == Phase::Starting
+                && snapshot.progress.controllable
+                && snapshot.started.elapsed().as_secs() > 60
+            {
                 progress.phase = Phase::Failed;
                 progress.error = Some(steam_control::Error::Rejected);
+            }
+            if progress.phase == Phase::Starting
+                && !snapshot.progress.controllable
+                && progress.operation == Operation::Install
+            {
+                progress.detail = Some("Finish the installation in Steam".into());
             }
             let mut jobs = self.steam_jobs.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(job) = jobs.get_mut(&key)
@@ -670,9 +819,19 @@ impl Backend {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            && self.client_downloads.control(&report, key, resume)?
         {
-            return Ok(());
+            if resume
+                && let Some(reason) = report
+                    .catalog
+                    .iter()
+                    .find(|game| game.key == key)
+                    .and_then(actions::install_limitation)
+            {
+                return Err(reason.into());
+            }
+            if self.client_downloads.control(&report, key, resume)? {
+                return Ok(());
+            }
         }
         if self.downloads.request(key).is_some() {
             return self.downloads.control(key, resume);
@@ -692,6 +851,11 @@ impl Backend {
                 return Err("Pause this download in the game client".into());
             }
             self.steam.preserve(&snapshot.root);
+            if snapshot.progress.operation == Operation::Update {
+                return actions::dispatch(&ActionTarget::Url {
+                    url: "steam://open/downloads".into(),
+                });
+            }
             actions::dispatch(&ActionTarget::Url {
                 url: format!("steam://install/{}", snapshot.appid),
             })?;
@@ -726,6 +890,7 @@ impl Backend {
                         Phase::Paused
                     };
                     job.progress.error = None;
+                    job.progress.scheduled_at = None;
                 }
                 Err(error) => job.progress.error = Some(error),
             }
@@ -772,6 +937,23 @@ impl Backend {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|_, job| job.progress.phase != Phase::Complete);
+    }
+
+    pub fn dismiss_download_failures(&self, seen: &HashMap<String, Progress>) {
+        self.downloads.dismiss_failed(seen);
+        self.client_downloads.dismiss_failed(seen);
+        self.handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, progress| {
+                progress.phase != Phase::Failed || seen.get(key) != Some(progress)
+            });
+        self.steam_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, job| {
+                job.progress.phase != Phase::Failed || seen.get(key) != Some(&job.progress)
+            });
     }
 
     pub fn automatic_game_updates(&self) -> bool {
@@ -823,7 +1005,11 @@ impl Backend {
         );
         if self.automatic_game_updates() {
             for (key, progress) in self.current_download_progress() {
-                if progress.operation == Operation::Update && progress.phase == Phase::Available {
+                if progress.operation == Operation::Update
+                    && progress.phase == Phase::Available
+                    && (!key.starts_with("steam:")
+                        || (progress.controllable && progress.scheduled_at.is_none()))
+                {
                     if let Err(error) = self.control_download(&key, true) {
                         errors.push(error);
                     }
@@ -1030,6 +1216,43 @@ impl Backend {
         actions::support(project)
     }
 
+    pub fn configure_ferestre(
+        &self,
+        setup: crate::library::FerestreSetup,
+    ) -> Result<(Arc<Report>, Result<(), String>), String> {
+        use crate::library::FerestreSetup;
+        use exposed_games_backend::ferestre;
+        self.ready()?;
+        if self.fixture.is_some() {
+            return Err("Ferestre setup is disabled in the fixture profile".into());
+        }
+        if matches!(setup, FerestreSetup::Install | FerestreSetup::MaintainCli)
+            && self.downloads.snapshot().iter().any(|(key, progress)| {
+                (key.starts_with("xbox:") || key == ferestre::RUNTIME_JOB)
+                    && (progress.active()
+                        || progress.phase == exposed_games_backend::steam_control::Phase::Paused)
+            })
+        {
+            return Err("Finish any Xbox downloads before changing the Xbox CLI.".into());
+        }
+        let result = match setup {
+            FerestreSetup::Install => ferestre::install_managed(false),
+            FerestreSetup::SignIn => ferestre::sign_in(),
+            FerestreSetup::Runtime => ferestre::start_runtime(&self.downloads, false),
+            FerestreSetup::MaintainCli => ferestre::install_managed(true),
+            FerestreSetup::MaintainRuntime => ferestre::start_runtime(&self.downloads, true),
+        };
+        Ok((self.scan()?, result))
+    }
+
+    pub fn refresh_ferestre(&self) -> Result<(), String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return Ok(());
+        }
+        exposed_games_backend::ferestre::refresh_library()
+    }
+
     pub fn cached_details(
         &self,
         game: &LibraryGame,
@@ -1119,6 +1342,16 @@ impl Backend {
                 .ok_or("No local diagnostic image".into());
         }
         artwork::fetch(&game, &self.cache.join("artwork")).map(|art| art.path)
+    }
+
+    pub fn detail_viewer_media(&self, url: &str) -> Result<String, String> {
+        self.ready()?;
+        artwork::xbox_viewer_image(
+            url,
+            &self.cache.join("viewer-artwork"),
+            self.fixture.is_none(),
+        )
+        .unwrap_or_else(|| self.detail_media(url))
     }
 
     pub fn cached_achievement_icon(&self, url: &str) -> Option<Arc<gpui::RenderImage>> {
@@ -1257,6 +1490,52 @@ impl Backend {
         );
     }
 
+    pub fn partition_choices(&self) -> HashMap<String, PartitionChoice> {
+        let ui = self.ui().lock().unwrap_or_else(|e| e.into_inner());
+        ui.get("partition_choices")
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, value)| {
+                let choice = match value.as_str()? {
+                    "mount" => PartitionChoice::Mount,
+                    "ignore" => PartitionChoice::Ignore,
+                    _ => return None,
+                };
+                Some((id.clone(), choice))
+            })
+            .collect()
+    }
+
+    pub fn set_partition_choice(&self, id: &str, choice: Option<PartitionChoice>) -> bool {
+        if !rememberable_partition(id) {
+            return false;
+        }
+        let mut ui = self.ui().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(choice) = choice {
+            let setting = ui
+                .entry("partition_choices")
+                .or_insert_with(|| serde_json::json!({}));
+            if !setting.is_object() {
+                *setting = serde_json::json!({});
+            }
+            let value = serde_json::Value::from(match choice {
+                PartitionChoice::Mount => "mount",
+                PartitionChoice::Ignore => "ignore",
+            });
+            setting
+                .as_object_mut()
+                .unwrap()
+                .insert(id.into(), value.clone())
+                != Some(value)
+        } else {
+            ui.get_mut("partition_choices")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|choices| choices.remove(id))
+                .is_some()
+        }
+    }
+
     pub fn save_ui(&self) {
         let _save = self.ui_save.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ui) = self.ui.get() else { return };
@@ -1384,7 +1663,12 @@ mod tests {
                 .unwrap_err()
                 .contains("fixture")
         );
-        assert!(backend.mount("fixture").unwrap_err().contains("fixture"));
+        assert!(
+            backend
+                .mount("fixture", true)
+                .unwrap_err()
+                .contains("fixture")
+        );
         backend.shutdown().unwrap();
         backend.shutdown().unwrap();
         assert!(backend.scan().is_err());
@@ -1451,6 +1735,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fixture(dir.path()).filters(), (0, 2, Some(3), 1));
+    }
+
+    #[test]
+    fn remember_persists_choices_for_individual_partition_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = fixture(dir.path());
+        backend.set_zoom(19.);
+        assert!(backend.set_partition_choice("windows-uuid", Some(PartitionChoice::Mount)));
+        assert!(backend.set_partition_choice("linux-uuid", Some(PartitionChoice::Ignore)));
+        assert!(!backend.set_partition_choice("/dev/sda1", Some(PartitionChoice::Mount)));
+        backend.save_ui();
+
+        let reopened = fixture(dir.path());
+        let choices = reopened.partition_choices();
+        assert_eq!(choices.len(), 2);
+        assert!(choices.get("windows-uuid") == Some(&PartitionChoice::Mount));
+        assert!(choices.get("linux-uuid") == Some(&PartitionChoice::Ignore));
+        assert!(reopened.set_partition_choice("windows-uuid", None));
+        reopened.save_ui();
+        let reopened = fixture(dir.path());
+        assert!(!reopened.partition_choices().contains_key("windows-uuid"));
+        assert!(reopened.partition_choices().contains_key("linux-uuid"));
+        assert_eq!(reopened.zoom(), 19.);
+    }
+
+    #[test]
+    fn remembers_mount_failures_and_clears_them_after_a_successful_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = fixture(dir.path());
+        let mut volumes = ["denied", "success", "ignored", "new", "mounted"].map(|id| Volume {
+            id: id.into(),
+            device: format!("/dev/{id}"),
+            filesystem: "ntfs".into(),
+            ..Volume::default()
+        });
+        volumes[4].mountpoints.push("/media/fixture".into());
+        let choices = HashMap::from([
+            ("denied".into(), PartitionChoice::Mount),
+            ("success".into(), PartitionChoice::Mount),
+            ("ignored".into(), PartitionChoice::Ignore),
+            ("mounted".into(), PartitionChoice::Mount),
+        ]);
+        assert!(backend.partition_mount_failures().is_empty());
+        let warnings = backend.apply_remembered_mounts(&volumes, &choices, |id| match id {
+            "denied" => Err("Permission denied".into()),
+            "success" => Ok(()),
+            _ => panic!("unexpected mount attempt for {id}"),
+        });
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            backend.partition_mount_failures(),
+            HashMap::from([("denied".into(), "Permission denied".into())])
+        );
+        assert!(
+            backend
+                .apply_remembered_mounts(&volumes, &choices, |id| {
+                    panic!("unexpected second mount attempt for {id}")
+                })
+                .is_empty()
+        );
+        backend.record_partition_mount("denied", &Ok(()));
+        assert!(backend.partition_mount_failures().is_empty());
     }
 
     #[test]

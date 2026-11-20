@@ -32,7 +32,10 @@ thunderstore-engine = "=0.3.0"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+minisign-verify = "0.3"
+tar = { version = "0.4", default-features = false }
 zbus = { version = "5", features = ["blocking-api"] }
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

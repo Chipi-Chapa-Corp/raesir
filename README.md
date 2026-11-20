@@ -49,6 +49,10 @@ cargo run --release
 
 Click a game to see its details. Right-click for game actions. Use **Ctrl + / − / 0** to adjust text size.
 
+When you select **Play**, the button shows **Starting…** until Exposed Games
+detects the game process. The pause icon then offers **Quit game**. Play returns
+after the game exits. Linux game process tracking uses Python 3 on the host.
+
 Steam reviews default to the store’s Summary view: most helpful reviews from the
 past 30 days alongside recently posted reviews, in English and across all purchase
 types. Review type, purchase type, language, date range, playtime at review, and
@@ -217,7 +221,15 @@ Windows needs a compatible filesystem reader to access Linux partitions, such as
 
 ## Xbox games on Linux
 
-Install [Ferestre](https://github.com/icex/ferestre) or [Xodus Nexus](https://github.com/domsvoboda/xodus-nexus), set up your supported games there, and refresh Exposed Games. Compatibility depends on the game. Exposed Games shows Xbox's own games rather than duplicating the other stores listed in the Xbox app.
+On x86-64 Linux, open the Xbox library and select **Set up Xbox** if no Xbox client is installed.
+Exposed Games verifies the Ferestre release signature and installs the CLI and its supporting files in your user data directory.
+Select **Install Xbox runtime** to download the runtime before or after signing in.
+The Xbox library and Downloads show the current stage and bytes received. The background download continues if you close Exposed Games.
+Select **Sign in to Xbox** to open the Microsoft sign-in window and import the account's library. Game downloads and launches use the controls in Exposed Games.
+
+Exposed Games also detects an existing [Ferestre](https://github.com/icex/ferestre) or
+[Xodus Nexus](https://github.com/domsvoboda/xodus-nexus) installation.
+Compatibility depends on the game. The Xbox library shows Xbox PC titles, with games managed by other stores listed under those stores.
 
 ## License
 

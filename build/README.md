@@ -24,15 +24,23 @@ flatpak install flathub org.freedesktop.Platform//25.08 \
 
 Cargo dependencies are vendored from `Cargo.lock`; compilation runs offline
 inside the SDK, using its Rust extension and runtime ABI. CI runs backend tests
-first on the validation runner, including their private D-Bus fixtures.
+alongside the package builds, including their private D-Bus fixtures. Pages
+publication waits for validation and the Flatpak build. The GitHub release
+also waits for the Windows package.
 The package includes libmpv with the software render API used by Exposed Games.
 AVIF decoding and mod archive extraction use the runtime's dav1d and libarchive.
 The manifest grants host filesystem and command access for game clients, with
 explicit access to Flatpak clients' data directories. Client command wrappers
 forward arguments through `flatpak-spawn --host`.
+Partition discovery runs the host's `lsblk` through the same bridge. Mounts
+and unmounts use the filtered system bus connection to UDisks, with the host
+desktop handling authorization.
 
-Build staging, compiler output, and the temporary builder cache are removed on
-exit. Final bundles and the Pages repository remain in ignored `dist/`.
+Local builds remove their temporary staging and build directories on exit. CI
+restores the Flatpak modules and compiled Rust dependencies built against the
+same SDK. Cargo uses its fingerprints to rebuild crates affected by source or
+lockfile changes. Only tagged releases build the Pages repository in CI. Final
+bundles and any Pages repository remain in ignored `dist/`.
 Install a downloaded bundle with `flatpak install ./exposed-games-linux-x64.flatpak`.
 
 ## Windows
@@ -47,10 +55,14 @@ pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,rust,cmake,ninja,pkgconf,pytho
 The MSYS2 Rust compiler and DLLs use the same UCRT toolchain. Packaging follows
 the executable's DLL imports and the dynamically loaded libmpv and libarchive
 dependencies, includes their licenses, and checks library loading and the
-executable version before building NSIS. CI also silently installs the result
-into a temporary directory and checks the installed executable. Installation is
-per user, with Start menu/Desktop shortcuts and an uninstaller. Uninstall keeps
-Exposed Games's user data and removes only shipped files from the installation folder.
+executable version before building NSIS. The launcher executable is stripped
+for distribution. The Windows tests share the release profile and dependency
+cache with the installer build. CI can reuse compiled dependencies across
+lockfile changes while the UCRT64 toolchain stays compatible. CI also silently
+installs the result into a temporary directory and checks the installed
+executable. Installation is per user, with Start menu/Desktop shortcuts and an
+uninstaller. Uninstall keeps Exposed Games's user data and removes only shipped
+files from the installation folder.
 
 ## Application identity and icon
 

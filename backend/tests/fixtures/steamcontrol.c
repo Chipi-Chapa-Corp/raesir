@@ -19,30 +19,45 @@ __attribute__((used, noinline)) static uint32_t remove_body(void *self, uint32_t
 __attribute__((used, noinline)) static uint32_t state_body(void *self, uint32_t app) { return app == 42 ? state : 1; }
 
 /* Include the same wire signature markers as the client proxy, behind a jump. */
+#ifdef FIXTURE_NEW_PROXY
+#define INSTALL_IDS ".long 0xdd9af161\n.long 0xdfbf8d85\n"
+#define REMOVE_IDS ".long 0x4505e2d4\n.long 0x4730280f\n"
+#define STATE_IDS ".long 0xeaf26188\n.long 0xed101990\n"
+#define FOLDER_IDS ".long 0x166ebaa1\n.long 0x18c74498\n"
+#define UPDATE_IDS ".long 0x27b7a577\n.long 0x29ea87d5\n"
+#define QUEUE_IDS ".long 0x9bd943ae\n.long 0x9e22ca68\n"
+#else
+#define INSTALL_IDS ".long 0xdd9af16a\n.long 0xdfc1c497\n"
+#define REMOVE_IDS ".long 0x4505e2cd\n.long 0x47325f11\n"
+#define STATE_IDS ".long 0xeaf261b3\n.long 0xed1250c4\n"
+#define FOLDER_IDS ".long 0x166ebab8\n.long 0x18c97bb8\n"
+#define UPDATE_IDS ".long 0x27b7a56e\n.long 0x29ecbed5\n"
+#define QUEUE_IDS ".long 0x9bd943b1\n.long 0x9e250174\n"
+#endif
 __attribute__((naked, noinline)) static uint32_t install_map(void *self, uint32_t app, uint32_t folder, bool flag) {
-    __asm__("jmp install_body\n.long 0xdd9af16a\n.long 0xdfc1c497\n");
+    __asm__("jmp install_body\n" INSTALL_IDS);
 }
 __attribute__((naked, noinline)) static uint32_t remove_map(void *self, uint32_t app) {
-    __asm__("jmp remove_body\n.long 0x4505e2cd\n.long 0x47325f11\n");
+    __asm__("jmp remove_body\n" REMOVE_IDS);
 }
 __attribute__((naked, noinline)) static uint32_t state_map(void *self, uint32_t app) {
-    __asm__("jmp state_body\n.long 0xeaf261b3\n.long 0xed1250c4\n");
+    __asm__("jmp state_body\n" STATE_IDS);
 }
 __attribute__((naked, noinline)) static uint32_t folder_map(void *self, uint32_t app) {
-    __asm__("xor %eax, %eax\nret\n.long 0x166ebab8\n.long 0x18c97bb8\n");
+    __asm__("xor %eax, %eax\nret\n" FOLDER_IDS);
 }
 __attribute__((used, noinline)) static bool update_body(void *self, uint32_t app, uint64_t *out) {
     memset(out, 0, 248); out[16] = 450; out[17] = 1000; return app == 42;
 }
 __attribute__((naked, noinline)) static bool update_map(void *self, uint32_t app, uint64_t *out) {
-    __asm__("jmp update_body\n.long 0x27b7a56e\n.long 0x29ecbed5\n.byte 0xba\n.long 0xf8\n");
+    __asm__("jmp update_body\n" UPDATE_IDS ".byte 0xba\n.long 0xf8\n");
 }
 __attribute__((used, noinline)) static bool queue_body(void *self, uint32_t app, uint32_t placement) {
     if (app != 42 || (placement != 1 && placement != 6)) abort();
     mutations++; state = 2 | (placement == 6 ? 512 : (256 | 1024)); return true;
 }
 __attribute__((naked, noinline)) static bool queue_map(void *self, uint32_t app, uint32_t placement) {
-    __asm__("jmp queue_body\n.long 0x9bd943b1\n.long 0x9e250174\n");
+    __asm__("jmp queue_body\n" QUEUE_IDS);
 }
 static void *get_manager(void *self, int user, int pipe, const char *version) {
     if (pipe != 7 || user != 8 || strcmp(version, "CLIENTAPPMANAGER_INTERFACE_VERSION001")) abort();

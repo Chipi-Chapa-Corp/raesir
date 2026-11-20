@@ -55,6 +55,9 @@ pub struct Media {
 impl Media {
     pub fn poster_url(&self) -> String {
         let source = if self.video { &self.preview } else { &self.url };
+        if let Some(url) = crate::artwork::xbox_viewer_url(source) {
+            return url.into();
+        }
         if self.video
             && let Ok(mut url) = reqwest::Url::parse(source)
             && url
@@ -584,6 +587,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(screenshot.poster_url(), screenshot.url);
+    }
+
+    #[test]
+    fn xbox_gallery_uses_a_distinct_high_resolution_viewer_url() {
+        let original =
+            "https://store-images.s-microsoft.com/image/test?h=153&w=272&q=60&mode=letterbox";
+        let screenshot = Media {
+            url: original.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            screenshot.poster_url(),
+            "https://store-images.s-microsoft.com/image/test?mode=letterbox&w=1920&q=90"
+        );
+        assert_eq!(screenshot.url, original);
+        let trailer = Media {
+            url: "https://example.com/trailer.m3u8".into(),
+            preview: original.into(),
+            video: true,
+            ..Default::default()
+        };
+        assert_eq!(trailer.poster_url(), screenshot.poster_url());
+        assert_eq!(trailer.preview, original);
     }
     #[test]
     fn dates_and_cached_reviews_use_the_same_fields_across_stores() {

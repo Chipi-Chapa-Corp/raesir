@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 mod worker;
@@ -40,9 +40,14 @@ pub struct Request {
 pub enum Completion {
     Legendary { profile: PathBuf, app: String },
     Ferestre { record: PathBuf },
+    FerestreRuntime { state: PathBuf, cache: PathBuf },
 }
 
 impl Completion {
+    fn is_ferestre_game(&self) -> bool {
+        matches!(self, Self::Ferestre { .. })
+    }
+
     fn revision(&self) -> Option<String> {
         match self {
             Self::Legendary { profile, app } => read_json(&profile.join("installed.json"))?
@@ -52,6 +57,7 @@ impl Completion {
             Self::Ferestre { record } => read_json(record)?["package_version"]
                 .as_str()
                 .map(str::to_owned),
+            Self::FerestreRuntime { .. } => None,
         }
     }
 
@@ -103,6 +109,7 @@ impl Completion {
             Self::Ferestre { record } => {
                 read_json(record).and_then(|v| v["dir"].as_str().map(PathBuf::from))
             }
+            Self::FerestreRuntime { .. } => None,
         }
     }
     pub fn installed(&self, version: &str) -> bool {
@@ -116,12 +123,20 @@ impl Completion {
                 .filter(|v| version.is_empty() || v["package_version"].as_str() == Some(version))
                 .and_then(|v| v["dir"].as_str().map(PathBuf::from))
                 .is_some_and(|p| p.join(".xodus-streaming.msixvc").is_file()),
+            Self::FerestreRuntime { state, .. } => {
+                crate::ferestre::managed_runtime_version_installed(state, version)
+            }
         }
+    }
+
+    fn is_runtime(&self) -> bool {
+        matches!(self, Self::FerestreRuntime { .. })
     }
 }
 
 pub struct Manager {
     root: PathBuf,
+    started: SystemTime,
     checking: Mutex<Option<Instant>>,
     starting: Mutex<()>,
 }
@@ -140,11 +155,22 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 
 impl Manager {
     pub fn new(data: &Path) -> Self {
-        Self {
+        let manager = Self {
             root: data.join("downloads"),
+            started: SystemTime::now(),
             checking: Mutex::new(None),
             starting: Mutex::new(()),
+        };
+        for row in fs::read_dir(&manager.root).into_iter().flatten().flatten() {
+            let dir = row.path();
+            if let Some(progress) = read_progress(&dir)
+                && progress.phase == Phase::Failed
+                && manager.from_previous_session(&dir)
+            {
+                remove_failure(&dir, &progress);
+            }
         }
+        manager
     }
 
     fn directory(&self, key: &str) -> PathBuf {
@@ -157,20 +183,40 @@ impl Manager {
         serde_json::from_value(read_json(&self.directory(key).join("request.json"))?).ok()
     }
 
+    fn from_previous_session(&self, dir: &Path) -> bool {
+        fs::metadata(dir.join("progress.json"))
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified < self.started)
+    }
+
+    pub fn dismiss_failed(&self, seen: &HashMap<String, Progress>) {
+        let _starting = self.starting.lock().unwrap_or_else(|e| e.into_inner());
+        for (key, progress) in seen {
+            remove_failure(&self.directory(key), progress);
+        }
+    }
+
     pub fn snapshot(&self) -> HashMap<String, Progress> {
         let mut result = HashMap::new();
         for row in fs::read_dir(&self.root).into_iter().flatten().flatten() {
             let dir = row.path();
-            let Some(mut progress) = read_json(&dir.join("progress.json"))
-                .and_then(|v| serde_json::from_value::<Progress>(v).ok())
-            else {
+            let Some(mut progress) = read_progress(&dir) else {
                 continue;
             };
+            if progress.phase == Phase::Failed && self.from_previous_session(&dir) {
+                continue;
+            }
             let Some(request) = read_json(&dir.join("request.json"))
                 .and_then(|v| serde_json::from_value::<Request>(v).ok())
             else {
                 continue;
             };
+            if request.completion.is_ferestre_game()
+                && progress.phase == Phase::Failed
+                && progress.detail.as_deref() == Some(crate::ferestre::CONSOLE_ONLY_MESSAGE)
+            {
+                continue;
+            }
             // The owning client can finish an available update outside Exposed Games.
             if progress.phase == Phase::Available
                 && request
@@ -185,11 +231,7 @@ impl Manager {
             // worker leaves a resumable job, never an endlessly spinning card.
             if progress.active()
                 && !matches!(progress.phase, Phase::Queued | Phase::Paused)
-                && fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(dir.join("worker.lock"))
-                    .is_ok_and(|f| f.try_lock().is_ok())
+                && !worker::busy(&dir)
             {
                 let fresh = fs::metadata(dir.join("progress.json"))
                     .and_then(|m| m.modified())
@@ -197,8 +239,13 @@ impl Manager {
                     .and_then(|t| t.elapsed().ok())
                     .is_some_and(|d| d < Duration::from_secs(15));
                 if !fresh {
-                    progress.phase = Phase::Paused;
-                    progress.detail = Some("Download interrupted · Resume".into());
+                    if request.completion.is_runtime() {
+                        progress.phase = Phase::Failed;
+                        progress.detail = Some("Xbox runtime installation interrupted".into());
+                    } else {
+                        progress.phase = Phase::Paused;
+                        progress.detail = Some("Download interrupted · Resume".into());
+                    }
                 }
             }
             result.insert(request.key, progress);
@@ -235,6 +282,9 @@ impl Manager {
         let _starting = self.starting.lock().unwrap_or_else(|e| e.into_inner());
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         if worker::busy(&dir) {
+            if request.completion.is_runtime() {
+                return Ok(());
+            }
             drop(_starting);
             return self.control(&request.key, true);
         }
@@ -253,6 +303,19 @@ impl Manager {
             progress.detail = Some("Waiting for another client download".into());
             return storage::write_json(&dir.join("progress.json"), &progress);
         }
+        if request.operation == Operation::Install
+            && request.completion.is_ferestre_game()
+            && let Some(id) = request.key.strip_prefix("xbox:")
+            && let Some(reason) = crate::ferestre::install_blocker(id)
+        {
+            let mut progress = Progress::starting(request.operation);
+            progress.phase = Phase::Failed;
+            progress.controllable = false;
+            progress.detail = Some(reason.into());
+            storage::write_json(&dir.join("request.json"), &request)?;
+            storage::write_json(&dir.join("progress.json"), &progress)?;
+            return Err(reason.into());
+        }
         request.game_dir = request.completion.directory();
         if request.previous_version.is_none() {
             request.previous_version = request.completion.revision();
@@ -269,10 +332,15 @@ impl Manager {
                 .into_owned();
         }
         storage::write_json(&dir.join("request.json"), &request)?;
-        storage::write_json(
-            &dir.join("progress.json"),
-            &Progress::starting(request.operation),
-        )?;
+        let mut progress = Progress::starting(request.operation);
+        progress.controllable =
+            !request.completion.is_runtime() && !request.completion.is_ferestre_game();
+        if request.completion.is_runtime() {
+            progress.detail = Some("Checking the Xbox runtime release…".into());
+        } else if request.completion.is_ferestre_game() {
+            progress.detail = Some("Checking the Xbox license and package…".into());
+        }
+        storage::write_json(&dir.join("progress.json"), &progress)?;
         let _ = fs::remove_file(dir.join("control.json"));
         let mut command = if cfg!(target_os = "linux") && Path::new("/.flatpak-info").is_file() {
             let script = self.root.join("host-worker.py");
@@ -319,6 +387,9 @@ impl Manager {
 
     pub fn control(&self, key: &str, resume: bool) -> Result<(), String> {
         let request = self.request(key).ok_or("Download is no longer available")?;
+        if request.completion.is_runtime() {
+            return Err("Use the Xbox library to retry the runtime installation".into());
+        }
         let dir = self.directory(key);
         if !worker::busy(&dir) {
             if resume {
@@ -397,9 +468,9 @@ impl Manager {
             .catalog
             .iter()
             .any(|game| game.client == "Ferestre" && crate::catalog::local(&game.installations))
-            && let Some(binary) = crate::discovery::program("ferestre")
+            && let Some(client) = crate::ferestre::Client::discover()
         {
-            let mut command = client_command(&binary);
+            let mut command = client_command(&client.program);
             command.args(["--json", "updates"]);
             match query(command) {
                 Ok(value) => {
@@ -426,10 +497,33 @@ impl Manager {
     }
 }
 
+fn read_progress(dir: &Path) -> Option<Progress> {
+    serde_json::from_value(read_json(&dir.join("progress.json"))?).ok()
+}
+
+fn remove_failure(dir: &Path, expected: &Progress) {
+    if expected.phase != Phase::Failed || read_progress(dir).as_ref() != Some(expected) {
+        return;
+    }
+    let Ok(lease) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("worker.lock"))
+    else {
+        return;
+    };
+    if lease.try_lock().is_ok() && read_progress(dir).as_ref() == Some(expected) {
+        let _ = fs::remove_file(dir.join("progress.json"));
+    }
+}
+
 fn queue_group(request: &Request) -> String {
     match &request.completion {
         Completion::Legendary { profile, .. } => format!("legendary:{}", profile.display()),
         Completion::Ferestre { .. } => "ferestre".into(),
+        Completion::FerestreRuntime { .. } => "ferestre-runtime".into(),
     }
 }
 
@@ -440,7 +534,7 @@ fn client_busy(request: &Request) -> bool {
             .write(true)
             .open(profile.join("installed.json.lock"))
             .is_ok_and(|file| file.try_lock().is_err()),
-        Completion::Ferestre { .. } => false,
+        Completion::Ferestre { .. } | Completion::FerestreRuntime { .. } => false,
     }
 }
 
@@ -575,23 +669,33 @@ fn legendary_plan(
 }
 
 fn ferestre_request(game: &LibraryGame, operation: Operation) -> Option<Request> {
-    if game.store != "xbox" || game.client != "Ferestre" || game.id.len() != 12 {
+    let ferestre_game = match operation {
+        Operation::Install => game
+            .install
+            .as_ref()
+            .is_some_and(|a| a.client == "Ferestre"),
+        Operation::Update => game.client == "Ferestre",
+        _ => false,
+    };
+    if game.store != "xbox"
+        || !ferestre_game
+        || game.id.len() != 12
+        || !game.id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
         return None;
     }
-    let program = crate::discovery::program("ferestre")?;
-    let home = crate::platform::home()?;
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"))
-        .join("ferestre");
+    let client = crate::ferestre::Client::discover()?;
+    let state = crate::ferestre::state_dir(&crate::platform::home()?);
     Some(Request {
         key: game.key.clone(),
         operation,
-        program,
+        program: client.program,
         args: vec!["install".into(), game.id.clone()],
         env: BTreeMap::new(),
         completion: Completion::Ferestre {
-            record: state.join("installed").join(format!("{}.json", game.id)),
+            record: state
+                .join("installed")
+                .join(format!("{}.json", game.id.to_ascii_uppercase())),
         },
         version: String::new(),
         previous_version: None,

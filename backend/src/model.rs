@@ -67,6 +67,10 @@ pub struct Volume {
     pub id: String,
     pub device: String,
     pub filesystem: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
     pub mountpoints: Vec<String>,
     pub os: Os,
     pub note: String,
@@ -98,6 +102,14 @@ pub struct Report {
 pub struct LinuxSystem {
     pub root: String,
     pub xbox_runtime: bool,
+    #[serde(default)]
+    pub managed_ferestre: bool,
+    #[serde(default)]
+    pub ferestre_client: bool,
+    #[serde(default)]
+    pub ferestre_runtime: bool,
+    #[serde(default)]
+    pub ferestre_library: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +131,15 @@ pub struct LibraryGame {
     pub client: String,
     #[serde(default)]
     pub client_os: Vec<Os>,
+    /// Microsoft Store metadata confirms this edition only has console packages.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub xbox_console_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ferestre_unsupported_package: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ferestre_pc_package: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ferestre_test: Option<FerestreTest>,
     pub cover: Option<String>,
     pub launch: Option<GameAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +154,23 @@ pub struct LibraryGame {
     pub is_game: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mods: Option<crate::mods::Summary>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FerestreState {
+    Playable,
+    PlayableWithIssues,
+    Menus,
+    Broken,
+    Untested,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FerestreTest {
+    pub state: FerestreState,
+    pub last_verified: Option<String>,
+    pub summary: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

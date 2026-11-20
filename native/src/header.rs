@@ -1,5 +1,5 @@
 use crate::icons::icon;
-use crate::{Launcher, STORES};
+use crate::{Launcher, STORE_NAMES, STORES};
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{EditableTextState, text_input};
 
@@ -223,14 +223,7 @@ impl Render for Header {
                                     ("store", i),
                                     name,
                                     self.state.store == Some(i),
-                                    [
-                                        "Steam",
-                                        "Epic Games",
-                                        "EA",
-                                        "Ubisoft Connect",
-                                        "Xbox",
-                                        "Wargaming",
-                                    ][i],
+                                    STORE_NAMES[i],
                                 )
                                 .on_click(self.listener(
                                     move |this, _, _, cx| {
@@ -256,6 +249,12 @@ impl Render for Header {
                                             if i == 2 {
                                                 this.status = 0;
                                                 this.os = 0;
+                                            } else if i == 1
+                                                && this
+                                                    .store
+                                                    .is_some_and(|store| STORES[store] == "xbox")
+                                            {
+                                                this.status = 0;
                                             }
                                             this.filter(cx);
                                         },

@@ -1,7 +1,6 @@
 use super::*;
-use crate::{catalog, discovery, epic, steam};
+use crate::{catalog, discovery, epic, ferestre, platform, steam};
 use std::{
-    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -31,95 +30,70 @@ pub fn scan(scan: &mut Scan<'_>) {
             }
         }
     }
+    let client = ferestre::Client::discover();
+    let host_home = platform::home();
     for home in scan.homes.clone() {
-        let mut states = vec![home.path.join(".local/state/ferestre")];
-        if home.local
-            && let Some(path) = std::env::var_os("XDG_STATE_HOME")
-        {
-            states.insert(0, PathBuf::from(path).join("ferestre"));
-        }
-        let mut seen = BTreeSet::new();
-        for state in states {
-            if !seen.insert(epic::key(&state)) {
-                continue;
-            }
-            let installed = state.join("installed");
-            if installed.is_dir() {
-                file(scan, &installed, |scan| {
-                    for row in fs::read_dir(&installed)
-                        .map_err(|e| e.to_string())?
-                        .take(4096)
-                    {
-                        let path = row.map_err(|e| e.to_string())?.path();
-                        if path.extension().is_none_or(|e| e != "json") {
-                            continue;
-                        }
-                        let value = discovery::json(&path)?;
-                        let id = text(&value, "product_id")
-                            .filter(|s| store_id(s))
-                            .ok_or("Invalid Ferestre product ID")?;
-                        let raw = text(&value, "dir").ok_or("Ferestre install has no directory")?;
-                        let resolved = discovery::resolve(raw, &home, scan.report);
-                        let path = resolved
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or(raw.into());
-                        let mut install =
-                            catalog::install(&epic::key(&installed), path, Os::Linux, true);
-                        if !ferestre_ready(Path::new(&install.path)) {
-                            install.state = "incomplete".into();
-                        }
-                        let mut game = xbox(id, id, vec![install], &epic::key(&installed));
-                        game.client = "Ferestre".into();
-                        if home.local
-                            && catalog::local(&game.installations)
-                            && let Some(program) = discovery::program("ferestre")
-                        {
-                            game.launch = Some(catalog::command(
-                                "Ferestre",
-                                program.clone(),
-                                vec!["run".into(), id.into()],
-                            ));
-                            game.uninstall = Some(catalog::command(
-                                "Ferestre",
-                                program,
-                                vec!["uninstall".into(), id.into(), "--yes".into()],
-                            ));
-                        }
-                        if let Some(path) = config(Path::new(&game.installations[0].path))
-                            && let Ok(title) = config_title(&path)
-                        {
-                            game.title = title;
-                        }
-                        catalog::merge(&mut scan.games, game);
-                    }
-                    Ok(())
-                });
-            }
-            let path = state.join("library.json");
-            file(scan, &path, |scan| {
-                let value = discovery::json(&path)?;
-                let rows = value
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .ok_or("Unsupported Ferestre account cache")?;
-                for row in rows {
-                    if text(row, "productType") != Some("Game")
-                        || text(row, "status") != Some("Active")
-                    {
+        let (state, config_dir) = if home.local && host_home.as_ref() == Some(&home.path) {
+            (
+                ferestre::state_dir(&home.path),
+                ferestre::host_dir(&home.path, "XDG_CONFIG_HOME", ".config").join("ferestre"),
+            )
+        } else {
+            (
+                home.path.join(".local/state/ferestre"),
+                home.path.join(".config/ferestre"),
+            )
+        };
+        let installed = state.join("installed");
+        if installed.is_dir() {
+            file(scan, &installed, |scan| {
+                for row in fs::read_dir(&installed)
+                    .map_err(|e| e.to_string())?
+                    .take(4096)
+                {
+                    let path = row.map_err(|e| e.to_string())?.path();
+                    if path.extension().is_none_or(|e| e != "json") {
                         continue;
                     }
-                    let Some(id) = text(row, "productId").filter(|s| store_id(s)) else {
-                        continue;
-                    };
-                    let mut game = xbox(id, id, vec![], &epic::key(&path));
-                    game.in_library = true;
+                    let value = discovery::json(&path)?;
+                    let id = text(&value, "product_id")
+                        .filter(|s| store_id(s))
+                        .ok_or("Invalid Ferestre product ID")?;
+                    let raw = text(&value, "dir").ok_or("Ferestre install has no directory")?;
+                    let resolved = discovery::resolve(raw, &home, scan.report);
+                    let path = resolved
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(raw.into());
+                    let mut install =
+                        catalog::install(&epic::key(&installed), path, Os::Linux, true);
+                    if !ferestre_ready(Path::new(&install.path)) {
+                        install.state = "incomplete".into();
+                    }
+                    let mut game = xbox(id, id, vec![install], &epic::key(&installed));
                     game.client = "Ferestre".into();
-                    catalog::add_os(&mut game.client_os, Os::Linux);
+                    if home.local {
+                        if let Some(client) = &client
+                            && catalog::local(&game.installations)
+                        {
+                            game.launch = Some(client.action(vec!["run".into(), id.into()]));
+                            game.uninstall = Some(client.action(vec![
+                                "uninstall".into(),
+                                id.into(),
+                                "--yes".into(),
+                            ]));
+                        }
+                    }
+                    if let Some(path) = config(Path::new(&game.installations[0].path))
+                        && let Ok(title) = config_title(&path)
+                    {
+                        game.title = title;
+                    }
                     catalog::merge(&mut scan.games, game);
                 }
                 Ok(())
             });
         }
+        ferestre_library(scan, &home, &state, &config_dir, client.as_ref());
         for suffix in [
             ".config/xodus-nexus",
             ".config/Xodus Nexus",
@@ -134,6 +108,67 @@ pub fn scan(scan: &mut Scan<'_>) {
     windows_packages(scan);
 }
 
+fn ferestre_library(
+    scan: &mut Scan<'_>,
+    home: &discovery::Location,
+    state: &Path,
+    config_dir: &Path,
+    client: Option<&ferestre::Client>,
+) {
+    let legacy = state.join("library.json");
+    // Keep the inventory source stable across account switches and out of the
+    // per-account directories. Only the selected Store account may grant access.
+    let source = epic::key(&legacy);
+    let path = match ferestre::library_cache_path(state, config_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            scan.verified.insert(source.clone());
+            scan.warnings.push(error);
+            return;
+        }
+    };
+    if path != legacy {
+        scan.verified.insert(source.clone());
+    }
+    if home.local && ferestre::library_signed_out(&path) {
+        scan.verified.insert(source);
+        return;
+    }
+    if matches!(path.try_exists(), Ok(false)) {
+        if home.local {
+            scan.verified.insert(source);
+        }
+        return;
+    }
+    let value = discovery::json(&path);
+    let rows = value
+        .as_ref()
+        .ok()
+        .and_then(|value| value["items"].as_array());
+    let Some(rows) = rows else {
+        scan.warnings
+            .push("Ferestre library cache could not be read".into());
+        return;
+    };
+    scan.verified.insert(source.clone());
+    for row in rows {
+        if text(row, "productType") != Some("Game") || text(row, "status") != Some("Active") {
+            continue;
+        }
+        let Some(id) = text(row, "productId").filter(|s| store_id(s)) else {
+            continue;
+        };
+        let mut game = xbox(id, id, vec![], &source);
+        game.in_library = true;
+        game.client = "Ferestre".into();
+        catalog::add_os(&mut game.client_os, Os::Linux);
+        if home.local {
+            game.install = client.map(|client| client.action(vec!["install".into(), id.into()]));
+        }
+        catalog::merge(&mut scan.games, game);
+    }
+}
+
 fn xbox(id: &str, title: &str, installs: Vec<Installation>, source: &str) -> LibraryGame {
     let mut game = catalog::entry("xbox", id, title, installs, source);
     game.client = "Xbox".into();
@@ -146,7 +181,7 @@ fn xbox(id: &str, title: &str, installs: Vec<Installation>, source: &str) -> Lib
     game
 }
 fn store_id(id: &str) -> bool {
-    id.len() == 12 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+    crate::xbox_store::product_id(id)
 }
 fn config(folder: &Path) -> Option<PathBuf> {
     for name in ["MicrosoftGame.config", "MicrosoftGame.Config"] {
