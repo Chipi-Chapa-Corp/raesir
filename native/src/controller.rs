@@ -1,5 +1,5 @@
 use crate::{Launcher, backend::PartitionChoice, library::Game};
-use exposed_games_backend::{catalog, model::Report};
+use exposed_games_backend::{catalog, model::Report, steam_control::Operation};
 use gpui::*;
 use std::{collections::HashMap, sync::Arc};
 
@@ -109,6 +109,28 @@ impl Launcher {
         setup: crate::library::FerestreSetup,
         cx: &mut Context<Self>,
     ) {
+        self.start_ferestre_setup(setup, None, cx);
+    }
+
+    pub(crate) fn retry_ferestre_sign_in(
+        &mut self,
+        key: String,
+        operation: Operation,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_ferestre_setup(
+            crate::library::FerestreSetup::SignIn,
+            Some((key, operation)),
+            cx,
+        );
+    }
+
+    fn start_ferestre_setup(
+        &mut self,
+        setup: crate::library::FerestreSetup,
+        retry: Option<(String, Operation)>,
+        cx: &mut Context<Self>,
+    ) {
         if self.closing || self.ferestre_task.is_some() {
             return;
         }
@@ -118,9 +140,15 @@ impl Launcher {
                 | crate::library::FerestreSetup::MaintainCli
                 | crate::library::FerestreSetup::MaintainRuntime
                 | crate::library::FerestreSetup::Runtime
-        ) && self.game_activity.keys().any(|key| key.starts_with("xbox:"))
+        ) && self
+            .game_activity
+            .keys()
+            .any(|key| key.starts_with("xbox:"))
         {
-            self.notice("Quit your Xbox games before changing Xbox support.".into(), cx);
+            self.notice(
+                "Quit your Xbox games before changing Xbox support.".into(),
+                cx,
+            );
             return;
         }
         let backend = self.backend.clone();
@@ -129,7 +157,17 @@ impl Launcher {
             cx.spawn(async move |this, cx| {
                 let result = cx
                     .background_executor()
-                    .spawn(async move { backend.configure_ferestre(setup) })
+                    .spawn(async move {
+                        let (report, result) = backend.configure_ferestre(setup)?;
+                        let result = result.and_then(|()| match retry {
+                            Some((key, Operation::Update)) => backend.control_download(&key, true),
+                            Some((key, Operation::Install)) => {
+                                backend.action(&key, "install").map(|_| ())
+                            }
+                            _ => Ok(()),
+                        });
+                        Ok::<_, String>((report, result))
+                    })
                     .await;
                 this.update(cx, |this, cx| {
                     this.ferestre_task = None;
@@ -652,15 +690,20 @@ impl Launcher {
                             this.downloads_watching = false;
                             return true;
                         }
+                        let previous_speed = this.download_rates.label(&this.download_operations);
+                        this.download_rates
+                            .record(&progress, std::time::Instant::now());
                         if this.set_download_progress(progress, cx) {
                             cx.notify();
                         } else if this.downloads_open
-                            && this.download_operations.values().any(|job| {
-                                job.scheduled_at.is_some_and(|time| {
-                                    time.saturating_sub(last_poll).div_ceil(60)
-                                        != time.saturating_sub(now).div_ceil(60)
-                                })
-                            })
+                            && (previous_speed
+                                != this.download_rates.label(&this.download_operations)
+                                || this.download_operations.values().any(|job| {
+                                    job.scheduled_at.is_some_and(|time| {
+                                        time.saturating_sub(last_poll).div_ceil(60)
+                                            != time.saturating_sub(now).div_ceil(60)
+                                    })
+                                }))
                         {
                             cx.notify();
                         }

@@ -177,21 +177,43 @@ impl Launcher {
             .children(volumes.into_iter().map(|volume| {
                 let id = volume.id.clone();
                 let ntfs = volume.filesystem.eq_ignore_ascii_case("ntfs");
+                let pool = !volume.additional_devices.is_empty();
                 let os = if volume.os == Os::Windows || ntfs {
                     "windows"
                 } else {
                     "linux"
                 };
-                let title = volume.label.as_deref().unwrap_or(&volume.device);
+                let title = volume.label.as_deref().unwrap_or(match volume.os {
+                    _ if pool => "Btrfs pool",
+                    Os::Windows => "Windows partition",
+                    Os::Linux => "Linux partition",
+                    Os::Unknown if ntfs => "NTFS partition",
+                    Os::Unknown => "Linux filesystem",
+                });
                 let can_mount = self.host == Os::Linux
                     && exposed_games_backend::mount::mount_options(&volume.filesystem).is_some();
                 let failure = mount_failures.get(&id).cloned()
                     .filter(|_| partition_choices.get(&id) == Some(&PartitionChoice::Mount));
-                let metadata = if can_mount {
+                let mut metadata = if pool {
+                    Some(format!("{} devices", volume.additional_devices.len() + 1))
+                } else if can_mount {
                     volume.label.as_ref().map(|_| volume.device.clone())
                 } else {
                     Some(volume.note.clone())
                 };
+                if let Some(text) = metadata.as_mut()
+                    && let Some(bytes) = volume.size_bytes
+                {
+                    let (size, unit) = if bytes >= 1 << 30 {
+                        (bytes as f64 / (1_u64 << 30) as f64, "GiB")
+                    } else {
+                        (bytes as f64 / (1_u64 << 20) as f64, "MiB")
+                    };
+                    text.push_str(&format!(" · {size:.1} {unit}"));
+                    if pool {
+                        text.push_str(" raw");
+                    }
+                }
                 pill()
                     .rounded(rems(1.))
                     .px(rems(1.))

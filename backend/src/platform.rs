@@ -1,6 +1,7 @@
 use crate::model::{Os, Source, Volume};
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -278,7 +279,7 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
             .any(|s| s.eq_ignore_ascii_case(filesystem))
             && !recovery
         {
-            let mut mounts: Vec<String> = value["mountpoints"]
+            let mountpoints = value["mountpoints"]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -286,27 +287,11 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
                 .filter(|p| Path::new(p).is_dir())
                 .map(String::from)
                 .collect();
-            let known = mounts.clone();
-            mounts.retain(|path| {
-                host_mount_alias(path).is_none_or(|original| !known.iter().any(|p| p == original))
-            });
-            let os = mounts
-                .iter()
-                .map(|p| os_at(Path::new(p)))
-                .find(|os| *os != Os::Unknown)
-                .unwrap_or(Os::Unknown);
-            let note = if mounts.is_empty() {
-                unreadable_note(Os::Linux, filesystem, false)
-            } else {
-                "Readable mount points will be checked for Steam libraries.".into()
-            };
-            output.push(Volume {
-                id: value["uuid"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| value["path"].as_str().unwrap_or("unknown"))
-                    .into(),
-                device: value["path"].as_str().unwrap_or("unknown").into(),
+            let uuid = value["uuid"].as_str().filter(|s| !s.is_empty());
+            let device = value["path"].as_str().unwrap_or("unknown");
+            let volume = Volume {
+                id: uuid.unwrap_or(device).into(),
+                device: device.into(),
                 filesystem: filesystem.into(),
                 label: value["label"]
                     .as_str()
@@ -316,10 +301,29 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
                 size_bytes: value["size"]
                     .as_u64()
                     .or_else(|| value["size"].as_str()?.parse().ok()),
-                mountpoints: mounts,
-                os,
-                note,
-            });
+                mountpoints,
+                ..Volume::default()
+            };
+            // Btrfs reports the same filesystem UUID on every member, but
+            // lsblk may attach mount points to only one of those members.
+            if filesystem.eq_ignore_ascii_case("btrfs")
+                && let Some(uuid) = uuid
+                && let Some(pool) = output.iter_mut().find(|other| {
+                    other.filesystem.eq_ignore_ascii_case("btrfs") && other.id == uuid
+                })
+            {
+                if pool.device != device && !pool.additional_devices.contains(&volume.device) {
+                    pool.additional_devices.push(volume.device);
+                    pool.size_bytes = pool
+                        .size_bytes
+                        .zip(volume.size_bytes)
+                        .and_then(|(total, size)| total.checked_add(size));
+                }
+                pool.label = pool.label.take().or(volume.label);
+                pool.mountpoints.extend(volume.mountpoints);
+            } else {
+                output.push(volume);
+            }
         }
         for child in value["children"].as_array().into_iter().flatten() {
             visit(child, output);
@@ -328,6 +332,25 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
     let mut result = Vec::new();
     for v in data["blockdevices"].as_array().into_iter().flatten() {
         visit(v, &mut result);
+    }
+    for volume in &mut result {
+        let known: HashSet<_> = volume.mountpoints.iter().cloned().collect();
+        let mut seen = HashSet::new();
+        volume.mountpoints.retain(|path| {
+            host_mount_alias(path).is_none_or(|original| !known.contains(original))
+                && seen.insert(path.clone())
+        });
+        volume.os = volume
+            .mountpoints
+            .iter()
+            .map(|p| os_at(Path::new(p)))
+            .find(|os| *os != Os::Unknown)
+            .unwrap_or(Os::Unknown);
+        volume.note = if volume.mountpoints.is_empty() {
+            unreadable_note(Os::Linux, &volume.filesystem, false)
+        } else {
+            "Readable mount points will be checked for Steam libraries.".into()
+        };
     }
     result
 }
@@ -489,6 +512,64 @@ mod tests {
         assert_eq!(volumes[1].device, "/dev/test4");
         assert_eq!(volumes[1].size_bytes, Some(1073741824));
     }
+
+    #[test]
+    fn btrfs_members_share_mounts_and_count_each_device_once() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        let home = fixture.path().join("home");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(root.join("etc/os-release"), "ID=linux\n").unwrap();
+        fs::create_dir(&home).unwrap();
+        let data = serde_json::json!({"blockdevices":[
+            {"path":"/dev/test1", "fstype":"btrfs", "uuid":"pool", "size":1024},
+            {"path":"/dev/test2", "fstype":"btrfs", "uuid":"pool", "size":"2048",
+             "label":"Fedora", "mountpoints":[home]},
+            {"children":[{"path":"/dev/test2", "fstype":"btrfs", "uuid":"pool", "size":2048,
+                          "mountpoints":[home, root]}]},
+            {"path":"/dev/test3", "fstype":"btrfs", "uuid":"other", "label":"Fedora", "size":1024},
+            {"path":"/dev/test4", "fstype":"btrfs", "label":"Fedora", "size":1024}
+        ]});
+
+        let volumes = parse_lsblk(&data);
+        assert_eq!(volumes.len(), 3);
+        let pool = &volumes[0];
+        assert_eq!(pool.id, "pool");
+        assert_eq!(pool.device, "/dev/test1");
+        assert_eq!(pool.additional_devices, ["/dev/test2"]);
+        assert_eq!(pool.label.as_deref(), Some("Fedora"));
+        assert_eq!(pool.size_bytes, Some(3072));
+        assert_eq!(
+            pool.mountpoints,
+            [home.to_str().unwrap(), root.to_str().unwrap()]
+        );
+        assert_eq!(pool.os, Os::Linux);
+        assert!(
+            crate::mount::validate_volume(&volumes, "pool")
+                .unwrap_err()
+                .contains("already mounted")
+        );
+        assert!(
+            volumes[1..]
+                .iter()
+                .all(|volume| volume.additional_devices.is_empty())
+        );
+    }
+
+    #[test]
+    fn unmounted_btrfs_pool_has_one_read_only_mount_target() {
+        let data = serde_json::json!({"blockdevices":[
+            {"path":"/dev/test1", "fstype":"btrfs", "uuid":"pool", "size":1024},
+            {"path":"/dev/test2", "fstype":"btrfs", "uuid":"pool"}
+        ]});
+
+        let volumes = parse_lsblk(&data);
+        assert_eq!(volumes.len(), 1);
+        let pool = crate::mount::validate_volume(&volumes, "pool").unwrap();
+        assert_eq!(pool.device, "/dev/test1");
+        assert_eq!(pool.size_bytes, None);
+    }
+
     #[test]
     fn missing_reader_has_actionable_message() {
         assert!(unreadable_note(Os::Windows, "btrfs", false).contains("WinBtrfs was not detected"));

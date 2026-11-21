@@ -652,11 +652,14 @@ fn progress(client: Client, row: &Value, operation: Operation, paused: bool) -> 
             )
         }
     };
-    let percent = match (row["downloaded"].as_u64(), row["total"].as_u64()) {
+    let (percent, downloaded_bytes) = match (row["downloaded"].as_u64(), row["total"].as_u64()) {
         (Some(done), Some(total)) if total > 0 && done <= total => {
-            Some(((u128::from(done) * 100) / u128::from(total)) as u8)
+            (
+                Some(((u128::from(done) * 100) / u128::from(total)) as u8),
+                (phase == Phase::Downloading).then_some(done),
+            )
         }
-        _ => None,
+        _ => (None, None),
     };
     Some(Progress {
         operation,
@@ -665,6 +668,7 @@ fn progress(client: Client, row: &Value, operation: Operation, paused: bool) -> 
         error: None,
         controllable,
         detail: None,
+        downloaded_bytes,
         scheduled_at: None,
     })
 }

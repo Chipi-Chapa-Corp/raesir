@@ -38,6 +38,7 @@ impl Operation {
 pub enum Error {
     Unavailable,
     SignedOut,
+    XboxSignInRequired,
     NotOwned,
     Running,
     Disk,
@@ -53,6 +54,7 @@ impl Error {
                 "Steam's background installation controls are unavailable. Open Steam to manage this game."
             }
             Self::SignedOut => "Sign in to the local Steam client, then try again.",
+            Self::XboxSignInRequired => "Ferestre could not authenticate your Xbox account.",
             Self::NotOwned => "This game is not available to the current Steam account.",
             Self::Running => "Close the game before changing its installation.",
             Self::Disk => {
@@ -91,6 +93,9 @@ impl Status {
             };
             progress.percent = Some((done.saturating_mul(100) / total).min(100) as u8);
         }
+        if progress.phase == Phase::Downloading && total > 0 {
+            progress.downloaded_bytes = self.downloaded.filter(|&bytes| bytes <= total);
+        }
         progress
     }
 }
@@ -120,6 +125,8 @@ pub struct Progress {
     #[serde(default)]
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloaded_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_at: Option<u64>,
 }
 
@@ -136,6 +143,7 @@ impl Progress {
             error: None,
             controllable: true,
             detail: None,
+            downloaded_bytes: None,
             scheduled_at: None,
         }
     }
@@ -368,6 +376,9 @@ fn state_progress(
     ) && total > 0
     {
         state.percent = Some((downloaded.saturating_mul(100) / total).min(100) as u8);
+    }
+    if state.phase == Phase::Downloading && total > 0 && downloaded <= total {
+        state.downloaded_bytes = Some(downloaded);
     }
     if !matches!(
         state.phase,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::steam_control::Error;
 
 #[test]
 fn transfer_counters_are_bounded_and_never_claim_commit_from_percentage_alone() {
@@ -86,20 +87,144 @@ fn download_failures_are_visible_until_dismissed_or_restarted() {
 
 #[cfg(unix)]
 #[test]
+fn ferestre_workers_report_sign_in_and_unclassified_failures() {
+    for host in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Manager::new(temp.path());
+        for (exit, output, error, detail) in [
+            (
+                "1",
+                "no user token (entry not found); sign in again\nFERESTRE_TRANSFER_DIAGNOSTIC_V1 backend-exit 0",
+                Some(Error::XboxSignInRequired),
+                None,
+            ),
+            (
+                "1",
+                "FERESTRE_TRANSFER_DIAGNOSTIC_V1 authentication 0",
+                Some(Error::XboxSignInRequired),
+                None,
+            ),
+            (
+                "7",
+                "FERESTRE_TRANSFER_DIAGNOSTIC_V1 backend-exit 0",
+                None,
+                Some("Ferestre stopped (exit code 7). See output.log for details."),
+            ),
+            (
+                "0",
+                "",
+                None,
+                Some(
+                    "Ferestre reported success, but the installed game files or version could not be verified.",
+                ),
+            ),
+        ] {
+            let key = "xbox:9NTESTGAME01";
+            let dir = manager.directory(key);
+            fs::create_dir_all(&dir).unwrap();
+            storage::write_json(
+                &dir.join("request.json"),
+                &Request {
+                    key: key.into(),
+                    operation: Operation::Install,
+                    program: "python3".into(),
+                    args: vec![
+                        "-c".into(),
+                        "import sys; print(sys.argv[1]); sys.exit(int(sys.argv[2]))".into(),
+                        output.into(),
+                        exit.into(),
+                    ],
+                    env: Default::default(),
+                    completion: Completion::Ferestre {
+                        record: temp.path().join("installed.json"),
+                    },
+                    version: String::new(),
+                    previous_version: None,
+                    game_dir: None,
+                    game_lock: None,
+                },
+            )
+            .unwrap();
+            if host {
+                assert!(
+                    Command::new("python3")
+                        .arg(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("src/downloads/host_worker.py")
+                        )
+                        .arg(&dir)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                worker::run(&dir);
+            }
+            let progress = manager.snapshot().remove(key).unwrap();
+            assert_eq!(progress.phase, Phase::Failed);
+            assert!(progress.controllable);
+            assert_eq!(progress.error, error);
+            assert_eq!(progress.detail.as_deref(), detail);
+            assert_eq!(
+                fs::read_to_string(dir.join("output.log"))
+                    .unwrap()
+                    .trim_end(),
+                output
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_xbox_download_recovers_network_bytes_from_its_log() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Manager::new(temp.path());
+    let key = "xbox:9NTESTGAME01";
+    manager
+        .available(Request {
+            key: key.into(),
+            operation: Operation::Install,
+            program: "must-not-run".into(),
+            args: vec![],
+            env: Default::default(),
+            completion: Completion::Ferestre {
+                record: temp.path().join("installed.json"),
+            },
+            version: String::new(),
+            previous_version: None,
+            game_dir: None,
+            game_lock: None,
+        })
+        .unwrap();
+    let dir = manager.directory(key);
+    fs::write(dir.join("progress.json"), r#"{"operation":"install","phase":"downloading","percent":58,"error":null,"detail":"Downloading · 52841.3 of 90735.4 MiB"}"#).unwrap();
+    fs::write(dir.join("output.log"), r#"FERESTRE_PROGRESS {"schema":1,"phase":"downloading","completedBytes":55400000000,"totalBytes":95100000000,"networkBytes":300000000}"#).unwrap();
+    let progress = manager.snapshot().remove(key).unwrap();
+    assert_eq!(progress.percent, Some(58));
+    assert_eq!(progress.label(), "Downloading · 55.4 Gb of 95.1 Gb");
+    assert_eq!(progress.downloaded_bytes, Some(300_000_000));
+}
+
+#[cfg(unix)]
+#[test]
 fn ferestre_workers_show_bytes_and_pause_the_downloader_without_a_terminal() {
     for host in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let manager = Manager::new(temp.path());
         let program = temp.path().join("client.py");
         let record = temp.path().join("installed.json");
-        fs::write(&program, r#"import json, os, select, sys
+        fs::write(
+            &program,
+            r#"import json, os, select, sys
 from pathlib import Path
 assert os.getsid(0) == os.getpid()
 assert os.environ['XODUS_PROGRESS'] == 'json'
 assert os.environ['FERESTRE_GUI_CANCELLATION'] == '1'
 def report(paused):
     print('FERESTRE_PROGRESS ' + json.dumps(dict(schema=1, phase='downloading',
-          completedBytes=16*1024*1024, totalBytes=64*1024*1024, paused=paused, canPause=True)), flush=True)
+          completedBytes=16*1024*1024, totalBytes=64*1024*1024, networkBytes=10000000,
+          paused=paused, canPause=True)), flush=True)
 def control():
     assert select.select([sys.stdin], [], [], 5)[0]
     return sys.stdin.buffer.read(1)
@@ -110,7 +235,9 @@ assert control() == b'r'
 record = Path(sys.argv[1])
 (record.parent/'.xodus-streaming.msixvc').touch()
 record.write_text(json.dumps(dict(dir=str(record.parent))))
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let key = "xbox:9NTESTGAME01";
         manager
             .available(Request {
@@ -164,9 +291,12 @@ record.write_text(json.dumps(dict(dir=str(record.parent))))
         let downloading = wait(Phase::Downloading);
         assert!(downloading.controllable);
         assert_eq!(downloading.percent, Some(25));
-        assert!(downloading.label().contains("16.0 of 64.0 MiB"));
+        assert_eq!(downloading.downloaded_bytes, Some(10_000_000));
+        assert!(downloading.label().contains("16.8 Mb of 67.1 Mb"));
         manager.control(key, false).unwrap();
-        assert_eq!(wait(Phase::Paused).label(), "Paused");
+        let paused = wait(Phase::Paused);
+        assert_eq!(paused.label(), "Paused");
+        assert_eq!(paused.downloaded_bytes, None);
         manager.control(key, true).unwrap();
         assert_eq!(wait(Phase::Complete).percent, Some(100));
         worker.join().unwrap();
@@ -371,7 +501,8 @@ dll.touch()
             }
         };
         let download = wait(Phase::Downloading);
-        assert!(download.label().ends_with("8.0 MiB received"));
+        assert!(download.label().ends_with("8.4 Mb received"));
+        assert_eq!(download.downloaded_bytes, Some(8 * 1024 * 1024));
         assert!(!download.controllable && download.percent.is_none());
         fs::write(temp.path().join("extract"), b"").unwrap();
         assert!(wait(Phase::Installing).label().starts_with("Extracting"));

@@ -66,9 +66,12 @@ pub struct Game {
 pub struct Volume {
     pub id: String,
     pub device: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_devices: Vec<String>,
     pub filesystem: String,
     #[serde(default)]
     pub label: Option<String>,
+    /// Raw block-device size, summed across detected members for a Btrfs pool.
     #[serde(default)]
     pub size_bytes: Option<u64>,
     pub mountpoints: Vec<String>,

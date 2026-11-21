@@ -248,6 +248,10 @@ impl Manager {
                     }
                 }
             }
+            // An adopted worker may still be writing the older progress schema.
+            if progress.phase == Phase::Downloading && progress.downloaded_bytes.is_none() {
+                worker::recover_transfer_counters(&dir, &request.completion, &mut progress);
+            }
             result.insert(request.key, progress);
         }
         result
@@ -704,17 +708,36 @@ fn ferestre_request(game: &LibraryGame, operation: Operation) -> Option<Request>
     })
 }
 
-pub fn parse_progress(line: &str) -> Option<u8> {
+pub fn format_bytes(bytes: u64) -> String {
+    for (unit, size) in [("Gb", 1_000_000_000), ("Mb", 1_000_000), ("KB", 1_000)] {
+        // Switch units before rounding to 1,000.0 of the smaller unit.
+        if bytes >= size - size / 20_000 {
+            return format!("{:.1} {unit}", bytes as f64 / size as f64);
+        }
+    }
+    format!("{bytes} B")
+}
+
+fn parse_transfer_progress(line: &str) -> Option<(u8, Option<u64>)> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
         let progress = &value["progress"];
         let done = progress["done"].as_u64()?;
         let total = progress["total"].as_u64()?;
-        return (total > 0 && done <= total)
-            .then(|| (done.saturating_mul(100) / total).min(99) as u8);
+        return (total > 0 && done <= total).then(|| {
+            (
+                (u128::from(done) * 100 / u128::from(total)).min(99) as u8,
+                Some(done),
+            )
+        });
     }
     let text = line.split("Progress:").nth(1)?;
     let number = text.split('%').next()?.trim().parse::<f64>().ok()?;
-    (number.is_finite() && (0.0..=100.0).contains(&number)).then_some(number.min(99.0) as u8)
+    (number.is_finite() && (0.0..=100.0).contains(&number))
+        .then_some((number.min(99.0) as u8, None))
+}
+
+pub fn parse_progress(line: &str) -> Option<u8> {
+    parse_transfer_progress(line).map(|(percent, _)| percent)
 }
 
 #[cfg(test)]

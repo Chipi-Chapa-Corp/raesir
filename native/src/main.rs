@@ -68,6 +68,7 @@ struct Launcher {
     game_activity: HashMap<String, game_activity::Activity>,
     game_activity_task: Option<Task<()>>,
     download_operations: HashMap<String, exposed_games_backend::steam_control::Progress>,
+    download_rates: downloads::DownloadRates,
     downloads_watching: bool,
     mods_watching: bool,
     mod_update_task: Option<Task<()>>,
@@ -185,6 +186,7 @@ impl Launcher {
             game_activity: HashMap::new(),
             game_activity_task: None,
             download_operations: HashMap::new(),
+            download_rates: downloads::DownloadRates::default(),
             downloads_watching: false,
             mods_watching: false,
             mod_update_task: None,
@@ -429,9 +431,12 @@ impl Launcher {
         let unsupported = g.source.ferestre_unsupported_package;
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
-        let working = progress
-            .as_ref()
-            .filter(|p| play_button.is_none() && !console_only && !unsupported && p.blocks_play());
+        let working = progress.as_ref().filter(|p| {
+            play_button.is_none()
+                && !console_only
+                && !unsupported
+                && downloads::has_primary_action(p)
+        });
         let can_uninstall = installed_here
             && g.source.uninstall.is_some()
             && !progress.as_ref().is_some_and(|p| p.active())
@@ -439,7 +444,13 @@ impl Launcher {
         let error = progress.as_ref().and_then(|p| p.error);
         let action_tip = play_button
             .map(|state| state.label().into())
-            .or_else(|| error.map(|e| e.message().to_owned()))
+            .or_else(|| {
+                error
+                    .filter(|e| {
+                        *e != exposed_games_backend::steam_control::Error::XboxSignInRequired
+                    })
+                    .map(|e| e.message().to_owned())
+            })
             .or_else(|| {
                 if let Some(progress) = working {
                     Some(downloads::button_tip(progress))

@@ -1301,7 +1301,7 @@ impl Render for DetailsPage {
             let working = self.download_progress.as_ref().filter(|p| {
                 play_button.is_none()
                     && exposed_games_backend::actions::install_limitation(&self.game).is_none()
-                    && p.blocks_play()
+                    && crate::downloads::has_primary_action(p)
             });
             let primary_action = if installable { "install" } else { "launch" };
             let primary_tip = play_button

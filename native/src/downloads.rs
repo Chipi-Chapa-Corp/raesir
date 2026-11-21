@@ -4,9 +4,81 @@ use crate::{
     header::{action_button, pill},
     icons::icon,
 };
-use exposed_games_backend::steam_control::{Operation, Phase, Progress};
+use exposed_games_backend::{
+    downloads::format_bytes,
+    steam_control::{Error, Operation, Phase, Progress},
+};
 use gpui::{prelude::*, *};
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{
+    cell::Cell,
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+    time::{Duration, Instant},
+};
+
+const SIGN_IN: &str = "Sign in";
+
+#[derive(Default)]
+pub(crate) struct DownloadRates {
+    samples: HashMap<String, VecDeque<(Instant, u64)>>,
+}
+
+impl DownloadRates {
+    pub(crate) fn record(&mut self, progress: &HashMap<String, Progress>, now: Instant) {
+        self.samples.retain(|key, _| {
+            progress.get(key).is_some_and(|state| {
+                state.phase == Phase::Downloading && state.downloaded_bytes.is_some()
+            })
+        });
+        for (key, state) in progress {
+            if state.phase != Phase::Downloading {
+                continue;
+            }
+            let Some(bytes) = state.downloaded_bytes else {
+                continue;
+            };
+            let samples = self.samples.entry(key.clone()).or_default();
+            if samples
+                .back()
+                .is_some_and(|&(_, previous)| bytes < previous)
+            {
+                samples.clear();
+            }
+            samples.push_back((now, bytes));
+            // Smooth the rate over recent polls so bursts of completed chunks
+            // don't cause large swings every time the popup redraws.
+            while samples.len() > 2 && now.duration_since(samples[0].0) > Duration::from_secs(5) {
+                samples.pop_front();
+            }
+        }
+    }
+
+    pub(crate) fn label(&self, progress: &HashMap<String, Progress>) -> Option<String> {
+        let total = self
+            .samples
+            .iter()
+            .filter_map(|(key, samples)| {
+                let state = progress.get(key)?;
+                let &(first_at, first) = samples.front()?;
+                let &(last_at, last) = samples.back()?;
+                let seconds = last_at.duration_since(first_at).as_secs_f64();
+                (state.phase == Phase::Downloading
+                    && state.downloaded_bytes == Some(last)
+                    && seconds > 0.)
+                    .then(|| (last - first) as f64 / seconds)
+            })
+            .reduce(|sum, rate| sum + rate)?;
+        Some(format!("{}/s", format_bytes(total.round() as u64)))
+    }
+}
+
+fn needs_xbox_sign_in(progress: &Progress) -> bool {
+    progress.phase == Phase::Failed && progress.error == Some(Error::XboxSignInRequired)
+}
+
+pub fn has_primary_action(progress: &Progress) -> bool {
+    progress.blocks_play() || needs_xbox_sign_in(progress)
+}
 
 pub fn button_label(progress: &Progress) -> String {
     match progress.phase {
@@ -19,6 +91,7 @@ pub fn button_label(progress: &Progress) -> String {
         Phase::Queued => "Queued".into(),
         Phase::Starting => "Starting…".into(),
         Phase::Paused => "Resume".into(),
+        Phase::Failed if needs_xbox_sign_in(progress) => SIGN_IN.into(),
         Phase::Failed if progress.operation == Operation::Update => "Retry update".into(),
         Phase::Removing | Phase::Complete | Phase::Failed => String::new(),
         Phase::Downloading | Phase::Installing => progress
@@ -36,7 +109,9 @@ pub fn button_label(progress: &Progress) -> String {
 }
 
 pub fn button_icon(progress: &Progress) -> &'static str {
-    if matches!(
+    if needs_xbox_sign_in(progress) {
+        "xbox"
+    } else if matches!(
         progress.phase,
         Phase::Available | Phase::Paused | Phase::Failed
     ) {
@@ -52,6 +127,7 @@ pub fn button_tip(progress: &Progress) -> String {
     match progress.phase {
         Phase::Available => progress.label(),
         Phase::Paused => "Resume download".into(),
+        Phase::Failed if needs_xbox_sign_in(progress) => SIGN_IN.into(),
         Phase::Failed => "Retry update".into(),
         _ if progress.controllable && progress.operation.downloads() => "Pause download".into(),
         _ => progress.label(),
@@ -133,10 +209,12 @@ impl Launcher {
     }
 
     pub(crate) fn primary_download_action(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        let Some(progress) = self.display_progress(key).filter(Progress::blocks_play) else {
+        let Some(progress) = self.display_progress(key).filter(has_primary_action) else {
             return false;
         };
-        if matches!(progress.phase, Phase::Available | Phase::Failed) {
+        if needs_xbox_sign_in(&progress) {
+            self.retry_ferestre_sign_in(key.into(), progress.operation, cx);
+        } else if matches!(progress.phase, Phase::Available | Phase::Failed) {
             self.action(
                 key.into(),
                 if progress.operation == Operation::Update {
@@ -236,6 +314,7 @@ impl Launcher {
 
     pub(crate) fn download_popup(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let progress = &self.download_operations;
+        let speed = self.download_rates.label(progress);
         let runtime = progress
             .get(exposed_games_backend::ferestre::RUNTIME_JOB)
             .filter(|state| state.active())
@@ -342,10 +421,9 @@ impl Launcher {
                             .items_center()
                             .justify_between()
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("Downloads"))
-                            .child(div().text_color(rgb(0xaabbb2)).child(format!(
-                                "{count} {}",
-                                if count == 1 { "game" } else { "games" }
-                            ))),
+                            .when_some(speed, |d, speed| {
+                                d.child(div().text_color(rgb(0xaabbb2)).child(speed))
+                            }),
                     )
                     .when_some(runtime.as_ref(), |d, state| {
                         d.child(
@@ -387,6 +465,8 @@ impl Launcher {
             && !state.controllable;
         let update_now = state.phase == Phase::Available && state.operation == Operation::Update;
         let blocked = exposed_games_backend::actions::install_limitation(&game.source);
+        let sign_in = needs_xbox_sign_in(state);
+        let operation = state.operation;
         let label = if let Some(reason) = blocked {
             reason.into()
         } else if state.detail.is_some() || state.phase == Phase::Available {
@@ -509,8 +589,10 @@ impl Launcher {
                             d.child(
                                 action_button(
                                     SharedString::from(format!("start-{key}")),
-                                    "install",
-                                    if state.phase == Phase::Failed {
+                                    if sign_in { "xbox" } else { "install" },
+                                    if sign_in {
+                                        SIGN_IN
+                                    } else if state.phase == Phase::Failed {
                                         "Retry download"
                                     } else if state.phase == Phase::Available {
                                         if state.operation == Operation::Update {
@@ -522,17 +604,25 @@ impl Launcher {
                                         "Resume download"
                                     },
                                 )
-                                .when(update_now, |button| {
+                                .when(update_now || sign_in, |button| {
                                     button
                                         .w_auto()
                                         .px(rems(0.65))
                                         .gap(rems(0.35))
                                         .text_size(rems(0.9))
-                                        .child("Update now")
+                                        .child(if sign_in { SIGN_IN } else { "Update now" })
                                 })
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
-                                        this.control_download(start_key.clone(), true, cx);
+                                        if sign_in {
+                                            this.retry_ferestre_sign_in(
+                                                start_key.clone(),
+                                                operation,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.control_download(start_key.clone(), true, cx);
+                                        }
                                     },
                                 )),
                             )
@@ -600,5 +690,41 @@ impl Launcher {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DownloadRates, Duration, HashMap, Instant, Operation, Phase, Progress};
+
+    #[test]
+    fn download_rates_sum_live_transfers_and_reset_on_pause_or_restart() {
+        let mut rates = DownloadRates::default();
+        let active = |bytes| Progress {
+            phase: Phase::Downloading,
+            downloaded_bytes: Some(bytes),
+            ..Progress::starting(Operation::Install)
+        };
+        let mut transfers = HashMap::from([
+            ("xbox".into(), active(1_000_000_000)),
+            ("steam".into(), active(0)),
+        ]);
+        let start = Instant::now();
+        rates.record(&transfers, start);
+        assert_eq!(rates.label(&transfers), None);
+
+        transfers.insert("xbox".into(), active(1_020_000_000));
+        transfers.insert("steam".into(), active(2_000_000));
+        rates.record(&transfers, start + Duration::from_secs(2));
+        assert_eq!(rates.label(&transfers).as_deref(), Some("11.0 Mb/s"));
+
+        transfers.get_mut("steam").unwrap().phase = Phase::Paused;
+        transfers.insert("xbox".into(), active(0));
+        rates.record(&transfers, start + Duration::from_secs(3));
+        assert_eq!(rates.label(&transfers), None);
+
+        transfers.insert("xbox".into(), active(2_000_000));
+        rates.record(&transfers, start + Duration::from_secs(4));
+        assert_eq!(rates.label(&transfers).as_deref(), Some("2.0 Mb/s"));
     }
 }

@@ -217,6 +217,8 @@ no manual cache deletion.
 
 Exposed Games can read libraries on accessible Windows and Linux partitions. On Linux, mount banners offer read-only access with approval through your desktop. Partitions mounted by Exposed Games are unmounted when you close it.
 
+On Linux, discovery treats multi-device Btrfs filesystems as one pool and scans the mount points reported across its members. An unmounted pool's banner shows its device count and raw capacity.
+
 Windows needs a compatible filesystem reader to access Linux partitions, such as WinBtrfs for Btrfs.
 
 ## Xbox games on Linux
