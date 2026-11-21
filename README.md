@@ -60,13 +60,13 @@ display controls query Steam directly. Date and playtime filters support custom
 ranges, and each list can load additional pages. Reviewer names link to their
 public Steam profiles.
 
-On supported Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Exposed Games. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; other builds use Steam's own dialogs.
+On compatible 64-bit Windows and Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through Steam in the background. Downloads continue if you close Exposed Games. An isolated helper checks the Steam client interface before sending requests. Other platforms use Steam's dialogs.
 
-Steam ownership is read from the installed, signed-in client on 64-bit Windows
-and Linux, without a Web API key. Failed or signed-out lookups keep the prior
-library. Steam's native background download controls currently require a
-compatible Linux client; Windows uses Steam's dialogs and reads committed
-installation manifests for progress.
+Steam ownership is read from a running, signed-in client on 64-bit Windows and
+Linux, without a Web API key. Failed or signed-out lookups keep the prior
+library. Steam progress comes from the running client, and the installation
+manifest confirms completion. Library refresh and update checks leave a closed
+Steam client closed.
 
 Settings opens a popup with **Automatic game updates**, enabled by default.
 Available updates replace Play with **Update** on cards and game pages. With

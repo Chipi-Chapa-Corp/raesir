@@ -182,23 +182,16 @@ impl Launcher {
                 } else {
                     "linux"
                 };
-                let title = volume.label.as_deref().unwrap_or(match volume.os {
-                    Os::Windows => "Windows partition",
-                    Os::Linux => "Linux partition",
-                    Os::Unknown if ntfs => "NTFS partition",
-                    Os::Unknown => "Linux filesystem",
-                });
+                let title = volume.label.as_deref().unwrap_or(&volume.device);
+                let can_mount = self.host == Os::Linux
+                    && exposed_games_backend::mount::mount_options(&volume.filesystem).is_some();
                 let failure = mount_failures.get(&id).cloned()
                     .filter(|_| partition_choices.get(&id) == Some(&PartitionChoice::Mount));
-                let mut metadata = volume.device.clone();
-                if let Some(bytes) = volume.size_bytes {
-                    let (size, unit) = if bytes >= 1 << 30 {
-                        (bytes as f64 / (1_u64 << 30) as f64, "GiB")
-                    } else {
-                        (bytes as f64 / (1_u64 << 20) as f64, "MiB")
-                    };
-                    metadata.push_str(&format!(" · {size:.1} {unit}"));
-                }
+                let metadata = if can_mount {
+                    volume.label.as_ref().map(|_| volume.device.clone())
+                } else {
+                    Some(volume.note.clone())
+                };
                 pill()
                     .rounded(rems(1.))
                     .px(rems(1.))
@@ -206,8 +199,10 @@ impl Launcher {
                     .gap(rems(0.8))
                     .child(crate::icons::system_icon(os).size(rems(1.55)))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(rems(0.15)).py(rems(0.35))
-                        .child(div().text_size(rems(1.125)).child(title.to_owned()))
-                        .child(div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal().child(metadata))
+                        .child(div().text_size(rems(1.125)).whitespace_normal().child(title.to_owned()))
+                        .when_some(metadata, |d, text| d.child(
+                            div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal().child(text)
+                        ))
                         .when_some(failure, |d, error| d.child(
                             div().id(format!("mount-failure-{}", volume.device))
                                 .text_size(rems(0.95))
@@ -218,18 +213,19 @@ impl Launcher {
                                     cx.new(|_| crate::library::ActionTooltip(error.clone())).into()
                                 })
                         )))
-                    .when(self.host == Os::Linux, |d| {
-                        d.child(self.partition_actions(&id, &volume.device, cx))
-                    })
-                    .when(self.host != Os::Linux, |d| {
-                        d.child(div().text_size(rems(1.125)).child(volume.note.clone()))
-                    })
+                    .child(self.partition_actions(&id, &volume.device, can_mount, cx))
             }))
     }
 
-    fn partition_actions(&self, id: &str, device: &str, cx: &mut Context<Self>) -> Div {
+    fn partition_actions(
+        &self,
+        id: &str,
+        device: &str,
+        can_mount: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let checked = self.remember_partition(id);
-        let busy = self.syncing || self.closing;
+        let busy = (self.host == Os::Linux && self.syncing) || self.closing;
         let can_remember = rememberable_partition(id);
         let remember_id = id.to_owned();
         let ignore_id = id.to_owned();
@@ -266,9 +262,7 @@ impl Launcher {
             .when(!can_remember, |d| {
                 d.opacity(0.55).tooltip(|_, cx| {
                     cx.new(|_| {
-                        crate::library::ActionTooltip(
-                            "This partition has no filesystem UUID".into(),
-                        )
+                        crate::library::ActionTooltip("This partition has no persistent ID".into())
                     })
                     .into()
                 })
@@ -293,7 +287,7 @@ impl Launcher {
             .when(busy, |d| d.opacity(0.55))
             .child(remember)
             .child(
-                text_button(format!("ignore-{device}"), "Ignore")
+                text_button(format!("ignore-{device}"), "Dismiss")
                     .role(Role::Button)
                     .aria_disabled(busy)
                     .when(busy, |d| d.cursor_default())
@@ -305,19 +299,26 @@ impl Launcher {
                             }))
                     }),
             )
-            .child(
-                text_button(format!("mount-{device}"), "Mount read-only")
-                    .role(Role::Button)
-                    .aria_disabled(busy)
-                    .when(busy, |d| d.cursor_default())
-                    .when(!busy, |d| {
-                        d.tab_index(0)
-                            .focus_visible(|s| s.bg(rgba(0xffffff28)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mount(mount_id.clone(), cx);
-                            }))
-                    }),
-            )
+            .when(can_mount, |d| {
+                d.child(
+                    text_button(format!("mount-{device}"), "Mount")
+                        .role(Role::Button)
+                        .aria_label("Mount read-only")
+                        .tooltip(|_, cx| {
+                            cx.new(|_| crate::library::ActionTooltip("Mount read-only".into()))
+                                .into()
+                        })
+                        .aria_disabled(busy)
+                        .when(busy, |d| d.cursor_default())
+                        .when(!busy, |d| {
+                            d.tab_index(0)
+                                .focus_visible(|s| s.bg(rgba(0xffffff28)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mount(mount_id.clone(), cx);
+                                }))
+                        }),
+                )
+            })
     }
 
     pub fn settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -432,11 +433,23 @@ impl Launcher {
             .download_operations
             .get(key)
             .is_some_and(|p| p.phase != exposed_games_backend::steam_control::Phase::Failed);
+        let transferring = self
+            .download_operations
+            .get(key)
+            .is_some_and(|p| p.active());
         let play = self.play_button(key);
-        let local = !busy && play.is_none() && game.installed(self.library_scope(), self.host) == 1;
+        let local = play.is_none() && game.installed(self.library_scope(), self.host) == 1;
         let items = [
-            ("launch", "Launch", local && game.source.launch.is_some()),
-            ("quit", "Quit game", play == Some(crate::game_activity::PlayButton::Quit) && self.library_scope() != 2),
+            (
+                "launch",
+                "Launch",
+                local && !busy && game.source.launch.is_some(),
+            ),
+            (
+                "quit",
+                "Quit game",
+                play == Some(crate::game_activity::PlayButton::Quit) && self.library_scope() != 2,
+            ),
             (
                 "install",
                 "Install",
@@ -448,7 +461,7 @@ impl Launcher {
             (
                 "uninstall",
                 "Uninstall",
-                local && game.source.uninstall.is_some(),
+                local && !transferring && game.source.uninstall.is_some(),
             ),
         ];
         let x = f32::from(position.x)

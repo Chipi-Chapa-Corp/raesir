@@ -1322,7 +1322,7 @@ impl Render for DetailsPage {
             let uninstall_key = self.game.key.clone();
             if exposed_games_backend::catalog::local(&self.game.installations)
                 && self.game.uninstall.is_some()
-                && working.is_none()
+                && !self.download_progress.as_ref().is_some_and(|p| p.active())
                 && play_button.is_none()
             {
                 title = title.child(

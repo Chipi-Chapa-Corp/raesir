@@ -121,10 +121,10 @@ jobs:
           key: cargo-ucrt64-release-${{ steps.ucrt64.outputs.toolchain }}-${{ hashFiles('native/Cargo.toml', 'backend/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'scripts/package-windows.sh') }}
           restore-keys: cargo-ucrt64-release-${{ steps.ucrt64.outputs.toolchain }}-
 
-      - name: Test Windows client download and Steam ownership bridges
+      - name: Test Windows client download and Steam bridges
         run: |
           cargo test --release --locked --package exposed-games-backend --lib -- \
-            client_downloads::peer::tests steam_ipc::tests
+            client_downloads::peer::tests steam_ipc::tests steam_control::tests
 
       - name: Build and verify NSIS installer
         run: ./scripts/package-windows.sh

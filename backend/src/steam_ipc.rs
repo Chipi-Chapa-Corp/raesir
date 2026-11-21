@@ -61,7 +61,7 @@ pub const fn supported() -> bool {
     any(target_os = "linux", target_os = "windows"),
     target_arch = "x86_64"
 ))]
-fn client_library(root: &Path) -> Result<libloading::Library, String> {
+pub(crate) fn client_library(root: &Path) -> Result<libloading::Library, String> {
     #[cfg(target_os = "linux")]
     unsafe {
         libloading::Library::new(root.join("linux64/steamclient.so"))
@@ -71,13 +71,8 @@ fn client_library(root: &Path) -> Result<libloading::Library, String> {
     {
         // Resolve dependencies beside this exact client DLL. Do not change the
         // process-wide DLL search directory or load a 32-bit Steam client.
-        let path = [
-            root.join("steamclient64.dll"),
-            root.join("bin/win64/steamclient64.dll"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or("Cannot find the installed 64-bit Steam client library")?;
+        let path = crate::steam_control::client_library_path(root)
+            .ok_or("Cannot find the installed 64-bit Steam client library")?;
         unsafe {
             libloading::os::windows::Library::load_with_flags(path, 0x00000100 | 0x00001000)
                 .map(Into::into)

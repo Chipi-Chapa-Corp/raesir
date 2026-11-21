@@ -298,7 +298,7 @@ impl Launcher {
     }
 
     pub fn ignore_partition(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.syncing || self.closing {
+        if self.closing || (self.host == exposed_games_backend::model::Os::Linux && self.syncing) {
             return;
         }
         let remember = self.remember_partition(&id);
@@ -327,9 +327,12 @@ impl Launcher {
         }
         if matches!(kind, "launch" | "launch-modded" | "install" | "uninstall")
             && self.download_operations.get(&key).is_some_and(|p| {
-                p.blocks_play()
-                    && !(kind == "install"
-                        && p.phase == exposed_games_backend::steam_control::Phase::Available)
+                (if kind == "uninstall" {
+                    p.active()
+                } else {
+                    p.blocks_play()
+                }) && !(kind == "install"
+                    && p.phase == exposed_games_backend::steam_control::Phase::Available)
             })
         {
             return;

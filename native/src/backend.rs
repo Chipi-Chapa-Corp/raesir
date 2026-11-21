@@ -50,7 +50,10 @@ pub enum PartitionChoice {
 
 pub fn rememberable_partition(id: &str) -> bool {
     // Linux discovery falls back to a device path when there is no filesystem UUID.
-    !id.is_empty() && id != "unknown" && !id.starts_with("/dev/")
+    !id.is_empty()
+        && id != "unknown"
+        && !id.starts_with("/dev/")
+        && !id.starts_with("windows-device:")
 }
 
 #[derive(Clone)]
@@ -282,6 +285,9 @@ impl Backend {
         }
         self.ready()?;
         let status = self.steam.status();
+        if cfg!(windows) && !status.external_running && status.managed_root.is_none() {
+            return Ok(None);
+        }
         let root = status
             .managed_root
             .or_else(|| status.clients.first().map(|c| c.root.clone()));
@@ -353,6 +359,14 @@ impl Backend {
 
     pub fn action(&self, key: &str, kind: &str) -> Result<String, String> {
         self.ready()?;
+        if kind == "uninstall"
+            && self
+                .current_download_progress()
+                .get(key)
+                .is_some_and(Progress::active)
+        {
+            return Err("Wait for the game transfer to finish before uninstalling.".into());
+        }
         if self.fixture.is_some()
             && !(matches!(kind, "launch" | "launch-modded")
                 && exposed_games_backend::mods::diagnostic_launch_enabled())
@@ -435,7 +449,7 @@ impl Backend {
             operation,
         } = action.target
         {
-            let result = self.steam.control(&root, appid, operation.as_str());
+            let result = self.steam.control(&root, appid, operation.as_str(), true);
             let library = result
                 .as_ref()
                 .ok()
@@ -587,27 +601,31 @@ impl Backend {
 
     fn steam_actions(&self, report: &mut Report) {
         let client = client_control::clients().into_iter().next();
-        let mut bridge = false;
-        if let Some(client) = &client
-            && cfg!(all(target_os = "linux", target_arch = "x86_64"))
-            && let Ok(modified) =
-                std::fs::metadata(Path::new(&client.root).join("linux64/steamclient.so"))
-                    .and_then(|m| m.modified())
-        {
+        let bridge = client.as_ref().is_some_and(|client| {
+            let Some(library) = steam_control::client_library_path(Path::new(&client.root)) else {
+                return false;
+            };
+            let Ok(modified) = std::fs::metadata(library).and_then(|m| m.modified()) else {
+                return false;
+            };
             let mut cached = self.steam_bridge.lock().unwrap_or_else(|p| p.into_inner());
-            bridge = if let Some((root, stamp, available)) = cached.as_ref()
+            if let Some((root, stamp, available)) = cached.as_ref()
                 && root == &client.root
                 && *stamp == modified
             {
-                *available
-            } else {
-                let result = self.steam.control(&client.root, 0, "probe");
-                if result.is_ok() || matches!(result, Err(steam_control::Error::Unavailable)) {
-                    *cached = Some((client.root.clone(), modified, result.is_ok()));
-                }
-                result.is_ok()
-            };
-        }
+                return *available;
+            }
+            if !self.steam.running() {
+                // The helper verifies the private interface again before a user
+                // request can act. Discovery can leave a closed client closed.
+                return true;
+            }
+            let result = self.steam.control(&client.root, 0, "probe", false);
+            if result.is_ok() || matches!(result, Err(steam_control::Error::Unavailable)) {
+                *cached = Some((client.root.clone(), modified, result.is_ok()));
+            }
+            !matches!(result, Err(steam_control::Error::Unavailable))
+        });
         let mut jobs = self.steam_jobs.lock().unwrap_or_else(|p| p.into_inner());
         for game in report.catalog.iter_mut().filter(|g| g.store == "steam") {
             let Some(client) = &client else {
@@ -773,7 +791,7 @@ impl Backend {
                 && snapshot.progress.phase != Phase::Available
             {
                 self.steam
-                    .control(&snapshot.root, snapshot.appid, "status")
+                    .control(&snapshot.root, snapshot.appid, "status", false)
                     .ok()
                     .map(|status| status.progress(snapshot.progress.operation))
             } else {
@@ -810,6 +828,15 @@ impl Backend {
     }
 
     pub fn control_download(&self, key: &str, resume: bool) -> Result<(), String> {
+        self.control_download_with_steam_start(key, resume, true)
+    }
+
+    fn control_download_with_steam_start(
+        &self,
+        key: &str,
+        resume: bool,
+        allow_start: bool,
+    ) -> Result<(), String> {
         use steam_control::Error;
         if self.ready().is_err() || self.fixture.is_some() {
             return Err(Error::Unavailable.message().into());
@@ -874,6 +901,7 @@ impl Backend {
             &snapshot.root,
             snapshot.appid,
             if resume { "resume" } else { "pause" },
+            allow_start,
         );
         if let Some(job) = self
             .steam_jobs
@@ -1004,13 +1032,16 @@ impl Backend {
                 .refresh(&report, true, self.automatic_game_updates()),
         );
         if self.automatic_game_updates() {
+            let steam_running = self.steam.running();
             for (key, progress) in self.current_download_progress() {
                 if progress.operation == Operation::Update
                     && progress.phase == Phase::Available
                     && (!key.starts_with("steam:")
-                        || (progress.controllable && progress.scheduled_at.is_none()))
+                        || (steam_running
+                            && progress.controllable
+                            && progress.scheduled_at.is_none()))
                 {
-                    if let Err(error) = self.control_download(&key, true) {
+                    if let Err(error) = self.control_download_with_steam_start(&key, true, false) {
                         errors.push(error);
                     }
                 }

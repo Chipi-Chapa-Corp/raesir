@@ -2,10 +2,28 @@
 #define CreateInterface CreateOwnershipInterface
 #include "steamclient.c"
 #undef CreateInterface
+#include <stddef.h>
 
 static Object engine, manager;
 static void *engine_table[44], *manager_table[84];
+#ifdef _WIN32
+/* MSVC x64 RTTI with image-relative offsets; no C++ compiler is needed. */
+struct ManagerInfo {
+    void *type_vtable, *spare;
+    char name[32];
+    uint32_t locator[6];
+};
+static struct ManagerInfo manager_info = {
+    .name = ".?AVIClientAppManagerMap@@",
+    .locator = {1, 0, 0, 0, 0, offsetof(struct ManagerInfo, locator)},
+};
+#define MANAGER_RTTI manager_info.locator
+#define SIZE_MARKER ".byte 0x41, 0xb8\n.long 0xf8\n"
+#else
 static struct { void *unused; const char *name; } manager_info = {0, "20IClientAppManagerMap"};
+#define MANAGER_RTTI &manager_info
+#define SIZE_MARKER ".byte 0xba\n.long 0xf8\n"
+#endif
 static uint32_t state = 4, mutations = 0;
 
 __attribute__((used, noinline)) static uint32_t install_body(void *self, uint32_t app, uint32_t folder, bool flag) {
@@ -50,7 +68,7 @@ __attribute__((used, noinline)) static bool update_body(void *self, uint32_t app
     memset(out, 0, 248); out[16] = 450; out[17] = 1000; return app == 42;
 }
 __attribute__((naked, noinline)) static bool update_map(void *self, uint32_t app, uint64_t *out) {
-    __asm__("jmp update_body\n" UPDATE_IDS ".byte 0xba\n.long 0xf8\n");
+    __asm__("jmp update_body\n" UPDATE_IDS SIZE_MARKER);
 }
 __attribute__((used, noinline)) static bool queue_body(void *self, uint32_t app, uint32_t placement) {
     if (app != 42 || (placement != 1 && placement != 6)) abort();
@@ -64,12 +82,18 @@ static void *get_manager(void *self, int user, int pipe, const char *version) {
     return &manager;
 }
 void fixture_state(uint32_t value) { state = value; }
-void fixture_incompatible(void) { manager_info.name = "21ChangedAppManagerMap"; }
+void fixture_incompatible(void) {
+#ifdef _WIN32
+    manager_info.name[0] = '!';
+#else
+    manager_info.name = "21ChangedAppManagerMap";
+#endif
+}
 uint32_t fixture_mutations(void) { return mutations; }
 void *CreateInterface(const char *version, int *result) {
     if (strcmp(version, "CLIENTENGINE_INTERFACE_VERSION005")) return CreateOwnershipInterface(version, result);
     engine_table[43] = get_manager; engine.vtable = engine_table;
-    manager_table[0] = &manager_info;
+    manager_table[0] = MANAGER_RTTI;
     manager_table[1] = install_map; manager_table[2] = remove_map; manager_table[5] = state_map;
     manager_table[83] = folder_map;
     manager_table[21] = update_map; manager_table[57] = queue_map;

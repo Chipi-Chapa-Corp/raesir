@@ -2,6 +2,9 @@ use crate::model::*;
 use std::process::{Command, Stdio};
 
 pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String> {
+    if cfg!(windows) && kind == "launch" && key.starts_with("steam:") {
+        return launch_with_args(report, key, &[]);
+    }
     let action = resolve(report, key, kind)?;
     dispatch(&action.target)?;
     Ok(action
@@ -22,6 +25,7 @@ pub fn launch_with_args(report: &Report, key: &str, args: &[String]) -> Result<S
         return Err("This client does not support launch arguments".into());
     }
     action.target = if cfg!(windows) {
+        let appid = game.id.parse::<u32>().map_err(|_| "Invalid Steam app ID")?;
         let installation = game
             .installations
             .iter()
@@ -33,7 +37,7 @@ pub fn launch_with_args(report: &Report, key: &str, args: &[String]) -> Result<S
         if !exe.is_file() {
             return Err("Could not find Steam's executable".into());
         }
-        let mut argv = vec!["-applaunch".into(), game.id.clone()];
+        let mut argv = vec!["-silent".into(), "-applaunch".into(), appid.to_string()];
         argv.extend_from_slice(args);
         crate::catalog::command("Steam", exe.to_string_lossy().into_owned(), argv).target
     } else {

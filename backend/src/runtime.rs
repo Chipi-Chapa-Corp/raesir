@@ -301,6 +301,7 @@ mod tests {
         report.epic.games.push(EpicGame {
             app_name: game.id.clone(),
             title: game.title.clone(),
+            native_app: None,
             installations: vec![],
             library_sources: vec!["/fixture/prefix/drive_c/profile".into()],
         });

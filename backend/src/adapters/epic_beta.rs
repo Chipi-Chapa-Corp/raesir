@@ -127,13 +127,6 @@ fn read(scan: &mut Scan<'_>, profile: &Location) -> Result<(), String> {
             let uri = format!("com.epicgames.launcher://apps/{app}?action=launch&silent=true");
             if profile.drive_c.is_none() || cfg!(windows) {
                 game.launch = Some(catalog::url("Epic Preview", uri));
-                let mut action = catalog::url(
-                    "Epic Preview",
-                    "com.epicgames.launcher://store/library".into(),
-                );
-                action.note =
-                    Some("Select this game in Epic's library to finish uninstalling.".into());
-                game.uninstall = Some(action);
             }
         }
         catalog::merge(&mut scan.games, game);

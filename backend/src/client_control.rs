@@ -128,12 +128,20 @@ fn is_steam(name: &std::ffi::OsStr) -> bool {
 }
 
 fn belongs_to(process: &sysinfo::Process, root: &str) -> bool {
+    let matches_root = |exe: &Path| {
+        #[cfg(windows)]
+        return exe
+            .parent()
+            .is_some_and(|parent| crate::epic::key(parent) == root.to_lowercase());
+        #[cfg(not(windows))]
+        exe.starts_with(root)
+    };
     is_steam(process.name())
-        && (process.exe().is_some_and(|exe| exe.starts_with(root))
+        && (process.exe().is_some_and(matches_root)
             || process
                 .cmd()
                 .first()
-                .is_some_and(|arg| Path::new(arg).starts_with(root)))
+                .is_some_and(|arg| matches_root(Path::new(arg))))
 }
 
 struct Lease {
@@ -303,6 +311,10 @@ pub struct Status {
 }
 
 impl Manager {
+    pub fn running(&self) -> bool {
+        snapshot().processes().values().any(|p| is_steam(p.name()))
+    }
+
     /// A mutation delegated through a client URL must survive Exposed Games closing too.
     pub fn preserve(&self, root: &str) {
         if let Some(lease) = self
@@ -325,8 +337,7 @@ impl Manager {
             .map(|l| l.client.root.clone());
         Status {
             clients: clients(),
-            external_running: managed_root.is_none()
-                && snapshot().processes().values().any(|p| is_steam(p.name())),
+            external_running: managed_root.is_none() && self.running(),
             managed_root,
             supported: crate::steam_ipc::supported(),
         }
@@ -342,13 +353,14 @@ impl Manager {
             .into_iter()
             .find(|c| c.root == root)
             .ok_or("Choose a locally detected Steam client first.")?;
-        self.read_client(client, false, |root| self.probe(root))
+        self.read_client(client, false, false, |root, _| self.probe(root))
     }
     fn read_client<T>(
         &self,
         client: Client,
+        allow_start: bool,
         keep_running: bool,
-        mut probe: impl FnMut(&str) -> Result<T, String>,
+        mut probe: impl FnMut(&str, bool) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut lock = self
             .lease
@@ -357,6 +369,7 @@ impl Manager {
         if self.closing.load(Ordering::SeqCst) {
             return Err("Exposed Games is shutting down".into());
         }
+        let mut started = false;
         if let Some(lease) = lock.as_ref() {
             if lease.client.root != client.root {
                 return Err(
@@ -373,13 +386,15 @@ impl Manager {
                 // Borrow the running session without creating a lease. Neither
                 // Stop nor app exit may send shutdown or signals to this client,
                 // even when the lookup fails or the external client exits.
-                return probe(&client.root);
+                return probe(&client.root, false);
             }
             // A sandbox's PID namespace can hide an already-running Steam.
             // A successful IPC lookup is stronger evidence than an empty process
             // snapshot. Borrow that session without starting or owning a client.
-            if let Ok(value) = probe(&client.root) {
-                return Ok(value);
+            match probe(&client.root, false) {
+                Ok(value) => return Ok(value),
+                Err(error) if !allow_start => return Err(error),
+                Err(_) => {}
             }
             let before = before
                 .processes()
@@ -393,6 +408,7 @@ impl Manager {
                 .command("-silent")
                 .spawn()
                 .map_err(|e| format!("Could not start Steam: {e}"))?;
+            started = true;
             *lock = Some(Lease {
                 client,
                 child,
@@ -417,18 +433,16 @@ impl Manager {
         // Protect the client before sending a mutation: shutdown may race the
         // reply, and an accepted Steam operation must survive that race.
         lease.keep_running |= keep_running;
-        let result = probe(&lease.client.root);
+        let result = probe(&lease.client.root, started);
         lease.capture(&snapshot());
         result
     }
     fn probe(&self, root: &str) -> Result<OwnedLibrary, String> {
         let output = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-        let mut child = Command::new(env::current_exe().map_err(|e| e.to_string())?)
+        let mut command = Self::helper_command().map_err(|e| e.to_string())?;
+        let mut child = command
             .args(["--steam-library-probe", root])
             .arg(output.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()
             .map_err(|_| "Could not start the isolated Steam IPC helper")?;
         let until = Instant::now() + Duration::from_secs(15);
@@ -470,6 +484,7 @@ impl Manager {
         root: &str,
         appid: u32,
         operation: &str,
+        allow_start: bool,
     ) -> Result<steam_control::Status, steam_control::Error> {
         use steam_control::Error;
         if env::var_os("EXPOSED_GAMES_DISABLE_STEAM_IPC").is_some() {
@@ -479,12 +494,36 @@ impl Manager {
             .into_iter()
             .find(|c| c.root == root)
             .ok_or(Error::Unavailable)?;
+        let changes_installation =
+            matches!(operation, "install" | "uninstall" | "pause" | "resume");
         self.read_client(
             client,
-            matches!(operation, "install" | "uninstall" | "pause" | "resume"),
-            |root| match self.control_helper(root, appid, operation) {
-                Err(Error::Unavailable) => Err("Steam's control interface is not ready".into()),
-                result => Ok(result),
+            allow_start && changes_installation,
+            changes_installation,
+            |root, started| {
+                if started {
+                    // Retry the read-only readiness check while Steam signs in.
+                    // Submit the actual mutation once.
+                    let deadline = Instant::now() + Duration::from_secs(8);
+                    loop {
+                        match self.control_helper(root, 0, "probe") {
+                            Ok(_) => break,
+                            Err(Error::SignedOut)
+                                if Instant::now() < deadline
+                                    && !self.closing.load(Ordering::SeqCst) =>
+                            {
+                                thread::sleep(Duration::from_millis(250));
+                            }
+                            Err(error) => return Ok(Err(error)),
+                        }
+                    }
+                }
+                match self.control_helper(root, appid, operation) {
+                    Err(Error::Unavailable | Error::SignedOut) if allow_start && !started => {
+                        Err("Steam's control interface is not ready".into())
+                    }
+                    result => Ok(result),
+                }
             },
         )
         .map_err(|_| Error::Unavailable)?
@@ -498,12 +537,10 @@ impl Manager {
     ) -> Result<steam_control::Status, steam_control::Error> {
         use steam_control::Error;
         let output = tempfile::NamedTempFile::new().map_err(|_| Error::Unavailable)?;
-        let mut child = Command::new(env::current_exe().map_err(|_| Error::Unavailable)?)
+        let mut command = Self::helper_command().map_err(|_| Error::Unavailable)?;
+        let mut child = command
             .args(["--steam-control", root, operation, &appid.to_string()])
             .arg(output.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()
             .map_err(|_| Error::Unavailable)?;
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -524,6 +561,20 @@ impl Manager {
         let bytes = std::fs::read(output.path()).map_err(|_| Error::Unavailable)?;
         serde_json::from_slice::<Result<steam_control::Status, Error>>(&bytes)
             .map_err(|_| Error::Unavailable)?
+    }
+
+    fn helper_command() -> std::io::Result<Command> {
+        let mut command = Command::new(env::current_exe()?);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        Ok(command)
     }
 }
 
@@ -555,8 +606,9 @@ mod tests {
         };
         for fail in [false, true] {
             let mut probed = false;
-            let result = manager.read_client(client.clone(), false, |root| {
+            let result = manager.read_client(client.clone(), false, false, |root, started| {
                 probed = true;
+                assert!(!started);
                 assert_eq!(root, client.root);
                 if fail {
                     Err("fixture lookup failed".into())
@@ -591,8 +643,9 @@ mod tests {
         };
         let mut lookups = 0;
         let owned = manager
-            .read_client(client.clone(), false, |root| {
+            .read_client(client.clone(), false, false, |root, started| {
                 lookups += 1;
+                assert!(!started);
                 assert_eq!(root, client.root);
                 Ok(OwnedLibrary {
                     steamid: "fixture account".into(),

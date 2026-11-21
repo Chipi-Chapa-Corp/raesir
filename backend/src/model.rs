@@ -240,6 +240,8 @@ pub struct EpicGame {
     /// Epic's opaque AppName; never merge on title or with Steam AppIDs.
     pub app_name: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_app: Option<String>,
     pub library_sources: Vec<String>,
     pub installations: Vec<Installation>,
 }

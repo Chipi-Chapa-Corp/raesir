@@ -280,12 +280,18 @@ fn read_game(
     let info = xml(&info_text)?;
     let metadata_text = steam::read_text(&path.join("game_metadata/metadata.xml"))?;
     let metadata = xml(&metadata_text)?;
-    // Steam-published WGC games belong to their original Steam entries.
+    // Shared upstream metadata lists both publishers for standalone games such
+    // as WoT EU. Reject Steam-only records and keep the installation's own
+    // publisher restriction when it is narrower than the shared metadata.
     for doc in [&info, &metadata] {
         if doc
             .root_element()
             .attribute("wgc_publisher_id")
-            .is_some_and(|p| !p.eq_ignore_ascii_case("wargaming"))
+            .is_some_and(|publishers| {
+                !publishers
+                    .split(',')
+                    .any(|publisher| publisher.trim().eq_ignore_ascii_case("wargaming"))
+            })
         {
             return Ok(None);
         }
@@ -295,7 +301,7 @@ fn read_game(
         .children()
         .find(|n| n.has_tag_name("predefined_section"))
         .unwrap_or(root);
-    if value(section, "is_tool") == Some("true") {
+    if value(section, "is_tool").is_some_and(|value| value.eq_ignore_ascii_case("true")) {
         return Ok(None);
     }
     let id = value(section, "app_id")
@@ -337,7 +343,8 @@ fn read_game(
         })
         .and_then(|raw| relative_file(path, raw.trim()));
     let helper = path.join("wgc_api.exe");
-    let complete = value(game_info, "installed") == Some("true");
+    let complete =
+        value(game_info, "installed").is_some_and(|value| value.eq_ignore_ascii_case("true"));
     let mut installation = catalog::install(
         &epic::key(source),
         path.to_string_lossy().into(),
@@ -796,6 +803,29 @@ mod tests {
             "<protocol><game><id>WOWS.EU.PRODUCTION</id><installed>true</installed></game></protocol>",
         );
         assert!(read_game(dir.path(), &location, None, dir.path()).is_err());
+    }
+
+    #[test]
+    fn shared_wot_metadata_keeps_the_standalone_install_and_excludes_steam() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = location(dir.path(), Os::Windows, false);
+        game(dir.path(), "WOT.EU.PRODUCTION", true, false);
+        let metadata = dir.path().join("game_metadata/metadata.xml");
+        let original = fs::read_to_string(&metadata).unwrap();
+        write(
+            &metadata,
+            &original.replace("wargaming", "wargaming, steam"),
+        );
+
+        let read = || read_game(dir.path(), &location, None, dir.path()).unwrap();
+        let game = read().unwrap();
+        assert_eq!(game.key, "wargaming:WOT.EU.PRODUCTION");
+        assert_eq!(game.installations[0].state, "installed");
+
+        let info = dir.path().join("game_info.xml");
+        let original = fs::read_to_string(&info).unwrap();
+        write(&info, &original.replace("wargaming", "steam"));
+        assert!(read().is_none());
     }
 
     #[test]

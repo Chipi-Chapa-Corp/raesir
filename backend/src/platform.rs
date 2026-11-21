@@ -193,18 +193,18 @@ pub fn sources_at(root: &Path, hint: Os) -> Vec<Source> {
 pub fn unreadable_note(host: Os, filesystem: &str, driver_present: bool) -> String {
     match (host, filesystem.to_ascii_lowercase().as_str()) {
         (Os::Windows, "btrfs") if !driver_present =>
-            "Btrfs cannot be read: WinBtrfs was not detected. Install/configure WinBtrfs in read-only mode, then rescan or add its mounted path.".into(),
+            "WinBtrfs was not detected.".into(),
         (Os::Windows, "btrfs") =>
-            "WinBtrfs is installed, but this partition has no accessible mount. Expose the correct subvolume in read-only mode and rescan.".into(),
+            "WinBtrfs is installed. Mount read-only in Windows.".into(),
         (Os::Windows, "ext4") =>
-            "ext4 is not readable here. A filesystem reader/driver is required; Exposed Games scans readable mounted partitions. WSL --mount cannot attach the running Windows disk.".into(),
+            "Needs an ext4 reader/driver.".into(),
         (_, "crypto_luks" | "bitlocker") =>
             "Encrypted partition. Unlock and expose it using your OS tools, then rescan. Exposed Games does not unlock volumes.".into(),
         (Os::Linux, "ntfs") =>
-            "Unmounted NTFS partition; it may contain Windows games. Use Mount read-only to request access through your OS. Windows/Steam installation is not yet verified.".into(),
+            "Unmounted NTFS".into(),
         (Os::Windows, "linux") =>
-            "Linux partition detected; filesystem cannot be identified without raw-disk read access. Btrfs needs WinBtrfs; ext4 needs a reader/driver. Expose it read-only and add its path. WSL --mount cannot attach the running Windows disk.".into(),
-        _ => "Partition is not mounted/readable. Expose it read-only using your OS tools, then rescan.".into(),
+            "Needs a Linux filesystem reader.".into(),
+        _ => "Mount read-only in your OS.".into(),
     }
 }
 
@@ -340,13 +340,19 @@ fn windows_volumes() -> (Vec<Volume>, Vec<String>) {
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 $btrfs = Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\btrfs'
+$signatures = @{}
+Get-Disk -ErrorAction SilentlyContinue | ForEach-Object { $signatures[[int]$_.Number] = $_.Signature }
 $rows = @(Get-Partition | ForEach-Object {
     $p = $_; $v = $p | Get-Volume -ErrorAction SilentlyContinue
     $linux = "$($p.GptType)" -eq '{0fc63daf-8483-4772-8e79-3d69d8477de4}' -or $p.MbrType -eq 131
-    if ($v -or $linux) {
+    $recovery = "$($p.GptType)" -eq '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}' -or $p.MbrType -eq 39
+    if (($v -or $linux) -and -not $recovery) {
+        $signature = $signatures[[int]$p.DiskNumber]
         [PSCustomObject]@{
-            id = "$($p.DiskNumber):$($p.PartitionNumber):$($p.Guid)"
+            id = if ($p.Guid -and [guid]$p.Guid -ne [guid]::Empty) { "partuuid:$($p.Guid)" } elseif ($signature) { "mbr:${signature}:$($p.Offset)" } else { "windows-device:$($p.DiskNumber):$($p.PartitionNumber)" }
             disk = $p.DiskNumber; offset = $p.Offset
+            partition = $p.PartitionNumber
+            label = $v.FileSystemLabel
             filesystem = if ($v.FileSystem) { "$($v.FileSystem)" } elseif ($v.FileSystemType -and "$($v.FileSystemType)" -ne 'Unknown') { "$($v.FileSystemType)" } elseif ($linux) { 'linux' } else { 'unknown' }
             mounts = @($p.AccessPaths | Where-Object { $_ -match '^[A-Za-z]:\\' })
             btrfs = $btrfs
@@ -373,6 +379,7 @@ ConvertTo-Json -Depth 4 -Compress -InputObject $rows
             .unwrap_or("unknown")
             .to_lowercase();
         let disk = row["disk"].as_u64().unwrap_or(0);
+        let partition = row["partition"].as_u64().unwrap_or(0);
         let offset = row["offset"].as_u64().unwrap_or(0);
         if filesystem == "linux" {
             if let Some(detected) = probe_linux_filesystem(disk, offset) {
@@ -403,7 +410,12 @@ ConvertTo-Json -Depth 4 -Compress -InputObject $rows
         };
         result.push(Volume {
             id: row["id"].as_str().unwrap_or("unknown").into(),
-            device: format!("Disk {disk}, offset {offset}"),
+            device: format!("Disk {disk} · Partition {partition}"),
+            label: row["label"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             filesystem,
             mountpoints: mounts,
             os,
@@ -458,7 +470,7 @@ mod tests {
         let volumes = parse_lsblk(&data);
         assert_eq!(volumes.len(), 1);
         assert_eq!(volumes[0].os, Os::Unknown);
-        assert!(volumes[0].note.contains("not yet verified"));
+        assert_eq!(volumes[0].note, "Unmounted NTFS");
     }
 
     #[test]

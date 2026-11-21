@@ -4,7 +4,7 @@
 //! process. The Linux bridge checks the interface identity and verified proxy markers
 //! before using the current InstallApp(app, library, false) / UninstallApp(app) ABI.
 //! Reference types/state flags: SteamRE/open-steamworks, AppsCommon.h. The current
-//! signatures were checked against Steam's Linux client and tested with SpiderHeck.
+//! signatures were checked against the Linux and Windows x64 client proxies.
 use crate::{steam, vdf};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -400,12 +400,29 @@ pub fn helper(root: &Path, appid: u32, operation: &str, output: &Path) {
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub fn client_library_path(root: &Path) -> Option<PathBuf> {
+    if !crate::steam_ipc::supported() {
+        return None;
+    }
+    if cfg!(windows) {
+        [
+            root.join("steamclient64.dll"),
+            root.join("bin/win64/steamclient64.dll"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+    } else {
+        let path = root.join("linux64/steamclient.so");
+        path.is_file().then_some(path)
+    }
+}
+
+#[cfg(not(all(any(target_os = "linux", windows), target_arch = "x86_64")))]
 fn request(_root: &Path, _appid: u32, _operation: &str) -> Result<Status, Error> {
     Err(Error::Unavailable)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64"))]
 fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
     use std::ffi::{CStr, c_char, c_void};
     type Object = *mut c_void;
@@ -418,8 +435,22 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
         }
         unsafe {
             let table = *(object as *const *const *const c_void);
-            let info = *table.sub(1) as *const *const c_char;
-            CStr::from_ptr(*info.add(1)).to_bytes() == b"20IClientAppManagerMap"
+            #[cfg(target_os = "linux")]
+            {
+                let info = *table.sub(1) as *const *const c_char;
+                CStr::from_ptr(*info.add(1)).to_bytes() == b"20IClientAppManagerMap"
+            }
+            #[cfg(windows)]
+            {
+                // MSVC x64 Complete Object Locator stores image-relative RTTI pointers.
+                let locator = *table.sub(1) as *const u32;
+                if locator.is_null() || *locator != 1 {
+                    return false;
+                }
+                let image = (locator as *const u8).sub(*locator.add(5) as usize);
+                let name = image.add(*locator.add(3) as usize + 16).cast::<c_char>();
+                CStr::from_ptr(name).to_bytes() == b".?AVIClientAppManagerMap@@"
+            }
         }
     }
     // Markers from the verified client proxies supplement the RTTI/slot checks.
@@ -444,8 +475,7 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
         return Err(Error::Unavailable);
     }
     unsafe {
-        let library = libloading::Library::new(root.join("linux64/steamclient.so"))
-            .map_err(|_| Error::Unavailable)?;
+        let library = crate::steam_ipc::client_library(root).map_err(|_| Error::Unavailable)?;
         let create: libloading::Symbol<unsafe extern "C" fn(*const c_char, *mut i32) -> Object> =
             library
                 .get(b"CreateInterface\0")
@@ -507,7 +537,15 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
         if user.is_null() || apps.is_null() {
             return Err(Error::Unavailable);
         }
-        if method::<unsafe extern "C" fn(Object) -> u64>(user, 2)(user) == 0 {
+        #[cfg(target_os = "linux")]
+        let steam_id = method::<unsafe extern "C" fn(Object) -> u64>(user, 2)(user);
+        #[cfg(windows)]
+        let steam_id = {
+            let mut id = 0u64;
+            method::<unsafe extern "C" fn(Object, *mut u64) -> *mut u64>(user, 2)(user, &mut id);
+            id
+        };
+        if steam_id == 0 {
             return Err(Error::SignedOut);
         }
         let manager = method::<Get>(engine, 43)(
@@ -552,9 +590,13 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
         // The current proxy copies a 248-byte update-info record. Refuse another
         // output size before passing a buffer, even if the method IDs still match.
         let update_code: *const u8 = method(manager, 20);
+        #[cfg(target_os = "linux")]
+        let record_size = [0xba, 0xf8, 0, 0, 0]; // mov edx, 248
+        #[cfg(windows)]
+        let record_size = [0x41, 0xb8, 0xf8, 0, 0, 0]; // mov r8d, 248
         if !std::slice::from_raw_parts(update_code, 512)
-            .windows(5)
-            .any(|bytes| bytes == [0xba, 0xf8, 0, 0, 0])
+            .windows(record_size.len())
+            .any(|bytes| bytes == record_size)
         {
             return Err(Error::Unavailable);
         }
@@ -809,19 +851,23 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64"))]
     #[test]
     fn native_control_checks_ownership_identity_running_state_and_releases_its_pipe() {
         verify_native_control(&[]);
         verify_native_control(&["-DFIXTURE_NEW_PROXY"]);
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64"))]
     fn verify_native_control(compiler_flags: &[&str]) {
         use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("linux64")).unwrap();
-        let path = dir.path().join("linux64/steamclient.so");
+        let path = if cfg!(windows) {
+            dir.path().join("steamclient64.dll")
+        } else {
+            fs::create_dir(dir.path().join("linux64")).unwrap();
+            dir.path().join("linux64/steamclient.so")
+        };
         assert!(
             Command::new("cc")
                 .args(compiler_flags)

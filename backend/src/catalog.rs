@@ -177,6 +177,15 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
                     .iter()
                     .any(|i| i.os == Os::host() && i.library == s.path)
         });
+        let native_install = native_epic
+            && game.installations.iter().any(|i| {
+                local(std::slice::from_ref(i))
+                    && report.epic.sources.iter().any(|s| {
+                        s.path == i.library
+                            && s.local
+                            && matches!(s.kind.as_str(), "egl_manifests" | "egl_item" | "egl_dat")
+                    })
+            });
         if local(&item.installations) {
             if heroic {
                 item.client = "Heroic".into();
@@ -184,14 +193,21 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
                     "Heroic",
                     format!("heroic://launch/legendary/{}", encode(&game.app_name)),
                 ));
-            } else if native_epic {
+            } else if native_install {
+                let app = game
+                    .native_app
+                    .clone()
+                    .unwrap_or_else(|| encode(&game.app_name));
                 item.launch = Some(url(
                     "Epic",
-                    format!(
-                        "com.epicgames.launcher://apps/{}?action=launch&silent=true",
-                        encode(&game.app_name)
-                    ),
+                    format!("com.epicgames.launcher://apps/{app}?action=launch&silent=true"),
                 ));
+                if cfg!(windows) {
+                    item.uninstall = Some(url(
+                        "Epic",
+                        format!("com.epicgames.launcher://apps/{app}?action=uninstall&silent=true"),
+                    ));
+                }
             } else if let (Some(program), Some(profile)) = (&legendary, profile) {
                 let mut action = command(
                     "Legendary",
@@ -204,7 +220,9 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
                 item.client = "Legendary".into();
                 item.launch = Some(action);
             }
-            if let (Some(program), Some(profile)) = (&legendary, profile) {
+            if item.uninstall.is_none()
+                && let (Some(program), Some(profile)) = (&legendary, profile)
+            {
                 let mut action = command(
                     "Legendary",
                     program.to_string_lossy().into(),
@@ -224,8 +242,6 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
         if local(&item.installations) && item.uninstall.is_none() {
             let mut manage = if heroic {
                 discovery::desktop_command("heroic").map(|(p, a)| command("Heroic", p, a))
-            } else if native_epic {
-                Some(url("Epic", "com.epicgames.launcher://store/library".into()))
             } else {
                 None
             };
@@ -596,6 +612,7 @@ mod tests {
         report.epic.games.push(EpicGame {
             app_name: "epic-game".into(),
             title: "Epic game".into(),
+            native_app: None,
             library_sources: vec!["foreign-profile".into()],
             installations: vec![],
         });

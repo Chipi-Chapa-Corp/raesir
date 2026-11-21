@@ -287,6 +287,7 @@ mod tests {
         previous.epic.games.push(EpicGame {
             app_name: "same".into(),
             title: "same".into(),
+            native_app: None,
             library_sources: vec![],
             installations: vec![native.clone()],
         });

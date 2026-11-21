@@ -432,6 +432,10 @@ impl Launcher {
         let working = progress
             .as_ref()
             .filter(|p| play_button.is_none() && !console_only && !unsupported && p.blocks_play());
+        let can_uninstall = installed_here
+            && g.source.uninstall.is_some()
+            && !progress.as_ref().is_some_and(|p| p.active())
+            && play_button.is_none();
         let error = progress.as_ref().and_then(|p| p.error);
         let action_tip = play_button
             .map(|state| state.label().into())
@@ -769,125 +773,133 @@ impl Launcher {
                                 .bg(rgb(0x9ff4bc)),
                         )
                     })
-                    .when(
-                        installed_here
-                            && g.source.uninstall.is_some()
-                            && working.is_none()
-                            && play_button.is_none(),
-                        |d| {
-                            d.child(
-                                button_shell(("uninstall", i), false)
-                                    .child(icon("trash").text_color(rgb(0xf0f0f0)))
-                                    .absolute()
-                                    .bottom(px(self.zoom * 0.55
-                                        + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
-                                    .right(rems(if modded {
-                                        5.85
-                                    } else if playable {
-                                        3.2
-                                    } else {
-                                        0.55
-                                    }))
-                                    .bg(rgba(0x101010b8))
-                                    .hover(|s| s.bg(rgba(0x303030e6)))
-                                    .tooltip(|_, cx| {
-                                        cx.new(|_| {
-                                            crate::library::ActionTooltip("Uninstall".into())
-                                        })
-                                        .into()
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.action(uninstall_key.to_string(), "uninstall", cx);
-                                    })),
-                            )
-                        },
-                    )
-                    .when(modded && working.is_none() && play_button.is_none(), |d| {
-                        d.child(
-                            button_shell(("launch-modded", i), false)
-                                .child(icon("mods").text_color(rgb(0xf0f0f0)))
-                                .absolute()
-                                .bottom(px(self.zoom * 0.55
-                                    + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
-                                .right(rems(3.2))
-                                .bg(rgba(0x101010b8))
-                                .hover(|s| s.bg(rgba(0x303030e6)))
-                                .tooltip(|_, cx| {
-                                    cx.new(|_| {
-                                        crate::library::ActionTooltip("Launch modded".into())
-                                    })
-                                    .into()
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.action(modded_key.to_string(), "launch-modded", cx);
-                                })),
-                        )
-                    })
-                    .when(
-                        playable || installable || working.is_some() || play_button.is_some(),
-                        |d| {
-                            d.child(
-                                button_shell(
-                                    (play_button.map_or("action", PlayButton::element_id), i),
-                                    false,
-                                )
-                                .role(Role::Button)
-                                .aria_disabled(
-                                    play_button.is_some_and(|button| button != PlayButton::Quit),
-                                )
-                                .child(if let Some(button) = play_button {
-                                    button.glyph(0x202020)
-                                } else if let Some(progress) = working {
-                                    icon(downloads::button_icon(progress))
-                                        .text_color(rgb(0x202020))
-                                        .into_any_element()
-                                } else {
-                                    icon(if playable { "play" } else { "install" })
-                                        .text_color(rgb(0x202020))
-                                        .into_any_element()
-                                })
-                                .when_some(
-                                    play_button
-                                        .filter(|button| *button != PlayButton::Quit)
-                                        .map(|button| button.label().to_owned())
-                                        .or_else(|| working.map(downloads::button_label))
-                                        .filter(|s| !s.is_empty()),
-                                    |d, label| {
-                                        d.w_auto().px(rems(0.7)).gap(rems(0.35)).child(label)
-                                    },
-                                )
-                                .text_color(rgb(0x202020))
-                                .text_size(rems(CARD_TITLE_FONT_SIZE))
-                                .absolute()
-                                .bottom(px(self.zoom * 0.55
-                                    + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
-                                .right(rems(0.55))
-                                .bg(rgba(0xdcece4f2))
-                                .hover(|s| s.bg(rgba(0xf0f8f3ff)))
-                                .when_some(action_tip, |d, tip| {
-                                    d.aria_label(tip.clone()).tooltip(move |_, cx| {
-                                        cx.new(|_| crate::library::ActionTooltip(tip.clone()))
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(
+                                self.zoom * 0.55 + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP
+                            ))
+                            .right(rems(0.55))
+                            .flex()
+                            .items_center()
+                            .gap(rems(0.4))
+                            .when(can_uninstall, |d| {
+                                d.child(
+                                    button_shell(("uninstall", i), false)
+                                        .child(icon("trash").text_color(rgb(0xf0f0f0)))
+                                        .bg(rgba(0x101010b8))
+                                        .hover(|s| s.bg(rgba(0x303030e6)))
+                                        .tooltip(|_, cx| {
+                                            cx.new(|_| {
+                                                crate::library::ActionTooltip("Uninstall".into())
+                                            })
                                             .into()
-                                    })
-                                })
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        match play_button {
-                                            Some(PlayButton::Quit) => {
-                                                this.action(key.to_string(), "quit", cx)
-                                            }
-                                            None if !this.primary_download_action(&key, cx) => {
-                                                this.action(key.to_string(), action, cx);
-                                            }
-                                            _ => {}
-                                        }
-                                    },
-                                )),
-                            )
-                        },
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.action(uninstall_key.to_string(), "uninstall", cx);
+                                        })),
+                                )
+                            })
+                            .when(modded && working.is_none() && play_button.is_none(), |d| {
+                                d.child(
+                                    button_shell(("launch-modded", i), false)
+                                        .child(icon("mods").text_color(rgb(0xf0f0f0)))
+                                        .bg(rgba(0x101010b8))
+                                        .hover(|s| s.bg(rgba(0x303030e6)))
+                                        .tooltip(|_, cx| {
+                                            cx.new(|_| {
+                                                crate::library::ActionTooltip(
+                                                    "Launch modded".into(),
+                                                )
+                                            })
+                                            .into()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.action(
+                                                modded_key.to_string(),
+                                                "launch-modded",
+                                                cx,
+                                            );
+                                        })),
+                                )
+                            })
+                            .when(
+                                playable
+                                    || installable
+                                    || working.is_some()
+                                    || play_button.is_some(),
+                                |d| {
+                                    d.child(
+                                        button_shell(
+                                            (
+                                                play_button
+                                                    .map_or("action", PlayButton::element_id),
+                                                i,
+                                            ),
+                                            false,
+                                        )
+                                        .role(Role::Button)
+                                        .aria_disabled(
+                                            play_button
+                                                .is_some_and(|button| button != PlayButton::Quit),
+                                        )
+                                        .child(if let Some(button) = play_button {
+                                            button.glyph(0x202020)
+                                        } else if let Some(progress) = working {
+                                            icon(downloads::button_icon(progress))
+                                                .text_color(rgb(0x202020))
+                                                .into_any_element()
+                                        } else {
+                                            icon(if playable { "play" } else { "install" })
+                                                .text_color(rgb(0x202020))
+                                                .into_any_element()
+                                        })
+                                        .when_some(
+                                            play_button
+                                                .filter(|button| *button != PlayButton::Quit)
+                                                .map(|button| button.label().to_owned())
+                                                .or_else(|| working.map(downloads::button_label))
+                                                .filter(|s| !s.is_empty()),
+                                            |d, label| {
+                                                d.w_auto()
+                                                    .px(rems(0.7))
+                                                    .gap(rems(0.35))
+                                                    .child(label)
+                                            },
+                                        )
+                                        .text_color(rgb(0x202020))
+                                        .text_size(rems(CARD_TITLE_FONT_SIZE))
+                                        .bg(rgba(0xdcece4f2))
+                                        .hover(|s| s.bg(rgba(0xf0f8f3ff)))
+                                        .when_some(action_tip, |d, tip| {
+                                            d.aria_label(tip.clone()).tooltip(move |_, cx| {
+                                                cx.new(|_| {
+                                                    crate::library::ActionTooltip(tip.clone())
+                                                })
+                                                .into()
+                                            })
+                                        })
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                match play_button {
+                                                    Some(PlayButton::Quit) => {
+                                                        this.action(key.to_string(), "quit", cx)
+                                                    }
+                                                    None if !this
+                                                        .primary_download_action(&key, cx) =>
+                                                    {
+                                                        this.action(key.to_string(), action, cx);
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }),
+                                        ),
+                                    )
+                                },
+                            ),
                     ),
             )
             .child(
@@ -1238,14 +1250,22 @@ impl Render for Launcher {
             })
             .when_some(self.notice.clone(), |d, text| {
                 d.child(
-                    pill()
+                    div()
                         .absolute()
                         .bottom(rems(1.5))
-                        .left(px(viewport / 2. - 220.))
-                        .w(px(440.))
-                        .p(rems(1.))
+                        .left(rems(1.))
+                        .right(rems(1.))
+                        .flex()
                         .justify_center()
-                        .child(text),
+                        .child(
+                            pill()
+                                .max_w(rems(40.))
+                                .min_w_0()
+                                .px(rems(1.25))
+                                .py(rems(0.75))
+                                .rounded(rems(1.2))
+                                .child(div().min_w_0().whitespace_normal().text_center().child(text)),
+                        ),
                 )
             })
     }

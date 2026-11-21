@@ -452,6 +452,7 @@ fn game<'a>(games: &'a mut BTreeMap<String, EpicGame>, id: &str, title: &str) ->
     let game = games.entry(id.into()).or_insert_with(|| EpicGame {
         app_name: id.into(),
         title: title.into(),
+        native_app: None,
         library_sources: vec![],
         installations: vec![],
     });
@@ -514,7 +515,26 @@ fn install(
             (raw.into(), "unavailable")
         }
     };
-    game(games, id, title).installations.push(Installation {
+    let game = game(games, id, title);
+    if source.local
+        && source.os == Os::Windows
+        && state == "installed"
+        && matches!(
+            source.kind.as_str(),
+            "egl_manifests" | "egl_item" | "egl_dat"
+        )
+        && let (Some(namespace), Some(catalog)) = (
+            text(row, "CatalogNamespace").or_else(|| text(row, "NamespaceId")),
+            text(row, "CatalogItemId").or_else(|| text(row, "ItemId")),
+        )
+    {
+        game.native_app = Some(
+            [namespace, catalog, id]
+                .map(crate::catalog::encode)
+                .join("%3A"),
+        );
+    }
+    game.installations.push(Installation {
         library: source.path.clone(),
         path,
         os: source.os,
@@ -909,6 +929,39 @@ mod tests {
         assert_eq!(game.installations[0].state, "incomplete");
         assert_eq!(game.installations[0].os, Os::Windows);
     }
+    #[test]
+    #[cfg(windows)]
+    fn windows_manifest_routes_launch_and_uninstall_to_the_registered_application() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("Manifests");
+        let payload = dir.path().join("Game");
+        fs::create_dir(&payload).unwrap();
+        write(
+            &manifests.join("game.item"),
+            json!({
+                "AppName": "artifact",
+                "CatalogNamespace": "namespace",
+                "CatalogItemId": "catalog",
+                "DisplayName": "Epic fixture",
+                "InstallLocation": payload,
+            }),
+        );
+        let (epic, warnings) = run(&[source(&manifests, "egl_manifests", Os::Windows)], None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut report = crate::steam::scan_sources(
+            &[], &[], &[], &OwnedLibrary::default(), None, vec![], vec![],
+        );
+        report.epic = epic;
+        let games = crate::catalog::from_report(&report);
+        let game = games.iter().find(|g| g.key == "epic:artifact").unwrap();
+        for (action, operation) in [(game.launch.as_ref(), "launch"), (game.uninstall.as_ref(), "uninstall")] {
+            let expected = format!(
+                "com.epicgames.launcher://apps/namespace%3Acatalog%3Aartifact?action={operation}&silent=true"
+            );
+            assert!(matches!(&action.unwrap().target, ActionTarget::Url { url } if url == &expected));
+        }
+    }
+
     #[test]
     fn legendary_assets_add_uninstalled_games_but_metadata_alone_does_not_prove_membership() {
         let dir = tempfile::tempdir().unwrap();
