@@ -216,7 +216,7 @@ impl Lease {
         }
     }
     fn stop(&mut self) -> Result<(), String> {
-        // A user-requested install/removal belongs to Steam and continues after Exposed Games
+        // A user-requested install/removal belongs to Steam and continues after Raesir
         // closes. Only temporary library-lookup sessions are shut down here.
         if self.keep_running {
             let _ = self.child.try_wait();
@@ -268,7 +268,7 @@ impl Lease {
         while self.alive(&snapshot()) {
             if Instant::now() > until {
                 return Err(
-                    "Steam has not exited. Close Steam, then retry closing Exposed Games.".into(),
+                    "Steam has not exited. Close Steam, then retry closing Raesir.".into(),
                 );
             }
             thread::sleep(Duration::from_millis(100));
@@ -315,7 +315,7 @@ impl Manager {
         snapshot().processes().values().any(|p| is_steam(p.name()))
     }
 
-    /// A mutation delegated through a client URL must survive Exposed Games closing too.
+    /// A mutation delegated through a client URL must survive Raesir closing too.
     pub fn preserve(&self, root: &str) {
         if let Some(lease) = self
             .lease
@@ -343,7 +343,7 @@ impl Manager {
         }
     }
     pub fn read_library(&self, root: &str) -> Result<OwnedLibrary, String> {
-        if env::var_os("EXPOSED_GAMES_DISABLE_STEAM_IPC").is_some() {
+        if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
             return Err("Steam IPC is disabled for isolated diagnostics".into());
         }
         if !crate::steam_ipc::supported() {
@@ -367,7 +367,7 @@ impl Manager {
             .lock()
             .map_err(|_| "Steam manager is unavailable")?;
         if self.closing.load(Ordering::SeqCst) {
-            return Err("Exposed Games is shutting down".into());
+            return Err("Raesir is shutting down".into());
         }
         let mut started = false;
         if let Some(lease) = lock.as_ref() {
@@ -420,7 +420,7 @@ impl Manager {
             for _ in 0..15 {
                 lock.as_mut().unwrap().capture(&snapshot());
                 if self.closing.load(Ordering::SeqCst) {
-                    return Err("Exposed Games is shutting down".into());
+                    return Err("Raesir is shutting down".into());
                 }
                 thread::sleep(Duration::from_millis(100));
             }
@@ -487,7 +487,7 @@ impl Manager {
         allow_start: bool,
     ) -> Result<steam_control::Status, steam_control::Error> {
         use steam_control::Error;
-        if env::var_os("EXPOSED_GAMES_DISABLE_STEAM_IPC").is_some() {
+        if env::var_os("RAESIR_DISABLE_STEAM_IPC").is_some() {
             return Err(Error::Unavailable);
         }
         let client = clients()

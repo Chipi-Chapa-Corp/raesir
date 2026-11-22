@@ -17,9 +17,11 @@ pub fn assets() -> AssetRegistry {
         asset!("mods", "lucide/puzzle.svg"),
         asset!("joystick", "lucide/joystick.svg"),
         asset!("edit", "lucide/pencil.svg"),
+        asset!("trending", "lucide/trending-up.svg"),
         asset!("check", "adwaita/object-select-symbolic.svg"),
         asset!("verified-symbolic", "verified-symbolic.svg"),
         asset!("face-sad-symbolic", "adwaita/face-sad-symbolic.svg"),
+        asset!("emote-sick", "adwaita/emote-sick.svg"),
         asset!(
             "face-smile-big-symbolic",
             "adwaita/face-smile-big-symbolic.svg"
@@ -60,8 +62,9 @@ pub fn assets() -> AssetRegistry {
         asset!("all", "adwaita/view-grid-symbolic.svg"),
         asset!("wallet", "adwaita/wallet-symbolic.svg"),
         asset!("game-pass", "game-pass.svg"),
-        asset!("installed", "adwaita/input-gaming-symbolic.svg"),
-        asset!("not-installed", "adwaita/forbidden-symbolic.svg"),
+        asset!("installed", "adwaita/document-save-symbolic.svg"),
+        asset!("not-installed", "adwaita/cloud-deploy-symbolic.svg"),
+        asset!("gamepad", "adwaita/input-gaming-symbolic.svg"),
         asset!("install", "adwaita/folder-download-symbolic.svg"),
         asset!("stop", "adwaita/media-playback-stop-symbolic.svg"),
         asset!("trash", "adwaita/user-trash-symbolic.svg"),

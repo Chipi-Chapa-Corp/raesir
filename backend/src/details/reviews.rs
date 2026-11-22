@@ -106,7 +106,7 @@ pub struct SteamReviews {
 }
 
 pub fn fetch(appid: &str, query: &Query, recent: bool, cursor: &str) -> Result<Page, String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
         return Err("Reviews are offline. Try again when connected.".into());
     }
     let id = appid

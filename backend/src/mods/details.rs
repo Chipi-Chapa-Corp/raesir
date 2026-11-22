@@ -7,6 +7,9 @@ impl Manager {
         if recipes::for_game(game).is_some() {
             return self.noita_details(game, id);
         }
+        if stardew::matches(game) {
+            return self.stardew_details(game, id);
+        }
         let slug = community(game).ok_or("Thunderstore does not list this game")?;
         let (index, _) = self.catalog(slug, false)?;
         let package = index
@@ -33,12 +36,12 @@ impl Manager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok());
         let readme = cached.or_else(|| {
-            if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+            if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
                 return None;
             }
             let fetch = || -> Result<serde_json::Value, String> {
                 let client = reqwest::blocking::Client::builder()
-                    .user_agent("ExposedGames/0.1")
+                    .user_agent("Raesir/0.1")
                     .connect_timeout(Duration::from_secs(3))
                     .timeout(Duration::from_secs(10))
                     .build()

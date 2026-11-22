@@ -9,7 +9,7 @@ pub fn perform(report: &Report, key: &str, kind: &str) -> Result<String, String>
     dispatch(&action.target)?;
     Ok(action
         .note
-        .unwrap_or_else(|| format!("Sent to {}", action.client)))
+        .unwrap_or_else(|| format!("Sent to {}", crate::catalog::client_label(&action.client))))
 }
 
 /// Preserve Steam's normal client routing while explicitly disabling a loader
@@ -59,7 +59,7 @@ fn steam_launch_url(id: &str, args: &[String]) -> Result<String, String> {
 }
 
 pub fn resolve(report: &Report, key: &str, kind: &str) -> Result<GameAction, String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
     let game = report
@@ -159,7 +159,7 @@ pub fn library_handoff_allowed(game: &LibraryGame) -> bool {
 
 fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
     if !library_handoff_allowed(game) {
-        return Err("Manage this Xbox game in Exposed Games".into());
+        return Err("Manage this Xbox game in Raesir".into());
     }
     if !game.client_os.contains(&Os::host()) {
         return Err("This game's client library is on another OS".into());
@@ -204,7 +204,7 @@ fn library_action(game: &LibraryGame) -> Result<GameAction, String> {
 }
 
 pub fn dispatch(target: &ActionTarget) -> Result<(), String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
     let mut command = match target {
@@ -345,7 +345,7 @@ fn portal_request(connection: &zbus::blocking::Connection, url: &str) -> Result<
         .as_str()
         .trim_start_matches(':')
         .replace('.', "_");
-    let path = format!("/org/freedesktop/portal/desktop/request/{sender}/exposed_games");
+    let path = format!("/org/freedesktop/portal/desktop/request/{sender}/raesir");
     let request = Proxy::new(
         connection,
         "org.freedesktop.portal.Desktop",
@@ -377,7 +377,7 @@ fn portal_request(connection: &zbus::blocking::Connection, url: &str) -> Result<
         "org.freedesktop.portal.OpenURI",
     )
     .map_err(|e| e.to_string())?;
-    let options = HashMap::from([("handle_token", Value::from("exposed_games"))]);
+    let options = HashMap::from([("handle_token", Value::from("raesir"))]);
     let opened: zbus::Result<OwnedObjectPath> = portal.call("OpenURI", &("", url, options));
     let result = match opened {
         Err(e) => Err(format!("Could not open the link through your desktop: {e}")),
@@ -395,7 +395,7 @@ fn portal_request(connection: &zbus::blocking::Connection, url: &str) -> Result<
 }
 
 pub fn support(project: &str) -> Result<(), String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Client actions are disabled in this diagnostic profile".into());
     }
     let url = match project {
@@ -701,7 +701,7 @@ mod tests {
                     options
                         .get("handle_token")
                         .and_then(|v| <&str>::try_from(v).ok()),
-                    Some("exposed_games")
+                    Some("raesir")
                 );
                 let sender = header
                     .sender()
@@ -710,7 +710,7 @@ mod tests {
                     .trim_start_matches(':')
                     .replace('.', "_");
                 let path =
-                    format!("/org/freedesktop/portal/desktop/request/{sender}/exposed_games");
+                    format!("/org/freedesktop/portal/desktop/request/{sender}/raesir");
                 connection
                     .emit_signal(
                         None::<&str>,

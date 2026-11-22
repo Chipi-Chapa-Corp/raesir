@@ -3,7 +3,6 @@ use super::*;
 use serde_json::Value;
 use std::io::{Read, Write};
 
-mod archive;
 mod providers;
 mod session;
 #[cfg(target_os = "linux")]
@@ -70,15 +69,6 @@ pub(super) fn installed(path: &Path) -> Result<Vec<InstalledMod>, String> {
         .collect())
 }
 
-fn allowed() -> Result<(), String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
-        && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none()
-    {
-        return Err("Mod changes are disabled in this diagnostic profile".into());
-    }
-    Ok(())
-}
-
 impl Manager {
     fn noita_pending(&self, game: &LibraryGame) -> Result<tempfile::TempDir, String> {
         let slug = community(game).ok_or("Unsupported game")?;
@@ -110,7 +100,7 @@ impl Manager {
     }
 
     pub(super) fn noita_install(&self, game: &LibraryGame, id: &str) -> Result<Snapshot, String> {
-        allowed()?;
+        install::changes_allowed()?;
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
@@ -149,7 +139,7 @@ impl Manager {
     }
 
     pub(super) fn noita_uninstall(&self, game: &LibraryGame, id: &str) -> Result<Snapshot, String> {
-        allowed()?;
+        install::changes_allowed()?;
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
@@ -178,21 +168,14 @@ impl Manager {
         self.noita_commit(game, pending, &entries)
     }
 
-    /// Only Nexus imports are exposed; arbitrary GitHub URLs/local mods are not.
-    pub fn import_nexus(
+    pub(super) fn import_noita_nexus(
         &self,
         game: &LibraryGame,
+        id: u64,
         url: &str,
         archive: &Path,
         folder: &str,
     ) -> Result<Snapshot, String> {
-        allowed()?;
-        let definition =
-            recipes::for_game(game).ok_or("Nexus imports are not supported for this game")?;
-        let id = nexus_id(url, definition)?;
-        if !archive.is_file() {
-            return Err("Choose the archive downloaded from Nexus".into());
-        }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
@@ -281,42 +264,6 @@ fn apply_download(
     entries.retain(|e| e.package.id != entry.package.id);
     entries.push(entry);
     Ok(())
-}
-
-fn nexus_id(url: &str, definition: &recipes::Game) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|_| "Enter a Nexus mod page URL")?;
-    if parsed.scheme() != "https"
-        || !matches!(
-            parsed.host_str(),
-            Some("www.nexusmods.com" | "nexusmods.com")
-        )
-    {
-        return Err("Enter a Nexus Mods HTTPS page URL".into());
-    }
-    let parts = parsed
-        .path_segments()
-        .ok_or("Invalid Nexus page")?
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
-    let wanted = reqwest::Url::parse(&definition.nexus).map_err(|e| e.to_string())?;
-    let game = wanted
-        .path_segments()
-        .and_then(|mut s| s.next())
-        .ok_or("Invalid Nexus game")?;
-    let parts = if parts.first() == Some(&"games") {
-        &parts[1..]
-    } else {
-        &parts[..]
-    };
-    if parts.len() < 3
-        || parts[0] != game
-        || parts[1] != "mods"
-        || !parts[2].bytes().all(|b| b.is_ascii_digit())
-        || parts[2].is_empty()
-    {
-        return Err(format!("Choose a {game} mod page on Nexus"));
-    }
-    Ok(parts[2].into())
 }
 
 fn unpack_mod(

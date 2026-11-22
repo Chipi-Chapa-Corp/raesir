@@ -1,5 +1,5 @@
 use super::*;
-use exposed_games_backend::details::rich::{Block, Span};
+use raesir_backend::details::rich::{Block, Span};
 
 #[derive(Default)]
 pub(super) struct AnimationSlot {
@@ -51,7 +51,7 @@ fn text(id: usize, spans: &[Span]) -> Div {
                 StyledText::new(content).with_highlights(highlights),
             )
             .on_click(links, move |index, _, cx| {
-                if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
+                if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
                     cx.open_url(&urls[index]);
                 }
             }),
@@ -153,7 +153,7 @@ impl DetailsPage {
                     );
                 }
                 Block::Image { url, alt, link } => {
-                    let viewer_url = exposed_games_backend::artwork::xbox_viewer_url(url);
+                    let viewer_url = raesir_backend::artwork::xbox_viewer_url(url);
                     let url = viewer_url.as_ref().map_or(url.as_str(), |url| url.as_str());
                     if self.failed.contains(url) {
                         if !alt.is_empty() {
@@ -183,7 +183,7 @@ impl DetailsPage {
                             .justify_center()
                             .when_some(link.clone(), |d, link| {
                                 d.cursor_pointer().on_click(move |_, _, cx| {
-                                    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
+                                    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
                                         cx.open_url(&link);
                                     }
                                 })
@@ -214,7 +214,7 @@ impl DetailsPage {
                     let loading = slot.loading;
                     let poster_url = poster
                         .as_deref()
-                        .and_then(exposed_games_backend::artwork::xbox_viewer_url);
+                        .and_then(raesir_backend::artwork::xbox_viewer_url);
                     let poster = poster_url
                         .as_ref()
                         .map(|url| url.as_str())

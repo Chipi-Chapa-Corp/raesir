@@ -136,7 +136,7 @@ impl Manager {
         }
     }
 
-    /// Polls every live client, including downloads started outside Exposed Games.
+    /// Polls every live client, including downloads started outside Raesir.
     /// No filesystem scanning or IPC happens when the UI reads snapshot().
     pub fn refresh(&self, report: &Report, updates: bool, start_clients: bool) -> Vec<String> {
         let Ok(mut state) = self.operation.try_lock() else {
@@ -159,7 +159,7 @@ impl Manager {
             let available = context.verified(port(context.client));
             if !available
                 && start_clients
-                && std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none()
+                && std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none()
                 && !state.started.contains_key(&root)
             {
                 state.started.insert(root.clone(), Instant::now());
@@ -201,7 +201,7 @@ impl Manager {
                     {
                         job.progress.phase = Phase::Failed;
                         job.progress.detail = Some(format!(
-                            "Quit {} once, then retry through Exposed Games to enable download integration",
+                            "Quit {} once, then retry through Raesir to enable download integration",
                             context.client.name()
                         ));
                     }
@@ -335,7 +335,7 @@ impl Manager {
                         .into(),
                 ),
             };
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
             return Err("Client actions are disabled".into());
         }
         let ready = context.verified(port(context.client));
@@ -365,7 +365,7 @@ impl Manager {
     }
 
     pub fn control(&self, report: &Report, key: &str, resume: bool) -> Result<bool, String> {
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
             return Err("Client actions are disabled".into());
         }
         let mut state = self.operation.lock().unwrap_or_else(|e| e.into_inner());
@@ -570,14 +570,14 @@ fn request(
     let port = port(context.client);
     if !context.verified(port) {
         return Err(format!(
-            "{} download integration is unavailable. Quit the client once, then open it through Exposed Games.",
+            "{} download integration is unavailable. Quit the client once, then open it through Raesir.",
             context.client.name()
         ));
     }
     let (script, allowed): (String, fn(&str) -> bool) = match context.client {
         Client::Ubisoft => (
             format!(
-                "{}\nexposedGamesUbisoft({})",
+                "{}\nraesirUbisoft({})",
                 include_str!("ubisoft.js"),
                 json!({"action":action,"id":id,"checkUpdates":updates,"watching":watching})
             ),
@@ -585,7 +585,7 @@ fn request(
         ),
         Client::Ea => (
             format!(
-                "{}\nexposedGamesEa({})",
+                "{}\nraesirEa({})",
                 include_str!("ea.js"),
                 json!({"action":action,"id":id,"checkUpdates":updates,"watching":watching})
             ),

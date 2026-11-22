@@ -74,7 +74,7 @@ fn run_inner(dir: &Path) -> Result<(), String> {
         read_json(&dir.join("request.json")).ok_or("Missing download request")?,
     )
     .map_err(|_| "Invalid download request")?;
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Downloads are disabled in diagnostics".into());
     }
     let mut progress = Progress::starting(request.operation);
@@ -229,7 +229,7 @@ fn run_inner(dir: &Path) -> Result<(), String> {
             } else if ferestre_game {
                 progress.controllable = true;
                 if status.success() {
-                    Some("Ferestre reported success, but the installed game files or version could not be verified.".into())
+                    Some("Could not verify the installed Xbox game files or version.".into())
                 } else {
                     match ferestre_error {
                         Some(FerestreFailure::SignInRequired) => {
@@ -243,7 +243,7 @@ fn run_inner(dir: &Path) -> Result<(), String> {
                                 |code| format!("exit code {code}"),
                             );
                             Some(format!(
-                                "Ferestre stopped ({reason}). See output.log for details."
+                                "Xbox download stopped ({reason}). See output.log for details."
                             ))
                         }
                     }
@@ -350,13 +350,13 @@ fn ferestre_failure(log: &str) -> Option<FerestreFailure> {
             return Some(SignInRequired);
         }
         if line == "Selection failed" || line.starts_with("no PC package found") {
-            return Some(Message("Ferestre could not select a compatible PC package for this Xbox edition"));
+            return Some(Message("Could not find a compatible PC download for this Xbox edition"));
         }
         if line.starts_with("No .msixvc file found") {
             if log.contains("the package list came back empty") {
                 return Some(Message("The Xbox Store returned no downloadable PC package. Check again before retrying."));
             }
-            return Some(Message("This Xbox game uses a package format that Ferestre cannot install"));
+            return Some(Message("This Xbox edition can't be installed on Linux"));
         }
         let stage = line
             .strip_prefix("FERESTRE_TRANSFER_DIAGNOSTIC_V1 ")?
@@ -373,7 +373,7 @@ fn ferestre_failure(log: &str) -> Option<FerestreFailure> {
                 Some(Message("The Xbox download connection failed. Retry to continue"))
             }
             "disk-space" | "transfer-io" => {
-                Some(Message("Ferestre could not write the game data. Check free space and permissions"))
+                Some(Message("Could not write the Xbox game files. Check free space and permissions"))
             }
             "installation-busy" => Some(Message("The game is running or its files are in use")),
             _ => None,

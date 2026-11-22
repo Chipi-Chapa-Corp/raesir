@@ -1,5 +1,5 @@
 [package]
-name = "exposed-games"
+name = "raesir"
 version = "0.1.1"
 license = "GPL-3.0-only"
 edition = "2024"
@@ -14,7 +14,7 @@ gpui = { package = "gpui-ce", version = "=0.3.0", default-features = false }
 gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", default-features = false, features = ["wayland", "x11"] }
 gpui_ce_elements = "=0.3.0"
 serde_json = "1"
-exposed-games-backend = { path = "../backend" }
+raesir-backend = { path = "../backend" }
 dirs = "7"
 libloading = "0.8"
 futures = "0.3"
@@ -26,5 +26,5 @@ tempfile = "3"
 winresource = { version = "0.1.31", default-features = false }
 
 [[bin]]
-name = "exposed-games"
+name = "raesir"
 path = "src/main.rs"

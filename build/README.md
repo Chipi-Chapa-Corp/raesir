@@ -7,8 +7,8 @@ GitHub Pages. The tag, `native/Cargo.toml` version, and latest AppStream release
 version must match. Enable **GitHub Actions** as the repository's Pages source
 before the first tagged release.
 
-Artifacts are `exposed-games-windows-x64-setup.exe`, `exposed-games-linux-x64.flatpak`, and
-`exposed-games.flatpakrepo`. Like Sele, the Flatpak repository is unsigned and uses
+Artifacts are `raesir-windows-x64-setup.exe`, `raesir-linux-x64.flatpak`, and
+`raesir.flatpakrepo`. Like Sele, the Flatpak repository is unsigned and uses
 HTTPS, and Windows installers are unsigned. No signing secrets are required.
 
 ## Linux
@@ -27,7 +27,7 @@ inside the SDK, using its Rust extension and runtime ABI. CI runs backend tests
 alongside the package builds, including their private D-Bus fixtures. Pages
 publication waits for validation and the Flatpak build. The GitHub release
 also waits for the Windows package.
-The package includes libmpv with the software render API used by Exposed Games.
+The package includes libmpv with the software render API used by Raesir.
 AVIF decoding and mod archive extraction use the runtime's dav1d and libarchive.
 The manifest grants host filesystem and command access for game clients, with
 explicit access to Flatpak clients' data directories. Client command wrappers
@@ -41,7 +41,7 @@ restores the Flatpak modules and compiled Rust dependencies built against the
 same SDK. Cargo uses its fingerprints to rebuild crates affected by source or
 lockfile changes. Only tagged releases build the Pages repository in CI. Final
 bundles and any Pages repository remain in ignored `dist/`.
-Install a downloaded bundle with `flatpak install ./exposed-games-linux-x64.flatpak`.
+Install a downloaded bundle with `flatpak install ./raesir-linux-x64.flatpak`.
 
 ## Windows
 
@@ -61,16 +61,27 @@ cache with the installer build. CI can reuse compiled dependencies across
 lockfile changes while the UCRT64 toolchain stays compatible. CI also silently
 installs the result into a temporary directory and checks the installed
 executable. Installation is per user, with Start menu/Desktop shortcuts and an
-uninstaller. Uninstall keeps Exposed Games's user data and removes only shipped
+uninstaller. Uninstall keeps Raesir's user data and removes only shipped
 files from the installation folder.
 
 ## Application identity and icon
 
-The application ID is `com.chipichapa.exposedgames` on Linux, including the
+The application ID is `com.chipichapa.raesir` on Linux, including the
 Flatpak manifest, desktop entry, AppStream metadata, and native window grouping.
-The executable and Cargo package are `exposed-games`.
+The executable and Cargo package are `raesir`.
 
-`build/icon.svg` is the canonical original Exposed Games E-gamepad artwork.
+For Nexus Mods browser sign-in, set `RAESIR_NEXUS_APP_SLUG` to Raesir's registered
+application slug before building. Release CI reads the GitHub Actions repository
+variable of the same name. Nexus Mods issues the slug through its
+[application registration process](https://help.nexusmods.com/article/114-api-acceptable-use-policy).
+A local debug build can exercise the download flow before registration. Set
+`RAESIR_NEXUS_TEST_API_KEY_FILE` to a private file containing the tester's
+personal Nexus API key before launching that build. The key is read locally
+for Nexus API requests. Release builds use the registered sign-in flow.
+Linux builds use Secret Service for the account credential and require the D-Bus
+development package (`libdbus-1-dev` on Debian/Ubuntu, `dbus-devel` on Fedora).
+
+`build/icon.svg` is the canonical original Raesir E-gamepad artwork.
 The native window and Flatpak raster icon use `build/icon.png`. Windows executables,
 Explorer, taskbar entries, shortcuts, and the installer use `build/icon.ico`,
 which includes 16–256 px images. The Windows resource also supplies the application

@@ -10,7 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CLIENT_NOT_FOUND: &str = "Could not find the Xbox client bundled with Ferestre. Use Xbox support in Settings to install or repair the managed CLI.";
+const CLIENT_NOT_FOUND: &str =
+    "Could not find the Xbox helper. Use Xbox support in Settings to install or repair it.";
 static SIGNED_OUT_CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
@@ -38,7 +39,7 @@ fn roles_path(config: &Path) -> PathBuf {
 
 fn roles(config: &Path) -> Result<Option<Roles>, String> {
     let path = roles_path(config);
-    let invalid = "Ferestre Store account settings could not be read";
+    let invalid = "Could not read Xbox account settings";
     if !path.try_exists().map_err(|_| invalid)? {
         return Ok(None);
     }
@@ -141,8 +142,65 @@ pub fn refresh_library() -> Result<(), String> {
     fetch_library(&client, &state, roles.as_ref())
 }
 
-fn xodus_client() -> Result<PathBuf, String> {
+pub(crate) fn xodus_client() -> Result<PathBuf, String> {
     resolve_xodus_client(&Client::discover().ok_or("Install Xbox support first")?)
+}
+
+pub(crate) fn player_profile() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let home = platform::home()?;
+    if let Some(roles) = roles(&config_dir(&home)).ok()? {
+        return Some(roles.player);
+    }
+    let profiles = account_profiles(&xodus_client().ok()?)?;
+    default_player(&profiles).map(str::to_owned)
+}
+
+fn default_player(profiles: &Value) -> Option<&str> {
+    let id = profiles["default_profile"]
+        .as_str()
+        .filter(|id| profile_id(id))?;
+    (profiles["schema"] == 1
+        && profiles["profiles"]
+            .as_array()?
+            .iter()
+            .any(|profile| profile["id"] == id && profile["signed_in"] == true))
+    .then_some(id)
+}
+
+pub(crate) fn player_achievement_page(
+    client: &Path,
+    profile: &str,
+    title_id: u32,
+    continuation: Option<&str>,
+    timeout: Duration,
+) -> Option<Value> {
+    let url = achievements_url(title_id, continuation);
+    let mut command = host_command(client);
+    command.args([
+        "--profile",
+        profile,
+        "collections",
+        &url,
+        "--relying-party",
+        "http://xboxlive.com",
+        "--header",
+        "x-xbl-contract-version:2",
+    ]);
+    query(command, timeout, "Xbox achievements could not be loaded").ok()
+}
+
+fn achievements_url(title_id: u32, continuation: Option<&str>) -> String {
+    let mut url = format!(
+        "https://achievements.xboxlive.com/users/xuid({{XUID}})/achievements?titleId={title_id}&types=Persistent&maxItems=100"
+    );
+    if let Some(token) = continuation {
+        url.push_str("&continuationToken=");
+        url.push_str(&catalog::encode(token));
+    }
+    url
 }
 
 fn resolve_xodus_client(client: &Client) -> Result<PathBuf, String> {
@@ -173,6 +231,11 @@ fn external_client_path(result: &Value) -> Option<PathBuf> {
 }
 
 fn selected_profile_signed_out(client: &Path, selected: Option<&Roles>) -> bool {
+    account_profiles(client)
+        .is_some_and(|profiles| signed_out(&profiles, selected.map(|roles| roles.store.as_str())))
+}
+
+fn account_profiles(client: &Path) -> Option<Value> {
     let mut command = host_command(client);
     command.args(["account-profiles", "--json"]);
     query(
@@ -180,7 +243,7 @@ fn selected_profile_signed_out(client: &Path, selected: Option<&Roles>) -> bool 
         Duration::from_secs(6),
         "Could not check Xbox account status",
     )
-    .is_ok_and(|profiles| signed_out(&profiles, selected.map(|roles| roles.store.as_str())))
+    .ok()
 }
 
 fn signed_out(value: &Value, store: Option<&str>) -> bool {
@@ -388,12 +451,24 @@ mod tests {
             {"id":live,"signed_in":true}, {"id":signed,"signed_in":false}
         ]});
         assert!(!signed_out(&profiles, None));
+        assert_eq!(default_player(&profiles), Some(live.as_str()));
         assert!(signed_out(&profiles, Some(&signed)));
+        let mut signed_out_default = profiles.clone();
+        signed_out_default["default_profile"] = json!(signed);
+        assert_eq!(default_player(&signed_out_default), None);
         assert!(!signed_out(&json!({"schema":1,"profiles":[]}), None));
         assert!(!signed_out(
             &json!({"schema":1,"profiles":[{"id":live}]}),
             Some(&live)
         ));
+    }
+
+    #[test]
+    fn achievement_request_encodes_the_continuation_without_substituting_it() {
+        assert_eq!(
+            achievements_url(123, Some("next&{RAWTOKEN}")),
+            "https://achievements.xboxlive.com/users/xuid({XUID})/achievements?titleId=123&types=Persistent&maxItems=100&continuationToken=next%26%7BRAWTOKEN%7D"
+        );
     }
 
     #[test]

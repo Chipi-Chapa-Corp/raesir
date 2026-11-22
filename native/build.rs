@@ -3,12 +3,12 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         winresource::WindowsResource::new()
             .set_icon("../build/icon.ico")
-            .set("ProductName", "Exposed Games")
-            .set("FileDescription", "Exposed Games")
-            .set("InternalName", "exposed-games")
-            .set("OriginalFilename", "exposed-games.exe")
+            .set("ProductName", "Raesir")
+            .set("FileDescription", "Raesir")
+            .set("InternalName", "raesir")
+            .set("OriginalFilename", "raesir.exe")
             .set("CompanyName", "Chipi Chapa Corp")
             .compile()
-            .expect("compile Exposed Games Windows icon and version resources");
+            .expect("compile Raesir Windows icon and version resources");
     }
 }

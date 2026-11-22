@@ -12,16 +12,29 @@ use thunderstore_engine::{
     client::ThunderstoreClient, ecosystem::Ecosystem, models::PackageIndex, profile::modlist,
 };
 
+mod archive;
 mod dependencies;
 mod details;
 mod install;
 mod launch;
+mod modde;
+mod nexus;
+mod nexus_details;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod nexus_account;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod nexus_install;
 mod noita;
 mod profiles;
+mod providers;
 pub mod recipes;
+mod stardew;
 mod steam;
 mod updates;
 pub use launch::LaunchTask;
+pub use nexus::{NexusPage, can_browse_nexus, has_managed_nexus};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub use nexus_install::NexusInstall;
 pub use steam::helper as steam_helper;
 pub use updates::{UpdateIssue, UpdateReport};
 
@@ -62,11 +75,12 @@ fn mod_lease_dir() -> PathBuf {
 }
 
 fn steam_mods_dir(root: &Path) -> PathBuf {
-    let legacy = root.join("raesir/mods");
-    if legacy.is_dir() {
-        legacy
+    let current = root.join("raesir/mods");
+    let previous = root.join("exposed-games/mods");
+    if current.is_dir() || !previous.is_dir() {
+        current
     } else {
-        root.join("exposed-games/mods")
+        previous
     }
 }
 
@@ -90,8 +104,8 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 pub fn diagnostic_launch_enabled() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("ISOLATED_GUI_SESSION").is_some()
-        && std::env::var_os("EXPOSED_GAMES_MODS_TEST_LAUNCH").is_some_and(|v| v == "1")
-        && std::env::var_os("EXPOSED_GAMES_MODS_TEST_ENV").is_some()
+        && std::env::var_os("RAESIR_MODS_TEST_LAUNCH").is_some_and(|v| v == "1")
+        && std::env::var_os("RAESIR_MODS_TEST_ENV").is_some()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +178,12 @@ pub struct Snapshot {
     pub warnings: Vec<String>,
 }
 
+impl Snapshot {
+    pub fn uses_smapi(&self) -> bool {
+        self.community == stardew::DOMAIN
+    }
+}
+
 struct Catalog {
     updated: Instant,
     index: Arc<PackageIndex>,
@@ -180,8 +200,14 @@ pub struct Manager {
 }
 
 pub fn community(game: &LibraryGame) -> Option<&'static str> {
+    if game.xbox_console_only && game.store == "xbox" {
+        return None;
+    }
     if let Some(recipe) = recipes::for_game(game) {
         return Some(&recipe.id);
+    }
+    if stardew::matches(game) {
+        return Some(stardew::DOMAIN);
     }
     ECOSYSTEM
         .games()
@@ -203,7 +229,7 @@ pub fn community(game: &LibraryGame) -> Option<&'static str> {
 impl Manager {
     pub fn new(data: &Path, cache: &Path) -> Self {
         Self {
-            data: std::env::var_os("EXPOSED_GAMES_MODS_DIR")
+            data: std::env::var_os("RAESIR_MODS_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| data.join("mods")),
             cache: cache.join("mods"),
@@ -239,7 +265,7 @@ impl Manager {
         {
             return Ok((catalog.index.clone(), catalog.packages.clone()));
         }
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
             return Err("Mod networking is disabled in this diagnostic profile".into());
         }
         let client = self.client(community)?;
@@ -324,7 +350,7 @@ impl Manager {
             && !crate::platform::local_sources().iter().any(|s| {
                 // Saved pointers from before the rename remain valid; both
                 // roots must pass the same namespace and community checks.
-                ["exposed-games/mods", "raesir/mods"]
+                ["raesir/mods", "exposed-games/mods"]
                     .iter()
                     .any(|directory| {
                         let base = Path::new(&s.path).join(directory);
@@ -398,12 +424,17 @@ impl Manager {
 
     pub fn summary(&self, game: &LibraryGame) -> Option<Summary> {
         let community = community(game)?;
+        if stardew::matches(game) && !self.data.join(community).is_dir() {
+            return None;
+        }
         let profiles = self.profiles(community);
         let selected = self.selected(community, &profiles);
         let installed = selected.map_or(0, |p| p.installed.len());
-        let local = game.installations.iter().any(|i| {
-            i.os == crate::model::Os::host() && matches!(i.state.as_str(), "installed" | "external")
-        });
+        let local = if stardew::matches(game) {
+            stardew::smapi_target(game).is_some()
+        } else {
+            crate::catalog::local(&game.installations)
+        };
         Some(Summary {
             community: community.into(),
             installed,
@@ -412,25 +443,32 @@ impl Manager {
     }
 
     pub fn snapshot(&self, game: &LibraryGame, refresh: bool) -> Result<Snapshot, String> {
-        let community = community(game).ok_or("Thunderstore does not list this game")?;
+        let community = community(game).ok_or("Mods are not supported for this game")?;
         self.registry(community)?;
-        let (packages, mut warnings) = if recipes::for_game(game).is_some() {
-            self.noita_catalog(game, refresh)?
+        let (packages, mut warnings, nexus_url) = if let Some(recipe) = recipes::for_game(game) {
+            let (packages, warnings) = self.noita_catalog(game, refresh)?;
+            (
+                packages,
+                warnings,
+                Some(nexus::browse_url(&recipe.nexus_domain)),
+            )
+        } else if stardew::matches(game) {
+            (self.stardew_profile_packages()?, Vec::new(), None)
         } else {
-            (self.catalog(community, refresh)?.1, Vec::new())
+            (self.catalog(community, refresh)?.1, Vec::new(), None)
         };
         warnings.extend(self.update_warnings(game));
         let profiles = self.profiles(community);
         let selected = self
             .selected(community, &profiles)
             .map(|p| p.id.clone())
-            .unwrap_or_else(|| "exposed-games".into());
+            .unwrap_or_else(|| "raesir".into());
         Ok(Snapshot {
             community: community.into(),
             profiles,
             selected,
             packages,
-            nexus_url: recipes::for_game(game).map(|g| g.nexus.clone()),
+            nexus_url,
             warnings,
         })
     }

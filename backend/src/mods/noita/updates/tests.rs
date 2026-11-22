@@ -94,7 +94,7 @@ fn recipe_updates_keep_the_pair_and_settings_and_failed_downloads_leave_the_orig
         "",
         &[(&tool.executable, b"updated companion, never executed")],
     );
-    let root = manager.profile_root("noita", "exposed-games");
+    let root = manager.profile_root("noita", "raesir");
     let source = root.join("revisions/profile-fixture");
     fs::create_dir_all(source.join("mods/oldfolder")).unwrap();
     fs::write(source.join("mods/oldfolder/old.lua"), b"old mod").unwrap();

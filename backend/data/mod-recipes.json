@@ -6,7 +6,7 @@
       "steam": "881100",
       "installer": "noita",
       "modworkshop": "noita",
-      "nexus": "https://www.nexusmods.com/noita/mods/",
+      "nexus_domain": "noita",
       "mods": [
         {
           "id": "entangled-worlds",

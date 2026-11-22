@@ -36,10 +36,31 @@ pub(crate) fn product_id(id: &str) -> bool {
     id.len() == 12 && id.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
+pub(crate) fn achievement_title_id(id: &str) -> Option<u32> {
+    let products = products(&[id], "US")?;
+    let product = products.iter().find(|p| {
+        p["ProductId"]
+            .as_str()
+            .is_some_and(|product_id| product_id.eq_ignore_ascii_case(id))
+    })?;
+    xbox_title_id(product)
+}
+
+fn xbox_title_id(product: &Value) -> Option<u32> {
+    let mut ids = product["AlternateIds"]
+        .as_array()?
+        .iter()
+        .filter(|entry| entry["IdType"] == "XboxTitleId")
+        .filter_map(|entry| entry["Value"].as_str()?.parse::<u32>().ok())
+        .filter(|&id| id != 0);
+    let id = ids.next()?;
+    ids.all(|other| other == id).then_some(id)
+}
+
 pub(crate) fn products(ids: &[&str], market: &str) -> Option<Vec<Value>> {
     if ids.is_empty()
         || ids.iter().any(|id| !product_id(id))
-        || std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some()
+        || std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
     {
         return None;
     }
@@ -159,6 +180,23 @@ fn apply(report: &mut Report, products: &BTreeMap<String, Product>) {
 mod tests {
     use super::*;
     use crate::{actions, catalog, model::Os};
+
+    #[test]
+    fn achievement_title_id_comes_from_unambiguous_xbox_catalog_metadata() {
+        let product = |alternate_ids| serde_json::json!({"AlternateIds": alternate_ids});
+        let id = |id_type, value| serde_json::json!({"IdType": id_type, "Value": value});
+        let other = id("LegacyWindowsStoreProductId", "123");
+        let xbox = id("XboxTitleId", "1907796436");
+        assert_eq!(
+            xbox_title_id(&product(vec![other.clone(), xbox.clone(), xbox.clone()])),
+            Some(1907796436)
+        );
+        assert_eq!(xbox_title_id(&product(vec![other])), None);
+        assert_eq!(
+            xbox_title_id(&product(vec![xbox, id("XboxTitleId", "456")])),
+            None
+        );
+    }
 
     #[test]
     fn cached_console_metadata_disables_an_old_install_action() {

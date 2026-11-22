@@ -58,8 +58,8 @@ pub fn scan(scan: &mut Scan<'_>) {
                     let value = discovery::json(&path)?;
                     let id = text(&value, "product_id")
                         .filter(|s| store_id(s))
-                        .ok_or("Invalid Ferestre product ID")?;
-                    let raw = text(&value, "dir").ok_or("Ferestre install has no directory")?;
+                        .ok_or("Invalid Xbox product ID")?;
+                    let raw = text(&value, "dir").ok_or("Xbox installation folder is missing")?;
                     let resolved = discovery::resolve(raw, &home, scan.report);
                     let path = resolved
                         .map(|p| p.to_string_lossy().into_owned())
@@ -147,7 +147,7 @@ fn ferestre_library(
         .and_then(|value| value["items"].as_array());
     let Some(rows) = rows else {
         scan.warnings
-            .push("Ferestre library cache could not be read".into());
+            .push("Could not read the saved Xbox library".into());
         return;
     };
     scan.verified.insert(source.clone());
@@ -446,11 +446,11 @@ $rows=@(Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsReso
                             "-NoProfile".into(),
                             "-NonInteractive".into(),
                             "-Command".into(),
-                            "Remove-AppxPackage -Package $env:EXPOSED_GAMES_PACKAGE_FULL_NAME -ErrorAction Stop".into(),
+                            "Remove-AppxPackage -Package $env:RAESIR_PACKAGE_FULL_NAME -ErrorAction Stop".into(),
                         ],
                     );
                     if let ActionTarget::Command { env, .. } = &mut action.target {
-                        env.insert("EXPOSED_GAMES_PACKAGE_FULL_NAME".into(), package.into());
+                        env.insert("RAESIR_PACKAGE_FULL_NAME".into(), package.into());
                     }
                     game.uninstall = Some(action);
                 }

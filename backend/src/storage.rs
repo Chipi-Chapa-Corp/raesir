@@ -2,8 +2,12 @@ use crate::{inventory, model::*, steam};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fs, path::Path};
 
-pub const APP_ID: &str = "com.chipichapa.exposedgames";
-const PREVIOUS_APP_IDS: [&str; 2] = ["dev.exposedgames.launcher", "dev.raesir.launcher"];
+pub const APP_ID: &str = "com.chipichapa.raesir";
+const PREVIOUS_APP_IDS: [&str; 3] = [
+    "com.chipichapa.exposedgames",
+    "dev.exposedgames.launcher",
+    "dev.raesir.launcher",
+];
 
 /// Keep existing installations on their original storage root: saved mod
 /// revisions and recovery receipts can contain absolute paths into it.
@@ -19,7 +23,7 @@ pub fn application_dir(base: &Path) -> std::path::PathBuf {
         }
     }
     // Flatpak changes XDG roots along with the application ID. Its manifest
-    // permits reading ~/.var/app, including both previous sandboxes.
+    // permits reading ~/.var/app, including previous sandboxes.
     if let (Some(sandbox), Some(kind)) = (base.parent(), base.file_name())
         && sandbox.file_name().is_some_and(|name| name == APP_ID)
     {
@@ -170,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn renamed_flatpak_reads_storage_from_both_previous_sandboxes() {
+    fn renamed_flatpak_reads_storage_from_previous_sandboxes() {
         for id in PREVIOUS_APP_IDS {
             let root = tempfile::tempdir().unwrap();
             for kind in ["data", "cache"] {

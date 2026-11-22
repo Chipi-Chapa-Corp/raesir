@@ -1,5 +1,5 @@
 use crate::{Launcher, backend::PartitionChoice, library::Game};
-use exposed_games_backend::{catalog, model::Report, steam_control::Operation};
+use raesir_backend::{catalog, model::Report, steam_control::Operation};
 use gpui::*;
 use std::{collections::HashMap, sync::Arc};
 
@@ -336,7 +336,7 @@ impl Launcher {
     }
 
     pub fn ignore_partition(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.closing || (self.host == exposed_games_backend::model::Os::Linux && self.syncing) {
+        if self.closing || (self.host == raesir_backend::model::Os::Linux && self.syncing) {
             return;
         }
         let remember = self.remember_partition(&id);
@@ -370,7 +370,7 @@ impl Launcher {
                 } else {
                     p.blocks_play()
                 }) && !(kind == "install"
-                    && p.phase == exposed_games_backend::steam_control::Phase::Available)
+                    && p.phase == raesir_backend::steam_control::Phase::Available)
             })
         {
             return;
@@ -402,9 +402,9 @@ impl Launcher {
             self.watch_game_activity(cx);
         }
         let steam_operation = if kind == "update" {
-            Some(exposed_games_backend::steam_control::Operation::Update)
+            Some(raesir_backend::steam_control::Operation::Update)
         } else if kind == "install" {
-            Some(exposed_games_backend::steam_control::Operation::Install)
+            Some(raesir_backend::steam_control::Operation::Install)
         } else {
             self.games
                 .iter()
@@ -415,7 +415,7 @@ impl Launcher {
                         "uninstall" => game.source.uninstall.as_ref(),
                         _ => None,
                     }?;
-                    if let exposed_games_backend::model::ActionTarget::Steam { operation, .. } =
+                    if let raesir_backend::model::ActionTarget::Steam { operation, .. } =
                         &action.target
                     {
                         Some(*operation)
@@ -428,7 +428,7 @@ impl Launcher {
             self.download_failures_dismissed.remove(&key);
             self.download_operations.insert(
                 key.clone(),
-                exposed_games_backend::steam_control::Progress::starting(operation),
+                raesir_backend::steam_control::Progress::starting(operation),
             );
             self.update_download_details(cx);
         }
@@ -477,11 +477,8 @@ impl Launcher {
     }
 
     pub(crate) fn update_download_details(&self, cx: &mut Context<Self>) {
-        let progress = &self.download_operations;
         if let Some(page) = &self.details {
-            page.update(cx, |page, cx| {
-                page.library_changed(&self.games, progress, cx)
-            });
+            page.update(cx, |page, cx| page.library_changed(self, cx));
         }
     }
 
@@ -649,7 +646,7 @@ impl Launcher {
     }
 
     fn downloads_need_polling(&self) -> bool {
-        use exposed_games_backend::steam_control::Phase;
+        use raesir_backend::steam_control::Phase;
         !self.closing
             && (self.download_operations.iter().any(|(key, progress)| {
                 progress.active()
@@ -679,7 +676,7 @@ impl Launcher {
                     .await;
                 let complete = progress
                     .values()
-                    .any(|p| p.phase == exposed_games_backend::steam_control::Phase::Complete);
+                    .any(|p| p.phase == raesir_backend::steam_control::Phase::Complete);
                 let now = std::time::UNIX_EPOCH
                     .elapsed()
                     .unwrap_or_default()

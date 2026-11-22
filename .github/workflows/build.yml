@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RAESIR_NEXUS_APP_SLUG: ${{ vars.RAESIR_NEXUS_APP_SLUG }}
+
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -39,7 +42,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes pkg-config libssl-dev dbus-daemon
+          sudo apt-get install --yes pkg-config libssl-dev libdbus-1-dev dbus-daemon
 
       - name: Check application identity and icon assets
         run: python3 -m unittest discover -s scripts -p test_branding.py
@@ -53,7 +56,7 @@ jobs:
           import os, tomllib, xml.etree.ElementTree as ET
           with open('native/Cargo.toml', 'rb') as source:
               version = tomllib.load(source)['package']['version']
-          metadata = ET.parse('build/com.chipichapa.exposedgames.metainfo.xml')
+          metadata = ET.parse('build/com.chipichapa.raesir.metainfo.xml')
           assert metadata.find('releases/release').get('version') == version, 'Update the AppStream release version to match native/Cargo.toml'
           if os.environ['REF'].startswith('refs/tags/v'):
               assert os.environ['REF_NAME'] == f'v{version}', f'Tag must match native/Cargo.toml version v{version}'
@@ -63,7 +66,7 @@ jobs:
         run: node --test backend/tests/client-downloads.test.cjs
 
       - name: Test backend
-        run: cargo test --locked --package exposed-games-backend --lib
+        run: cargo test --locked --package raesir-backend --lib
 
   windows:
     name: Windows x64
@@ -123,7 +126,7 @@ jobs:
 
       - name: Test Windows client download and Steam bridges
         run: |
-          cargo test --release --locked --package exposed-games-backend --lib -- \
+          cargo test --release --locked --package raesir-backend --lib -- \
             client_downloads::peer::tests steam_ipc::tests steam_control::tests
 
       - name: Build and verify NSIS installer
@@ -132,29 +135,29 @@ jobs:
       - name: Verify installation
         shell: pwsh
         run: |
-          $installer = Join-Path $PWD 'dist/exposed-games-windows-x64-setup.exe'
+          $installer = Join-Path $PWD 'dist/raesir-windows-x64-setup.exe'
           if (-not (Test-Path $installer)) { throw 'Windows installer was not produced.' }
-          $installDir = Join-Path $env:RUNNER_TEMP 'Exposed Games-install'
+          $installDir = Join-Path $env:RUNNER_TEMP 'Raesir-install'
           $process = Start-Process $installer -ArgumentList '/S', "/D=$installDir" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
-          foreach ($file in 'exposed-games.exe', 'archive.dll', 'LICENSE', 'Uninstall.exe') {
+          foreach ($file in 'raesir.exe', 'archive.dll', 'LICENSE', 'Uninstall.exe') {
             if (-not (Test-Path (Join-Path $installDir $file))) { throw "Missing installed file: $file" }
           }
-          $info = (Get-Item (Join-Path $installDir 'exposed-games.exe')).VersionInfo
-          if ($info.ProductName -ne 'Exposed Games' -or $info.FileDescription -ne 'Exposed Games') {
+          $info = (Get-Item (Join-Path $installDir 'raesir.exe')).VersionInfo
+          if ($info.ProductName -ne 'Raesir' -or $info.FileDescription -ne 'Raesir') {
             throw 'Executable branding resources are missing or incorrect.'
           }
-          $output = Join-Path $env:RUNNER_TEMP 'exposed-games-version.txt'
-          $process = Start-Process (Join-Path $installDir 'exposed-games.exe') -ArgumentList '--version' -Wait -PassThru -RedirectStandardOutput $output
-          if ($process.ExitCode -ne 0 -or (Get-Content $output) -notmatch '^Exposed Games \d+\.\d+\.\d+') {
+          $output = Join-Path $env:RUNNER_TEMP 'raesir-version.txt'
+          $process = Start-Process (Join-Path $installDir 'raesir.exe') -ArgumentList '--version' -Wait -PassThru -RedirectStandardOutput $output
+          if ($process.ExitCode -ne 0 -or (Get-Content $output) -notmatch '^Raesir \d+\.\d+\.\d+') {
             throw 'Installed executable did not start correctly.'
           }
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v7
         with:
-          name: exposed-games-windows-x64
-          path: dist/exposed-games-windows-x64-setup.exe
+          name: raesir-windows-x64
+          path: dist/raesir-windows-x64-setup.exe
           if-no-files-found: error
           compression-level: 0
 
@@ -189,8 +192,8 @@ jobs:
 
       - name: Validate desktop metadata
         run: |
-          appstreamcli validate --strict --explain build/com.chipichapa.exposedgames.metainfo.xml
-          desktop-file-validate build/com.chipichapa.exposedgames.desktop
+          appstreamcli validate --strict --explain build/com.chipichapa.raesir.metainfo.xml
+          desktop-file-validate build/com.chipichapa.raesir.desktop
 
       - name: Identify the Flatpak build environment
         id: flatpak-sdk
@@ -209,7 +212,7 @@ jobs:
           path: |
             .flatpak-builder/cache
             .flatpak-builder/downloads
-          key: flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.exposedgames.json') }}
+          key: flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.raesir.json') }}
 
       - name: Cache Flatpak Rust build dependencies
         uses: actions/cache@v5
@@ -218,12 +221,12 @@ jobs:
             .flatpak-builder/cargo-target/release/.fingerprint
             .flatpak-builder/cargo-target/release/build
             .flatpak-builder/cargo-target/release/deps
-          key: cargo-flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.exposedgames.json') }}-${{ hashFiles('native/Cargo.toml', 'backend/Cargo.toml', 'Cargo.toml', 'Cargo.lock') }}
-          restore-keys: cargo-flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.exposedgames.json') }}-
+          key: cargo-flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.raesir.json') }}-${{ hashFiles('native/Cargo.toml', 'backend/Cargo.toml', 'Cargo.toml', 'Cargo.lock') }}
+          restore-keys: cargo-flatpak-${{ runner.arch }}-${{ steps.flatpak-sdk.outputs.revision }}-${{ hashFiles('build/com.chipichapa.raesir.json') }}-
 
       - name: Build Flatpak bundle
         env:
-          EXPOSED_GAMES_FLATPAK_STATE_DIR: .flatpak-builder
+          RAESIR_FLATPAK_STATE_DIR: .flatpak-builder
         run: ./scripts/package-flatpak.sh
 
       - name: Build Flatpak update repository
@@ -231,21 +234,21 @@ jobs:
         run: |
           ./scripts/package-flatpak-repository.sh
           test -f dist/flatpak-pages/flatpak/summary
-          test -f dist/flatpak-pages/flatpak/exposed-games.flatpakref
-          flatpak remote-add --user --no-gpg-verify exposed-games-build \
+          test -f dist/flatpak-pages/flatpak/raesir.flatpakref
+          flatpak remote-add --user --no-gpg-verify raesir-build \
             "file://${GITHUB_WORKSPACE}/dist/flatpak-pages/flatpak"
-          flatpak remote-info --user exposed-games-build com.chipichapa.exposedgames
+          flatpak remote-info --user raesir-build com.chipichapa.raesir
 
       - name: Verify Flatpak installation
         run: |
-          cmp build/exposed-games.flatpakrepo dist/exposed-games.flatpakrepo
-          flatpak install --user --assumeyes --noninteractive --no-deps --bundle dist/exposed-games-linux-x64.flatpak
-          app_location="$(flatpak info --user --show-location com.chipichapa.exposedgames)"
-          cmp LICENSE "${app_location}/files/share/licenses/com.chipichapa.exposedgames/LICENSE"
+          cmp build/raesir.flatpakrepo dist/raesir.flatpakrepo
+          flatpak install --user --assumeyes --noninteractive --no-deps --bundle dist/raesir-linux-x64.flatpak
+          app_location="$(flatpak info --user --show-location com.chipichapa.raesir)"
+          cmp LICENSE "${app_location}/files/share/licenses/com.chipichapa.raesir/LICENSE"
           # No windows, accounts, or game clients are opened by these checks.
-          flatpak run --command=sh com.chipichapa.exposedgames -ec '
-            exposed-games --version
-            linkage="$(ldd /app/bin/exposed-games /app/lib/libmpv.so.2)"
+          flatpak run --command=sh com.chipichapa.raesir -ec '
+            raesir --version
+            linkage="$(ldd /app/bin/raesir /app/lib/libmpv.so.2)"
             if printf "%s\n" "$linkage" | grep "not found"; then exit 1; fi
             test -f /usr/lib/x86_64-linux-gnu/libarchive.so.13
             test -x /app/bin/flatpak
@@ -254,10 +257,10 @@ jobs:
       - name: Upload Flatpak artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: exposed-games-linux-x64
+          name: raesir-linux-x64
           path: |
-            dist/exposed-games-linux-x64.flatpak
-            dist/exposed-games.flatpakrepo
+            dist/raesir-linux-x64.flatpak
+            dist/raesir.flatpakrepo
           if-no-files-found: error
           compression-level: 0
 
@@ -302,14 +305,14 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: release-artifacts
-          pattern: exposed-games-*
+          pattern: raesir-*
           merge-multiple: true
 
       - name: Verify release contents
         run: |
-          test -f release-artifacts/exposed-games-windows-x64-setup.exe
-          test -f release-artifacts/exposed-games-linux-x64.flatpak
-          test -f release-artifacts/exposed-games.flatpakrepo
+          test -f release-artifacts/raesir-windows-x64-setup.exe
+          test -f release-artifacts/raesir-linux-x64.flatpak
+          test -f release-artifacts/raesir.flatpakrepo
 
       - name: Create or update release
         env:
@@ -324,4 +327,4 @@ jobs:
             prerelease_args+=(--prerelease)
           fi
           gh release create "$GITHUB_REF_NAME" release-artifacts/* \
-            --generate-notes --title "Exposed Games ${GITHUB_REF_NAME#v}" "${prerelease_args[@]}"
+            --generate-notes --title "Raesir ${GITHUB_REF_NAME#v}" "${prerelease_args[@]}"

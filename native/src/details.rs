@@ -6,7 +6,7 @@ use crate::{
     icons::{icon, rating_image, system_icon},
     smooth_scroll::SmoothWheel,
 };
-use exposed_games_backend::{details::Details, model::LibraryGame};
+use raesir_backend::{details::Details, model::LibraryGame};
 use gpui::{prelude::*, *};
 use std::{
     cell::Cell,
@@ -24,8 +24,9 @@ pub struct DetailsPage {
     game: LibraryGame,
     mod_context: Option<ModContext>,
     _mod_subscription: Option<Subscription>,
-    download_progress: Option<exposed_games_backend::steam_control::Progress>,
+    download_progress: Option<raesir_backend::steam_control::Progress>,
     play_button: Option<PlayButton>,
+    xbox_status: Option<crate::library::XboxCompatibility>,
     poster: Option<Arc<RenderImage>>,
     backdrop: Entity<crate::backdrop::Backdrop>,
     backdrop_source: String,
@@ -37,7 +38,7 @@ pub struct DetailsPage {
     loading: bool,
     error: Option<String>,
     task: Option<Task<()>>,
-    stats: Option<Arc<exposed_games_backend::player_stats::PlayerStats>>,
+    stats: Option<Arc<raesir_backend::player_stats::PlayerStats>>,
     stats_task: Option<Task<()>>,
     stats_loading: bool,
     achievements_open: bool,
@@ -86,13 +87,14 @@ impl DetailsPage {
         backend: Arc<Backend>,
         owner: WeakEntity<Launcher>,
         return_focus: FocusHandle,
-        download_progress: Option<exposed_games_backend::steam_control::Progress>,
+        download_progress: Option<raesir_backend::steam_control::Progress>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             game: source,
             download_progress,
             play_button: None,
+            xbox_status: None,
             poster,
             backdrop,
             backdrop_source: String::new(),
@@ -181,18 +183,31 @@ impl DetailsPage {
         page
     }
 
-    pub(crate) fn load_mod(&mut self, game: LibraryGame, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn load_mod(
+        &mut self,
+        game: LibraryGame,
+        id: String,
+        nexus_domain: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let backend = self.backend.clone();
         self.loading = true;
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.mod_details(&game, &id) })
+                .spawn(async move { backend.mod_details(&game, &id, nexus_domain.as_deref()) })
                 .await;
             this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(data) => this.data = Some(Arc::new(data)),
+                    Ok(mut data) => {
+                        if data.description.is_empty()
+                            && let Some(previous) = &this.data
+                        {
+                            data.description.clone_from(&previous.description);
+                        }
+                        this.data = Some(Arc::new(data));
+                    }
                     Err(e) => this.error = Some(e),
                 }
                 cx.notify();
@@ -210,34 +225,53 @@ impl DetailsPage {
         };
         let (installed, busy, error) = browser.read(cx).mod_status(&context.id);
         let id = context.id.clone();
+        let nexus = id.starts_with("nexus:");
+        let action = browser.read(cx).mod_action_label(&id, installed, cx);
+        let version = self
+            .data
+            .as_ref()
+            .and_then(|data| data.mod_metadata.as_ref())
+            .map(|metadata| metadata.version.as_str())
+            .filter(|version| !version.is_empty() && (!installed || context.version.is_empty()))
+            .unwrap_or(&context.version);
         div()
             .flex()
             .items_center()
             .gap(rems(0.65))
-            .child(bubble().child(format!("Version {}", context.version)))
-            .child(if busy {
-                crate::header::button_shell("details-mod-busy", false)
-                    .size(rems(3.3))
-                    .bg(rgba(0x101010b8))
-                    .child(spinner("mod-page-install", 1.25))
-                    .into_any_element()
-            } else {
-                action_button(
-                    "details-mod-action",
-                    if installed { "trash" } else { "install" },
-                    if installed {
-                        "Uninstall"
-                    } else {
-                        "Install mod and dependencies"
-                    },
+            .when(!version.is_empty(), |d| {
+                d.child(bubble().child(format!("Version {version}")))
+            })
+            .when(busy, |d| {
+                d.child(
+                    crate::header::button_shell("details-mod-busy", false)
+                        .size(rems(3.3))
+                        .bg(rgba(0x101010b8))
+                        .child(spinner("mod-page-install", 1.25)),
                 )
-                .size(rems(3.3))
-                .on_click(move |_, _, cx| {
+            })
+            .when_some(action.filter(|_| !busy), |d, label| {
+                let button = if nexus {
+                    text_button("details-mod-action", label)
+                } else {
+                    action_button(
+                        "details-mod-action",
+                        if installed { "trash" } else { "install" },
+                        label,
+                    )
+                    .size(rems(3.3))
+                };
+                d.child(button.on_click(move |_, window, cx| {
                     browser.update(cx, |browser, cx| {
-                        browser.request_mod_change(id.clone(), installed, cx)
+                        browser.request_mod_change(id.clone(), installed, window, cx)
                     });
-                })
-                .into_any_element()
+                }))
+            })
+            .when(nexus && action.is_none() && !busy, |d| {
+                d.child(
+                    div()
+                        .text_size(rems(0.95))
+                        .child("In-app installation is unavailable for this game."),
+                )
             })
             .when_some(error, |d, error| {
                 d.child(
@@ -521,7 +555,8 @@ impl Launcher {
         let Some(game) = self.games.iter().find(|g| g.source.key == key) else {
             return;
         };
-        let source = game.source.clone();
+        let mut source = game.source.clone();
+        source.title.clone_from(&game.title);
         let poster = game.poster.clone();
         let background = game.background.clone();
         let backdrop = self.backdrop.clone();
@@ -550,6 +585,7 @@ impl Launcher {
         });
         page.update(cx, |page, cx| {
             page.update_play_button(self, cx);
+            page.update_xbox_compatibility(self, cx);
             page.load(cx);
             page.load_stats(cx);
         });
@@ -558,6 +594,24 @@ impl Launcher {
     }
 }
 impl DetailsPage {
+    pub(crate) fn game(&self) -> &LibraryGame {
+        &self.game
+    }
+
+    pub(crate) fn update_xbox_compatibility(
+        &mut self,
+        launcher: &Launcher,
+        cx: &mut Context<Self>,
+    ) {
+        let status = launcher
+            .steam_deck
+            .xbox_status(&self.game, &self.game.title, launcher.host);
+        if status != self.xbox_status {
+            self.xbox_status = status;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn update_play_button(&mut self, launcher: &Launcher, cx: &mut Context<Self>) {
         let play_button = launcher.play_button(&self.game.key);
         if self.play_button != play_button {
@@ -566,16 +620,17 @@ impl DetailsPage {
         }
     }
 
-    pub fn library_changed(
-        &mut self,
-        games: &[crate::library::Game],
-        progress: &HashMap<String, exposed_games_backend::steam_control::Progress>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(game) = games.iter().find(|g| g.source.key == self.game.key) {
+    pub fn library_changed(&mut self, launcher: &Launcher, cx: &mut Context<Self>) {
+        if let Some(game) = launcher
+            .games
+            .iter()
+            .find(|g| g.source.key == self.game.key)
+        {
             self.game = game.source.clone();
+            self.game.title.clone_from(&game.title);
         }
-        self.download_progress = progress.get(&self.game.key).cloned();
+        self.download_progress = launcher.download_operations.get(&self.game.key).cloned();
+        self.update_xbox_compatibility(launcher, cx);
         cx.notify();
     }
 
@@ -615,7 +670,7 @@ impl DetailsPage {
                 })
                 .await;
             let fresh = cached.as_ref().is_some_and(|v| {
-                exposed_games_backend::details::now().saturating_sub(v.updated) < 21600
+                raesir_backend::details::now().saturating_sub(v.updated) < 21600
                     && (v.description.is_empty() || v.description_html.is_some())
                     && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft")
                         || v.store_url.is_some())
@@ -895,16 +950,12 @@ impl DetailsPage {
                 .into_any_element();
         };
         let url = media.poster_url();
-        let thumbnail = if media.video {
-            &media.preview
-        } else {
-            &media.url
-        };
+        let thumbnail = media.thumbnail_url();
         self.viewer_image(&url, cx);
         let first = (-f32::from(self.media_scroll.offset().x)
             / (f32::from(window.rem_size()) * 7.6)) as usize;
         for item in data.media.iter().skip(first).take(12) {
-            self.image(if item.video { &item.preview } else { &item.url }, cx);
+            self.image(item.thumbnail_url(), cx);
         }
         let image = self
             .images
@@ -917,9 +968,9 @@ impl DetailsPage {
             })
             .cloned();
         let waiting = image.is_none()
-            && [&url, thumbnail]
+            && [url.as_str(), thumbnail]
                 .iter()
-                .any(|url| !url.is_empty() && !self.failed.contains(url.as_str()));
+                .any(|&url| !url.is_empty() && !self.failed.contains(url));
         let count = data.media.len();
         if count == 1 {
             self.strip_bounds.set(Bounds::default());
@@ -1023,7 +1074,7 @@ impl DetailsPage {
                         .on_prepaint(move |paint, _, _| strip_bounds.set(paint.bounds))
                         .child(div().flex().flex_none().mx_auto().gap(rems(0.6)).children(
                             data.media.iter().enumerate().map(|(i, item)| {
-                                let url = if item.video { &item.preview } else { &item.url };
+                                let url = item.thumbnail_url();
                                 div()
                                     .id(("media-thumb", i))
                                     .w(rems(7.))
@@ -1143,12 +1194,22 @@ impl Render for DetailsPage {
             .pb(rems(3.))
             .px(rems(3.5));
         let info = self.data.clone();
+        let nexus_mod = self
+            .mod_context
+            .as_ref()
+            .is_some_and(|m| m.id.starts_with("nexus:"));
         let mut hero = div().flex().items_start().gap(rems(1.5));
         hero = hero.child(
             div()
                 .relative()
                 .w(rems(12.))
-                .h(rems(if self.mod_context.is_some() { 12. } else { 18. }))
+                .h(rems(if nexus_mod {
+                    12. * 9. / 16.
+                } else if self.mod_context.is_some() {
+                    12.
+                } else {
+                    18.
+                }))
                 .flex_none()
                 .rounded(rems(1.4))
                 .bg(rgba(0x101010b3))
@@ -1171,7 +1232,14 @@ impl Render for DetailsPage {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon("installed").size(rems(3.))),
+                            .child(
+                                icon(if self.mod_context.is_some() {
+                                    "mods"
+                                } else {
+                                    "gamepad"
+                                })
+                                .size(rems(3.)),
+                            ),
                     )
                 }),
         );
@@ -1192,23 +1260,24 @@ impl Render for DetailsPage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(self.game.title.clone()),
             );
+        let client = raesir_backend::catalog::client_label(&self.game.client);
         if self.mod_context.is_none() {
-            let handoff = exposed_games_backend::actions::library_handoff_allowed(&self.game);
+            let handoff = raesir_backend::actions::library_handoff_allowed(&self.game);
             let platform = bubble()
                 .id("details-client")
                 .when(handoff, |platform| {
                     platform.cursor_pointer().hover(|s| s.bg(rgba(0x303030b3)))
                 })
-                .child(icon(client_icon(&self.game.client, &self.game.store)))
-                .child(self.game.client.clone());
-            let client_label = format!("Open in {} library", self.game.client);
+                .child(icon(client_icon(client, &self.game.store)))
+                .child(client.to_owned());
+            let client_label = format!("Open in {client} library");
             title = title
                 .child(if !handoff {
                     platform
                 } else if self
                     .game
                     .client_os
-                    .contains(&exposed_games_backend::model::Os::host())
+                    .contains(&raesir_backend::model::Os::host())
                 {
                     platform
                         .tooltip(move |_, cx| {
@@ -1227,38 +1296,16 @@ impl Render for DetailsPage {
                             .into()
                     })
                 })
-                .when_some(
-                    crate::library::xbox_compatibility(
-                        &self.game,
-                        exposed_games_backend::model::Os::host(),
-                    ),
-                    |title, status| {
-                        let mut description = status.description.to_owned();
-                        if status.badge.is_some()
-                            && let Some(test) = self.game.ferestre_test.as_ref()
-                            && let Some(date) = test.last_verified.as_deref()
-                        {
-                            description.push_str(&format!(" Verified {date}."));
-                            if let Some(summary) =
-                                test.summary.as_deref().filter(|s| !s.trim().is_empty())
-                            {
-                                description.push(' ');
-                                description.push_str(summary);
-                            }
-                        }
-                        title.child(
-                            bubble()
-                                .id("details-xbox-compatibility")
-                                .child(icon(status.icon))
-                                .child(status.label)
-                                .tooltip(move |_, cx| {
-                                    cx.new(|_| DetailTooltip(description.clone())).into()
-                                }),
-                        )
-                    },
-                );
+                .when_some(self.xbox_status, |title, status| {
+                    title.child(
+                        bubble()
+                            .id("details-xbox-compatibility")
+                            .when_some(status.badge, |pill, badge| pill.child(badge.icon()))
+                            .child(status.label),
+                    )
+                });
         } else {
-            title = title.child(bubble().child(icon("mods")).child(self.game.client.clone()));
+            title = title.child(bubble().child(icon("mods")).child(client.to_owned()));
         }
         if self.game.mods.is_some() {
             let owner = self.owner.clone();
@@ -1277,30 +1324,59 @@ impl Render for DetailsPage {
                     }),
             );
         }
-        let store_url = info.as_ref().and_then(|v| v.store_url.clone());
-        if self.game.store_page.is_some() || store_url.is_some() {
+        if raesir_backend::mods::can_browse_nexus(&self.game) {
+            let owner = self.owner.clone();
+            let key = self.game.key.clone();
             title = title.child(
-                action_button("details-store", "store", "Open store page")
-                    .size(rems(3.3))
-                    .on_click(move |_, _, cx| {
-                        if let Some(url) = &store_url {
-                            if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
-                                cx.open_url(url);
-                            }
-                        } else {
-                            store_owner
-                                .update(cx, |this, cx| this.action(store_key.clone(), "store", cx))
-                                .ok();
-                        }
+                bubble()
+                    .id("details-nexus-mods")
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(0x303030b3)))
+                    .child(icon("mods"))
+                    .child("Nexus Mods")
+                    .on_click(move |_, window, cx| {
+                        owner
+                            .update(cx, |owner, cx| owner.open_nexus_mods(&key, window, cx))
+                            .ok();
                     }),
             );
         }
+        let store_url = info.as_ref().and_then(|v| v.store_url.clone());
+        if self.game.store_page.is_some() || store_url.is_some() {
+            title = title.child(
+                action_button(
+                    "details-store",
+                    "store",
+                    if self
+                        .mod_context
+                        .as_ref()
+                        .is_some_and(|context| context.id.starts_with("nexus:"))
+                    {
+                        "Open on Nexus Mods"
+                    } else {
+                        "Open store page"
+                    },
+                )
+                .size(rems(3.3))
+                .on_click(move |_, _, cx| {
+                    if let Some(url) = &store_url {
+                        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
+                            cx.open_url(url);
+                        }
+                    } else {
+                        store_owner
+                            .update(cx, |this, cx| this.action(store_key.clone(), "store", cx))
+                            .ok();
+                    }
+                }),
+            );
+        }
         if self.mod_context.is_none() {
-            let installable = exposed_games_backend::actions::can_install(&self.game);
+            let installable = raesir_backend::actions::can_install(&self.game);
             let play_button = self.play_button;
             let working = self.download_progress.as_ref().filter(|p| {
                 play_button.is_none()
-                    && exposed_games_backend::actions::install_limitation(&self.game).is_none()
+                    && raesir_backend::actions::install_limitation(&self.game).is_none()
                     && crate::downloads::has_primary_action(p)
             });
             let primary_action = if installable { "install" } else { "launch" };
@@ -1320,7 +1396,7 @@ impl Render for DetailsPage {
                 });
             let uninstall_owner = self.owner.clone();
             let uninstall_key = self.game.key.clone();
-            if exposed_games_backend::catalog::local(&self.game.installations)
+            if raesir_backend::catalog::local(&self.game.installations)
                 && self.game.uninstall.is_some()
                 && !self.download_progress.as_ref().is_some_and(|p| p.active())
                 && play_button.is_none()
@@ -1412,7 +1488,7 @@ impl Render for DetailsPage {
         meta = meta.child(title);
         if let Some(error) = self.download_progress.as_ref().and_then(|p| {
             p.error.map(|e| e.message().to_owned()).or_else(|| {
-                (p.phase == exposed_games_backend::steam_control::Phase::Failed).then(|| p.label())
+                (p.phase == raesir_backend::steam_control::Phase::Failed).then(|| p.label())
             })
         }) {
             meta = meta.child(
@@ -1426,16 +1502,25 @@ impl Render for DetailsPage {
         let mut facts = Vec::new();
         if let Some(data) = &info {
             let mut badges = div().flex().flex_wrap().items_center().gap(rems(0.65));
-            for (label, values) in [
-                ("Developer", &data.developers),
-                ("Publisher", &data.publishers),
-            ] {
+            let creator = if self.mod_context.is_some() {
+                "Author"
+            } else {
+                "Developer"
+            };
+            for (label, values) in [(creator, &data.developers), ("Publisher", &data.publishers)] {
                 if !values.is_empty() {
                     facts.push(format!("{label}: {}", values.join(", ")));
                 }
             }
             if !data.released.is_empty() {
                 facts.push(format!("Released: {}", data.released));
+            }
+            if let Some(metadata) = data
+                .mod_metadata
+                .as_ref()
+                .filter(|m| !m.last_updated.is_empty())
+            {
+                facts.push(format!("Updated: {}", metadata.last_updated));
             }
             if let Some(score) = data.score() {
                 let label = data.scores.join(" · ");
@@ -1528,7 +1613,11 @@ impl Render for DetailsPage {
         }
         if let Some(data) = &info {
             let description = if data.description.is_empty() {
-                "No description supplied for this edition.".into()
+                if self.mod_context.is_some() {
+                    "No description supplied for this mod.".into()
+                } else {
+                    "No description supplied for this edition.".into()
+                }
             } else {
                 data.description.clone()
             };
@@ -1562,6 +1651,45 @@ impl Render for DetailsPage {
                     })),
                 ),
             );
+            if let Some(metadata) = data
+                .mod_metadata
+                .as_ref()
+                .filter(|m| !m.requirements.is_empty())
+            {
+                body = body.child(
+                    panel().child(heading("Mod requirements")).children(
+                        metadata
+                            .requirements
+                            .iter()
+                            .enumerate()
+                            .map(|(i, requirement)| {
+                                let item = div().flex().flex_col().items_start().gap(rems(0.35));
+                                let item = if let Some(url) = requirement.url.clone() {
+                                    item.child(
+                                        text_button(
+                                            ("mod-requirement", i),
+                                            requirement.name.clone(),
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                if std::env::var_os("RAESIR_DISABLE_ACTIONS")
+                                                    .is_none()
+                                                {
+                                                    cx.open_url(&url);
+                                                }
+                                            },
+                                        ),
+                                    )
+                                } else {
+                                    item.child(paragraph(requirement.name.clone()))
+                                };
+                                item.when(!requirement.notes.is_empty(), |item| {
+                                    item.child(muted(requirement.notes.clone()))
+                                })
+                            }),
+                    ),
+                );
+            }
             if self.mod_context.is_none() || !data.media.is_empty() {
                 body = body.child(self.gallery(data, window, cx));
             }
@@ -1619,7 +1747,7 @@ impl Render for DetailsPage {
                                                                 .child(label),
                                                         )
                                                         .child(paragraph(
-                                                            exposed_games_backend::details::requirement_text(text),
+                                                            raesir_backend::details::requirement_text(text),
                                                         ))
                                                 }),
                                             ),

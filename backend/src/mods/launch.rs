@@ -124,7 +124,7 @@ impl Manager {
         let file = self.lease_file(dir)?;
         file.try_lock().map_err(|e| {
             format!(
-                "Another Exposed Games session is using this game, or its mod lock is unavailable: {e}"
+                "Another Raesir session is using this game, or its mod lock is unavailable: {e}"
             )
         })?;
         Ok(GameLease(file))
@@ -133,7 +133,7 @@ impl Manager {
     /// Recover only our own receipts, leaving a running game and any externally
     /// changed files alone. Called by normal library hydration after a restart.
     pub fn recover_staging(&self) -> Vec<String> {
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
             return Vec::new();
         }
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,7 +180,7 @@ impl Manager {
     }
 
     pub fn vanilla_args(&self, game: &LibraryGame) -> Result<Vec<String>, String> {
-        if recipes::for_game(game).is_some() {
+        if recipes::for_game(game).is_some() || stardew::matches(game) {
             return Ok(Vec::new());
         }
         let Some(slug) = community(game) else {
@@ -306,7 +306,110 @@ impl Manager {
         if recipes::for_game(game).is_some() {
             return self.launch_noita(report, game, extra_args);
         }
+        if stardew::matches(game) {
+            return self.launch_smapi(game, extra_args);
+        }
         self.launch_game(report, game, extra_args, LaunchMode::Modded)
+    }
+
+    fn launch_smapi(&self, game: &LibraryGame, args: &[String]) -> Result<LaunchTask, String> {
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+            && !super::diagnostic_launch_enabled()
+        {
+            return Err("Game launches are disabled in this diagnostic profile".into());
+        }
+        let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let _profile_lease = self.profile_lease(stardew::DOMAIN)?;
+        let target = stardew::smapi_target(game)
+            .ok_or("Install SMAPI for the native Steam edition to launch this profile here")?;
+        let game_dir = target
+            .parent()
+            .ok_or("The SMAPI executable has no game directory")?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let lease = self.game_lease(&game_dir)?;
+        if game_running(&game_dir) {
+            return Err("Close Stardew Valley before launching a mod profile".into());
+        }
+        let profile = self
+            .own_path(stardew::DOMAIN)
+            .ok_or("Install a mod into this profile first")?;
+        if stardew::installed(&profile)?.is_empty() {
+            return Err("Install a mod into this profile first".into());
+        }
+        let revision_lease = self.revision_lease(&profile)?;
+        let mods = profile
+            .join("mods")
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let receipt = self.stage_dir(&game_dir);
+        steam_launch::restore_session(&receipt)?;
+        // Record the active revision for recovery without putting files in the game's folder.
+        self.stage_mirror(&profile, &game_dir, &game_dir, &[], &receipt)?;
+        let mut child = match Command::new(&target)
+            .current_dir(&game_dir)
+            .env("SteamAppId", stardew::STEAM_ID)
+            .env("SMAPI_MODS_PATH", mods)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                restore(&receipt)?;
+                return Err(format!("Could not start SMAPI: {error}"));
+            }
+        };
+        let operation = self.operation.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _lease = lease;
+            let _revision_lease = revision_lease;
+            let exited = child
+                .wait()
+                .map_err(|error| format!("Could not wait for SMAPI: {error}"));
+            let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
+            let result = restore(&receipt).and_then(|()| {
+                let status = exited?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "SMAPI exited with {status}. Check the SMAPI log for details."
+                    ))
+                }
+            });
+            let _ = tx.send(result);
+        });
+        Ok(LaunchTask(rx))
+    }
+
+    pub(super) fn lock_smapi_revisions(&self, revisions: &Path) -> Result<Vec<GameLease>, String> {
+        let mut locks = Vec::new();
+        for entry in fs::read_dir(revisions).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_name().to_string_lossy().starts_with("profile-") {
+                locks.push(self.game_lease(&entry.path())?);
+            }
+        }
+        // A game can outlive a launcher crash and release the parent's locks.
+        for entry in fs::read_dir(self.data.join("staged"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let receipt = fs::read(entry.path().join("receipt.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok());
+            if receipt
+                .is_some_and(|r| r.profile.starts_with(revisions) && game_running(&r.game_dir))
+            {
+                return Err("Close Stardew Valley before deleting its active profile".into());
+            }
+        }
+        Ok(locks)
     }
 
     pub fn launch_vanilla(
@@ -325,7 +428,7 @@ impl Manager {
         extra_args: &[String],
         mode: LaunchMode,
     ) -> Result<LaunchTask, String> {
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
             && !super::diagnostic_launch_enabled()
         {
             return Err("Game launches are disabled in this diagnostic profile".into());
@@ -535,7 +638,7 @@ impl Manager {
                 .to_path_buf();
             let destination = safe_destination(game_dir, &relative)?;
             if relative == Path::new("doorstop_config.ini") {
-                // External Steam launches remain vanilla if Exposed Games is interrupted.
+                // External Steam launches remain vanilla if Raesir is interrupted.
                 // The engine's explicit per-launch argument enables Doorstop.
                 let text = fs::read_to_string(source).map_err(|e| e.to_string())?;
                 fs::write(source, disable_doorstop(&text)).map_err(|e| e.to_string())?;
@@ -801,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn game_lease_protects_the_same_installation_across_separate_exposed_games_profiles() {
+    fn game_lease_protects_the_same_installation_across_separate_raesir_profiles() {
         let root = tempfile::tempdir().unwrap();
         let first = manager_fixture(&root.path().join("first"), &root.path().join("locks"));
         let second = manager_fixture(&root.path().join("second"), &root.path().join("locks"));

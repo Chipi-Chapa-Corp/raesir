@@ -596,8 +596,8 @@ fn ea_product(client: &Client, game: &LibraryGame) -> Result<Value, String> {
     let bytes = response(
         client
             .post("https://store.ea.com/commerce/api/catalog/search")
-            .header("request-id", format!("exposed-games-details-{}", now()))
-            .header("ucp-agent", "ExposedGames/0.1")
+            .header("request-id", format!("raesir-details-{}", now()))
+            .header("ucp-agent", "Raesir/0.1")
             .json(&body),
     )?;
     let value: Value =

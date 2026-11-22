@@ -4,8 +4,42 @@ use crate::{
     header::pill,
     library::FerestreSetup,
 };
-use exposed_games_backend::model::Os;
+use raesir_backend::model::Os;
 use gpui::{prelude::*, *};
+
+const BANNER_GAP: f32 = 1.;
+
+pub(crate) fn empty_state(
+    title: &'static str,
+    hint: Option<&'static str>,
+    indicator: Option<AnyElement>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            pill()
+                .flex_col()
+                .rounded(rems(1.8))
+                .p(rems(2.5))
+                .gap(rems(1.))
+                .child(indicator.unwrap_or_else(|| {
+                    crate::icons::icon("empty-search")
+                        .size(rems(2.))
+                        .into_any_element()
+                }))
+                .child(title)
+                .when_some(hint, |d, hint| {
+                    d.child(
+                        div()
+                            .text_size(rems(1.125))
+                            .text_color(rgb(0xaabdb4))
+                            .child(hint),
+                    )
+                }),
+        )
+}
 
 pub(crate) fn text_button(
     id: impl Into<ElementId>,
@@ -66,7 +100,7 @@ impl Launcher {
         let store = self.store.map(|s| crate::STORES[s]);
         let runtime_progress = self
             .download_operations
-            .get(exposed_games_backend::ferestre::RUNTIME_JOB);
+            .get(raesir_backend::ferestre::RUNTIME_JOB);
         let mut ferestre_setup = self
             .report
             .as_ref()
@@ -74,8 +108,8 @@ impl Launcher {
         if self.host == Os::Linux && store == Some("xbox") && scope != 2
             && (self.ferestre_task.as_ref().is_some_and(|(action, _)| *action == FerestreSetup::MaintainRuntime)
                 || runtime_progress.is_some_and(|state| {
-                    state.operation == exposed_games_backend::steam_control::Operation::Update
-                        && (state.active() || state.phase == exposed_games_backend::steam_control::Phase::Failed)
+                    state.operation == raesir_backend::steam_control::Operation::Update
+                        && (state.active() || state.phase == raesir_backend::steam_control::Phase::Failed)
                 }))
         {
             ferestre_setup = Some(FerestreSetup::MaintainRuntime);
@@ -92,6 +126,7 @@ impl Launcher {
                 .is_some_and(|report| crate::library::xbox_runtime_notice(report, scope, store));
         let partition_choices = self.backend.partition_choices();
         let mount_failures = self.backend.partition_mount_failures();
+        let compact_mount_banners = self.header_state.viewport < self.zoom * 40.;
         let volumes: Vec<_> = self
             .report
             .as_ref()
@@ -116,9 +151,9 @@ impl Launcher {
             .unwrap_or_default();
         div()
             .w_full()
-            .pt(rems(5.))
+            .pt(rems(self.header_state.bottom() + BANNER_GAP))
             .px(rems(1.5))
-            .pb(rems(if volumes.is_empty() && !xbox_notice && ferestre_setup.is_none() { 0. } else { 1. }))
+            .pb(rems(if volumes.is_empty() && !xbox_notice && ferestre_setup.is_none() { 0. } else { BANNER_GAP }))
             .flex()
             .flex_col()
             .gap(rems(0.5))
@@ -141,7 +176,7 @@ impl Launcher {
                 };
                 let (message, label) = if let Some(state) = runtime_progress
                     .filter(|state| runtime_setup && !busy
-                        && (state.active() || state.phase == exposed_games_backend::steam_control::Phase::Failed))
+                        && (state.active() || state.phase == raesir_backend::steam_control::Phase::Failed))
                 {
                     (state.label(), if state.active() { "Installing…" } else { "Retry runtime install" })
                 } else {
@@ -191,7 +226,7 @@ impl Launcher {
                     Os::Unknown => "Linux filesystem",
                 });
                 let can_mount = self.host == Os::Linux
-                    && exposed_games_backend::mount::mount_options(&volume.filesystem).is_some();
+                    && raesir_backend::mount::mount_options(&volume.filesystem).is_some();
                 let failure = mount_failures.get(&id).cloned()
                     .filter(|_| partition_choices.get(&id) == Some(&PartitionChoice::Mount));
                 let mut metadata = if pool {
@@ -219,23 +254,31 @@ impl Launcher {
                     .px(rems(1.))
                     .py(rems(0.4))
                     .gap(rems(0.8))
-                    .child(crate::icons::system_icon(os).size(rems(1.55)))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(rems(0.15)).py(rems(0.35))
-                        .child(div().text_size(rems(1.125)).whitespace_normal().child(title.to_owned()))
-                        .when_some(metadata, |d, text| d.child(
-                            div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal().child(text)
-                        ))
-                        .when_some(failure, |d, error| d.child(
-                            div().id(format!("mount-failure-{}", volume.device))
-                                .text_size(rems(0.95))
-                                .text_color(rgb(0xffcf70))
-                                .aria_description(error.clone())
-                                .child("Automatic mount failed")
-                                .tooltip(move |_, cx| {
-                                    cx.new(|_| crate::library::ActionTooltip(error.clone())).into()
-                                })
-                        )))
-                    .child(self.partition_actions(&id, &volume.device, can_mount, cx))
+                    .when(compact_mount_banners, |d| d.flex_col().items_stretch().gap(rems(0.15)))
+                    .child(
+                        div().flex().flex_1().min_w_0().items_center().gap(rems(0.8))
+                            .child(crate::icons::system_icon(os).size(rems(1.55)))
+                            .child(div().min_w_0().flex().flex_col().gap(rems(0.15)).py(rems(0.35))
+                                .child(div().text_size(rems(1.125)).child(title.to_owned()))
+                                .when_some(metadata, |d, text| d.child(
+                                    div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal().child(text)
+                                ))
+                                .when_some(failure, |d, error| d.child(
+                                    div().id(format!("mount-failure-{}", volume.device))
+                                        .text_size(rems(0.95))
+                                        .text_color(rgb(0xffcf70))
+                                        .aria_description(error.clone())
+                                        .child("Automatic mount failed")
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| crate::library::ActionTooltip(error.clone())).into()
+                                        })
+                                ))),
+                    )
+                    .when(self.host == Os::Linux, |d| {
+                        d.child(self.partition_actions(&id, &volume.device, can_mount, cx).when(compact_mount_banners, |actions| {
+                            actions.flex_wrap().justify_end()
+                        }))
+                    })
             }))
     }
 
@@ -352,9 +395,9 @@ impl Launcher {
         let automatic = self.backend.automatic_game_updates();
         let xbox = self.report.as_ref().filter(|report| report.host_os == Os::Linux)
             .and_then(|report| report.linux_systems.iter().find(|system| system.root == "/"))
-            .filter(|system| system.xbox_runtime && exposed_games_backend::ferestre::setup_supported());
+            .filter(|system| system.xbox_runtime && raesir_backend::ferestre::setup_supported());
         let xbox_action = self.ferestre_task.as_ref().map(|(action, _)| *action);
-        let xbox_runtime_busy = self.download_operations.get(exposed_games_backend::ferestre::RUNTIME_JOB)
+        let xbox_runtime_busy = self.download_operations.get(raesir_backend::ferestre::RUNTIME_JOB)
             .is_some_and(|progress| progress.active());
         div().absolute().inset_0()
             .child(div().absolute().inset_0().on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {
@@ -368,6 +411,7 @@ impl Launcher {
             .rounded(rems(1.))
             .p(rems(1.2))
             .w(rems(27.))
+            .max_w(px(self.header_state.viewport - self.zoom * 6.1))
             .max_h(rems(28.))
             .overflow_y_scroll()
             .shadow_lg()
@@ -382,7 +426,7 @@ impl Launcher {
                 .child(div().flex().flex_col().gap(rems(0.3)).flex_1().min_w_0()
                     .child("Automatic game updates")
                     .child(div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal()
-                        .child("Start available game updates automatically in Exposed Games.")))
+                        .child("Start available game updates automatically in Raesir.")))
                 .child(div().w(rems(2.8)).h(rems(1.6)).flex_none().rounded_full().flex().items_center().p(rems(0.2))
                     .bg(if automatic { rgba(0x9ff4bcff) } else { rgba(0xffffff29) })
                     .when(automatic,|d|d.justify_end())
@@ -394,6 +438,9 @@ impl Launcher {
                     this.check_game_updates(false,cx);
                     cx.notify();
                 })))
+            .when(raesir_backend::mods::nexus_account::configured(), |d| {
+                d.child(self.nexus_account_settings(cx))
+            })
             .when(xbox.is_some_and(|system| system.managed_ferestre || system.ferestre_client), |d| d.child(
                 div().flex().items_center().justify_between()
                     .child("Xbox account")
@@ -454,7 +501,7 @@ impl Launcher {
         let busy = self
             .download_operations
             .get(key)
-            .is_some_and(|p| p.phase != exposed_games_backend::steam_control::Phase::Failed);
+            .is_some_and(|p| p.phase != raesir_backend::steam_control::Phase::Failed);
         let transferring = self
             .download_operations
             .get(key)
@@ -477,7 +524,7 @@ impl Launcher {
                 "Install",
                 !busy
                     && self.library_scope() != 2
-                    && exposed_games_backend::actions::can_install(&game.source),
+                    && raesir_backend::actions::can_install(&game.source),
             ),
             ("store", "View in store", game.source.store_page.is_some()),
             (
@@ -545,7 +592,7 @@ impl Launcher {
                 } else {
                     format!(
                         "{} will handle removing this installation.",
-                        game.source.client
+                        raesir_backend::catalog::client_label(&game.source.client)
                     )
                 }
             });

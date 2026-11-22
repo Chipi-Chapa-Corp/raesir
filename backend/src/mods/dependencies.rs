@@ -1,7 +1,8 @@
 use super::*;
 use std::collections::{BTreeSet, HashSet};
 
-const FILE: &str = "exposed-games-install-reasons.json";
+const FILE: &str = "raesir-install-reasons.json";
+const PREVIOUS_FILE: &str = "exposed-games-install-reasons.json";
 
 /// Kept inside each revision so files, dependency edges and install reasons
 /// are published together. Missing reasons mean user-managed, never automatic.
@@ -11,16 +12,18 @@ pub(super) struct Reasons {
 }
 
 impl Reasons {
+    fn file(path: &Path) -> PathBuf {
+        let previous = path.join(PREVIOUS_FILE);
+        // This file may have superseded an older Raesir record in this revision.
+        if previous.exists() {
+            previous
+        } else {
+            path.join(FILE)
+        }
+    }
+
     pub(super) fn read(path: &Path) -> Result<Self, String> {
-        let file = path.join(FILE);
-        let bytes = fs::read(&file).or_else(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                fs::read(path.join("raesir-install-reasons.json"))
-            } else {
-                Err(error)
-            }
-        });
-        match bytes {
+        match fs::read(Self::file(path)) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
                 format!("Could not read mod install reasons; existing files were kept: {e}")
             }),
@@ -30,7 +33,7 @@ impl Reasons {
     }
 
     pub(super) fn write(&self, path: &Path) -> Result<(), String> {
-        crate::storage::write_json(&path.join(FILE), self)
+        crate::storage::write_json(&Self::file(path), self)
     }
 
     pub(super) fn record_install(
@@ -162,7 +165,7 @@ mod tests {
     fn renamed_app_preserves_legacy_dependency_reasons() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
-            dir.path().join("raesir-install-reasons.json"),
+            dir.path().join(PREVIOUS_FILE),
             br#"{"automatic":["Owner-Dependency"]}"#,
         )
         .unwrap();
@@ -171,7 +174,7 @@ mod tests {
         reasons.automatic.clear();
         reasons.write(dir.path()).unwrap();
         assert!(Reasons::read(dir.path()).unwrap().automatic.is_empty());
-        fs::write(dir.path().join(FILE), b"corrupt").unwrap();
+        fs::write(dir.path().join(PREVIOUS_FILE), b"corrupt").unwrap();
         assert!(Reasons::read(dir.path()).is_err());
     }
 
@@ -197,7 +200,7 @@ mod tests {
         Profile {
             id: "test".into(),
             name: "Test".into(),
-            source: "Exposed Games".into(),
+            source: "Raesir".into(),
             path: PathBuf::new(),
             active: true,
             installed: reasons.installed(entries),
@@ -301,7 +304,7 @@ mod tests {
                 packages: Arc::new(Vec::new()),
             },
         );
-        let root = manager.profile_root("peak", "exposed-games");
+        let root = manager.profile_root("peak", "raesir");
         let original = root.join("revisions/profile-original");
         let entries = vec![
             entry("Root", &["Owner-Dependency-1.0.0"]),

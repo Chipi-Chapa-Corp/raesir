@@ -198,9 +198,9 @@ pub fn unreadable_note(host: Os, filesystem: &str, driver_present: bool) -> Stri
         (Os::Windows, "btrfs") =>
             "WinBtrfs is installed. Mount read-only in Windows.".into(),
         (Os::Windows, "ext4") =>
-            "Needs an ext4 reader/driver.".into(),
+            "ext4 is not readable here. A filesystem reader/driver is required; Raesir scans readable mounted partitions. WSL --mount cannot attach the running Windows disk.".into(),
         (_, "crypto_luks" | "bitlocker") =>
-            "Encrypted partition. Unlock and expose it using your OS tools, then rescan. Exposed Games does not unlock volumes.".into(),
+            "Encrypted partition. Unlock and expose it using your OS tools, then rescan. Raesir does not unlock volumes.".into(),
         (Os::Linux, "ntfs") =>
             "Unmounted NTFS".into(),
         (Os::Windows, "linux") =>
@@ -213,7 +213,7 @@ pub fn volumes() -> (Vec<Volume>, Vec<String>) {
     #[cfg(target_os = "linux")]
     {
         let flatpak = in_flatpak();
-        if flatpak && env::var_os("EXPOSED_GAMES_DISABLE_HOST_BRIDGE").is_some() {
+        if flatpak && env::var_os("RAESIR_DISABLE_HOST_BRIDGE").is_some() {
             return (
                 Vec::new(),
                 vec!["Flatpak host partition discovery is disabled.".into()],

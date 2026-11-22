@@ -1,13 +1,20 @@
 Additional filter icons:
 
-- `adwaita/input-gaming-symbolic.svg`: GNOME Adwaita Icon Theme, used for the
-  installed-games filter. See `adwaita/COPYING` for its license and attribution.
-- `../../build/icon.svg`: original Exposed Games E-gamepad application artwork,
+- `adwaita/document-save-symbolic.svg` and `adwaita/input-gaming-symbolic.svg`:
+  GNOME Adwaita Icon Theme, used for the Installed filter and the game artwork
+  placeholder, respectively. See `adwaita/COPYING` for license and attribution.
+- `adwaita/cloud-deploy-symbolic.svg`: [GNOME Icon Development Kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit/-/blob/main/icons/cloud-deploy.svg),
+  by Jakub Steiner, CC0-1.0, used for the Not installed filter. Stroke color
+  adjusted to match the existing symbolic icons.
+- `adwaita/emote-sick.svg`: [GNOME Icon Development Kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit/-/blob/main/icons/emote-sick.svg),
+  by Jakub Steiner, CC0-1.0, used for untested Xbox titles without a Steam match.
+- `../../build/icon.svg`: original Raesir E-gamepad application artwork,
   distributed under the project’s GPL-3.0-only license. `icon.png` and `icon.ico`
   in the same directory are generated from it.
 
 - `lucide/puzzle.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/puzzle.svg), ISC, used for mod browsing and modded launch.
 - `lucide/pencil.svg`: [Lucide](https://github.com/lucide-icons/lucide/blob/main/icons/pencil.svg), ISC, used to rename mod profiles.
+- `lucide/trending-up.svg`: [Lucide](https://lucide.dev/icons/trending-up), ISC, used for the Nexus Trending filter.
 
 - `adwaita/wallet-symbolic.svg`: GNOME Icon Development Kit, distributed by
   [Relm4 Icons 0.9.0](https://crates.io/crates/relm4-icons/0.9.0), CC0 (public domain).

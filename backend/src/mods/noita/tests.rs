@@ -128,7 +128,7 @@ fn nexus_import_requires_a_matching_source_page_and_preserves_other_profiles() {
     assert!(original.join("mods/test_mod/init.lua").is_file());
     manager.create_profile(&game(), "Separate").unwrap();
     assert!(manager.profiles("noita")[1].installed.is_empty());
-    manager.select(&game(), "exposed-games").unwrap();
+    manager.select(&game(), "raesir").unwrap();
     manager.uninstall(&game(), "nexus:1").unwrap();
     assert!(
         !manager
@@ -165,7 +165,7 @@ fn flat_archives_need_an_explicit_folder_and_conflicts_are_transactional() {
     manager
         .import_nexus(&game(), url, &archive, "flat")
         .unwrap();
-    let root = manager.profile_root("noita", "exposed-games");
+    let root = manager.profile_root("noita", "raesir");
     let pointer = fs::read(root.join("current.json")).unwrap();
     assert!(
         manager
@@ -261,7 +261,7 @@ fn bundled_recipe_installs_a_matching_pair_and_a_failed_tool_update_keeps_live_r
     );
     let pointer = fs::read(
         manager
-            .profile_root("noita", "exposed-games")
+            .profile_root("noita", "raesir")
             .join("current.json"),
     )
     .unwrap();
@@ -274,7 +274,7 @@ fn bundled_recipe_installs_a_matching_pair_and_a_failed_tool_update_keeps_live_r
     assert_eq!(
         fs::read(
             manager
-                .profile_root("noita", "exposed-games")
+                .profile_root("noita", "raesir")
                 .join("current.json")
         )
         .unwrap(),

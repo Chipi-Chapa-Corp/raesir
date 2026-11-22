@@ -1,5 +1,5 @@
 use crate::{Launcher, backend::Backend};
-use exposed_games_backend::model::LibraryGame;
+use raesir_backend::model::LibraryGame;
 use gpui::{Context, RenderImage, Window};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -304,7 +304,7 @@ fn request_prioritized(
     let lane = if prepared(
         &this.backend.cache,
         &cache_key,
-        exposed_games_backend::artwork::fallback_applies(&game.source),
+        raesir_backend::artwork::fallback_applies(&game.source),
     ) {
         Lane::Disk
     } else {
@@ -369,7 +369,7 @@ fn request_prioritized(
     let worker_source = source.clone();
     let worker_cancel = cancel.clone();
     if std::thread::Builder::new()
-        .name("exposed-games-artwork".into())
+        .name("raesir-artwork".into())
         .spawn(move || {
             let result = if lane == Lane::Disk {
                 load_cached(&backend.cache, &worker_source).map(|ready| (ready, None))
@@ -449,7 +449,7 @@ fn apply(this: &mut Launcher, index: usize, ready: Ready, cx: &mut Context<Launc
 fn key(game: &LibraryGame) -> String {
     let mut hash = DefaultHasher::new();
     (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
-    if let Some(tag) = exposed_games_backend::artwork::cache_tag(game) {
+    if let Some(tag) = raesir_backend::artwork::cache_tag(game) {
         tag.hash(&mut hash);
     }
     if let Some(path) = &game.cover
@@ -502,7 +502,7 @@ fn load_cached(cache: &Path, game: &LibraryGame) -> Result<Ready, String> {
     if !prepared(
         cache,
         &key,
-        exposed_games_backend::artwork::fallback_applies(game),
+        raesir_backend::artwork::fallback_applies(game),
     ) {
         return Err("Thumbnail needs refreshing".into());
     }
@@ -553,7 +553,7 @@ impl Persist {
             &image_codec::DynamicImage::ImageRgba8(self.card),
             image_codec::ImageFormat::Png,
         );
-        let _ = exposed_games_backend::storage::write_json(
+        let _ = raesir_backend::storage::write_json(
             &self.poster.with_extension("json"),
             &self.title,
         );
@@ -566,7 +566,7 @@ fn queue_persist(job: Persist) {
         for _ in 0..2 {
             let receive = receive.clone();
             std::thread::Builder::new()
-                .name("exposed-games-thumb-cache".into())
+                .name("raesir-thumb-cache".into())
                 .spawn(move || {
                     loop {
                         let next = receive.lock().unwrap_or_else(|e| e.into_inner()).recv();
@@ -691,7 +691,7 @@ mod tests {
     fn finished_card_disk_cache_preserves_faded_blur_and_loads_without_original_or_network() {
         let dir = tempfile::tempdir().unwrap();
         let mut game =
-            exposed_games_backend::catalog::entry("steam", "42", "Fixture", vec![], "fixture");
+            raesir_backend::catalog::entry("steam", "42", "Fixture", vec![], "fixture");
         game.cover = Some("https://unreachable.invalid/portrait.jpg".into());
         let pixels =
             image_codec::RgbaImage::from_pixel(64, 96, image_codec::Rgba([15, 60, 130, 255]));
@@ -727,7 +727,7 @@ mod tests {
     fn community_art_invalidates_old_thumbnails_and_retries_fallbacks_after_a_day() {
         let dir = tempfile::tempdir().unwrap();
         let game =
-            exposed_games_backend::catalog::entry("steam", "319510", "FNAF", vec![], "fixture");
+            raesir_backend::catalog::entry("steam", "319510", "FNAF", vec![], "fixture");
         let mut hash = DefaultHasher::new();
         (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
         let old_key = format!("{:016x}", hash.finish());

@@ -25,7 +25,7 @@ impl Manager {
     pub fn mount(&self, id: &str) -> Result<String, String> {
         let mut mounts = self.mounts.lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Ordering::SeqCst) {
-            return Err("Exposed Games is closing".into());
+            return Err("Raesir is closing".into());
         }
         let (volumes, _) = platform::volumes();
         let volume = validate_volume(&volumes, id)?;
@@ -67,7 +67,7 @@ impl Manager {
             Ok(())
         } else {
             Err(format!(
-                "Could not unmount Exposed Games's partitions: {}. Close any games/files using them and retry closing Exposed Games.",
+                "Could not unmount Raesir's partitions: {}. Close any games/files using them and retry closing Raesir.",
                 errors.join("; ")
             ))
         }
@@ -209,7 +209,7 @@ fn system_connection() -> Result<zbus::blocking::Connection, String> {
         // Toolbx exposes the host system socket here. Polkit still authorizes
         // a mount requested by a click or a remembered choice.
         if platform::in_flatpak()
-            || std::env::var_os("EXPOSED_GAMES_DISABLE_HOST_BRIDGE").is_some()
+            || std::env::var_os("RAESIR_DISABLE_HOST_BRIDGE").is_some()
             || std::env::var_os("DBUS_SYSTEM_BUS_ADDRESS").is_some()
             || !std::path::Path::new("/run/host/run/dbus/system_bus_socket").exists() { return Err(error); }
         Builder::address("unix:path=/run/host/run/dbus/system_bus_socket")?.build()
@@ -217,7 +217,7 @@ fn system_connection() -> Result<zbus::blocking::Connection, String> {
         if platform::in_flatpak() {
             "Cannot reach UDisks from Flatpak. Check that UDisks is running on the host and the application has permission to access it.".into()
         } else {
-            "Cannot reach UDisks on the system bus. Run Exposed Games in the desktop host session or expose its system bus to this container.".into()
+            "Cannot reach UDisks on the system bus. Run Raesir in the desktop host session or expose its system bus to this container.".into()
         }
     })
 }
@@ -281,7 +281,7 @@ fn mount_with_connection(
         Value::from(mount_options(&filesystem).ok_or("Unsupported filesystem")?),
     );
     // Omitting auth.no_user_interaction allows the desktop's Polkit agent to
-    // ask for approval/password. Exposed Games never receives that password.
+    // ask for approval/password. Raesir never receives that password.
     let point: String = service.call("Mount", &(options,)).map_err(|e| format!("Mount was cancelled or failed: {e}. Check UDisks, the filesystem driver and your desktop authorization agent. No writable fallback was attempted."))?;
     Ok(Mounted {
         volume: volume.clone(),
@@ -364,7 +364,7 @@ mod tests {
         impl Block {
             #[zbus(property)]
             fn device(&self) -> Vec<u8> {
-                b"/dev/exposed_games_fixture\0".to_vec()
+                b"/dev/raesir_fixture\0".to_vec()
             }
             #[zbus(property)]
             fn id_type(&self) -> String {
@@ -428,7 +428,7 @@ mod tests {
                 Ok(())
             }
         }
-        let path = "/org/freedesktop/UDisks2/block_devices/exposed_5fgames_5ffixture";
+        let path = "/org/freedesktop/UDisks2/block_devices/raesir_5ffixture";
         let _server = Builder::address(address.trim())
             .unwrap()
             .name("org.freedesktop.UDisks2")
@@ -455,7 +455,7 @@ mod tests {
             .unwrap();
         let connection = Builder::address(address.trim()).unwrap().build().unwrap();
         let volume = Volume {
-            device: "/dev/exposed_games_fixture".into(),
+            device: "/dev/raesir_fixture".into(),
             filesystem: "ntfs".into(),
             ..Volume::default()
         };
@@ -470,7 +470,7 @@ mod tests {
         denied.store(false, Ordering::SeqCst);
         let lease = mount_with_connection(&volume, &connection).unwrap();
         assert_eq!(lease.point, "/fixture/mounted-readonly");
-        // Already-mounted partitions are never adopted by Exposed Games.
+        // Already-mounted partitions are never adopted by Raesir.
         assert!(
             mount_with_connection(&volume, &connection)
                 .unwrap_err()

@@ -8,7 +8,7 @@ pub struct Game {
     pub steam: String,
     pub installer: String,
     pub modworkshop: String,
-    pub nexus: String,
+    pub nexus_domain: String,
     pub mods: Vec<Recipe>,
 }
 

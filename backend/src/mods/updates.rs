@@ -120,6 +120,7 @@ impl Manager {
             }
             let identity = recipes::by_id(&slug)
                 .map(|g| ("steam", g.steam.as_str()))
+                .or_else(|| (slug == stardew::DOMAIN).then_some(("steam", stardew::STEAM_ID)))
                 .or_else(|| {
                     ECOSYSTEM.game(&slug)?.distributions.iter().find_map(|d| {
                         let store = match d.platform.as_str() {
@@ -148,8 +149,8 @@ impl Manager {
         startup: bool,
         cancel: &AtomicBool,
     ) -> Result<UpdateReport, String> {
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
-            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_UPDATES").is_none()
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+            && std::env::var_os("RAESIR_MODS_TEST_UPDATES").is_none()
         {
             return Err("Automatic mod updates are disabled in this diagnostic profile".into());
         }
@@ -334,6 +335,13 @@ impl Manager {
             self.revision_lease(source)
                 .map_err(|e| format!("Deferred: {e}"))?
         };
+        if slug == stardew::DOMAIN {
+            let manual = stardew::installed(source)?
+                .into_iter()
+                .map(|m| (m.id, "Nexus imports require a browser download; import the newer archive to update".into()))
+                .collect();
+            return Ok((Vec::new(), manual));
+        }
         let stamp = tree_stamp(source)?;
         let noita = if recipes::for_game(game).is_some() {
             Some(self.noita_update_plan(game, source, refreshed)?)

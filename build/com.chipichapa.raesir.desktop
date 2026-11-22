@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Exposed Games
+Name=Raesir
 Comment=One library for your games
-Exec=exposed-games
-Icon=com.chipichapa.exposedgames
+Exec=raesir
+Icon=com.chipichapa.raesir
 Terminal=false
 Categories=Game;
 Keywords=games;launcher;Steam;mods;
-StartupWMClass=com.chipichapa.exposedgames
+StartupWMClass=com.chipichapa.raesir

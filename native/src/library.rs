@@ -1,82 +1,104 @@
-use exposed_games_backend::model::{FerestreState, LibraryGame, Os};
+use raesir_backend::{
+    model::{FerestreState, LibraryGame, Os},
+    steam_deck::{Compatibility, SteamEdition},
+};
 use gpui::RenderImage;
 use std::sync::Arc;
 
 pub struct ActionTooltip(pub String);
 
-pub struct XboxCompatibility {
-    pub badge: Option<&'static str>,
-    pub label: &'static str,
-    pub icon: &'static str,
-    pub description: &'static str,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompatibilityBadge {
+    Tick,
+    Happy,
+    Sad,
+    Sick,
 }
 
-pub fn xbox_compatibility(game: &LibraryGame, host: Os) -> Option<XboxCompatibility> {
+impl CompatibilityBadge {
+    pub const ALL: [Self; 4] = [Self::Tick, Self::Happy, Self::Sick, Self::Sad];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Tick => "verified",
+            Self::Happy => "playable",
+            Self::Sick => "no-steam-match",
+            Self::Sad => "unsupported",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tick => "Verified",
+            Self::Happy => "Playable",
+            Self::Sick => "Untested · No Steam match",
+            Self::Sad => "Unsupported",
+        }
+    }
+
+    pub fn icon(self) -> gpui::Svg {
+        use gpui::{Styled, rgb};
+        let (glyph, color) = match self {
+            Self::Tick => ("verified-symbolic", 0x9ff4bc),
+            Self::Happy => ("face-smile-big-symbolic", 0xf6d48b),
+            Self::Sad => ("face-sad-symbolic", 0xff9c9c),
+            Self::Sick => ("emote-sick", 0xd8d8d8),
+        };
+        crate::icons::icon(glyph).text_color(rgb(color))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XboxCompatibility {
+    pub badge: Option<CompatibilityBadge>,
+    pub label: &'static str,
+}
+
+pub fn xbox_needs_steam_match(game: &LibraryGame) -> bool {
+    game.store == "xbox"
+        && !game.xbox_console_only
+        && !game.ferestre_unsupported_package
+        && game
+            .ferestre_test
+            .as_ref()
+            .is_none_or(|test| test.state == FerestreState::Untested)
+}
+
+pub fn xbox_compatibility(
+    game: &LibraryGame,
+    host: Os,
+    steam: Option<SteamEdition>,
+) -> Option<XboxCompatibility> {
+    use CompatibilityBadge::*;
     if game.store != "xbox" {
         return None;
     }
-    let (badge, label, icon, description) = if game.xbox_console_only {
-        (
-            None,
-            "Xbox console only",
-            "joystick",
-            "This Store edition only has Xbox console packages.",
-        )
+    let (badge, label) = if game.xbox_console_only {
+        (Some(Sad), "Xbox console only")
     } else if host != Os::Linux {
         return None;
     } else if game.ferestre_unsupported_package {
-        (
-            None,
-            "Windows package unsupported by Ferestre",
-            "windows",
-            "Microsoft lists a Windows package in a format Ferestre cannot install.",
-        )
+        (Some(Sad), "Can't install on Linux")
     } else {
         match game.ferestre_test.as_ref().map(|test| test.state) {
-            Some(FerestreState::Playable) => (
-                Some("Tested"),
-                "Playable in Ferestre tests",
-                "verified-symbolic",
-                "Ferestre reports reaching gameplay for this Store edition.",
-            ),
-            Some(FerestreState::PlayableWithIssues) => (
-                Some("With issues"),
-                "Playable with issues in Ferestre tests",
-                "warning",
-                "Ferestre reports gameplay with known issues.",
-            ),
-            Some(FerestreState::Menus) => (
-                Some("Menus only"),
-                "Menus only in Ferestre tests",
-                "warning",
-                "Ferestre reached the menus. Gameplay was unavailable.",
-            ),
-            Some(FerestreState::Broken) => (
-                Some("Does not run"),
-                "Does not run in Ferestre tests",
-                "not-installed",
-                "Ferestre reports that this edition fails to start.",
-            ),
-            _ if game.ferestre_pc_package => (
-                None,
-                "PC package found · Gameplay unverified",
-                "install",
-                "Microsoft lists an MSIXVC PC package. Ferestre has no verified gameplay result for this edition.",
-            ),
-            _ => (
-                None,
-                "Compatibility unknown",
-                "face-sad-symbolic",
-                "No supported PC package or gameplay result has been verified for this Store edition.",
-            ),
+            Some(FerestreState::Playable) => (Some(Tick), "Verified on Linux"),
+            Some(FerestreState::PlayableWithIssues) => (Some(Happy), "Playable with issues"),
+            Some(FerestreState::Menus) => (Some(Sad), "Menus only"),
+            Some(FerestreState::Broken) => (Some(Sad), "Doesn't run on Linux"),
+            None | Some(FerestreState::Untested) => match steam {
+                Some(SteamEdition::Listed(Some(
+                    Compatibility::Verified | Compatibility::Playable,
+                ))) => (Some(Happy), "Steam Deck playable · Xbox untested"),
+                Some(SteamEdition::Listed(Some(Compatibility::Unsupported))) => {
+                    (Some(Sad), "Steam Deck unsupported · Xbox untested")
+                }
+                Some(SteamEdition::Missing) => (Some(Sick), "Xbox untested · No Steam match"),
+                Some(SteamEdition::Listed(None)) => (None, "Xbox untested · Steam rating unknown"),
+                None => (None, "Untested on Linux"),
+            },
         }
     };
-    Some(XboxCompatibility {
-        badge,
-        label,
-        icon,
-        description,
-    })
+    Some(XboxCompatibility { badge, label })
 }
 
 impl gpui::Render for ActionTooltip {
@@ -104,7 +126,7 @@ impl gpui::Render for ActionTooltip {
 }
 
 pub fn xbox_runtime_notice(
-    report: &exposed_games_backend::model::Report,
+    report: &raesir_backend::model::Report,
     scope: u8,
     store: Option<&str>,
 ) -> bool {
@@ -133,14 +155,14 @@ pub enum FerestreSetup {
 }
 
 pub fn ferestre_setup(
-    report: &exposed_games_backend::model::Report,
+    report: &raesir_backend::model::Report,
     scope: u8,
     store: Option<&str>,
 ) -> Option<FerestreSetup> {
     if store != Some("xbox")
         || scope == 2
         || report.host_os != Os::Linux
-        || !exposed_games_backend::ferestre::setup_supported()
+        || !raesir_backend::ferestre::setup_supported()
     {
         return None;
     }
@@ -196,23 +218,21 @@ impl Game {
         {
             return 1;
         }
-        if scope != 1
-            && self.source.installations.iter().any(|i| {
-                i.os != host
-                    && i.os != Os::Unknown
-                    && matches!(i.state.as_str(), "installed" | "external")
-            })
-        {
+        if scope != 1 && self.other_installed_os(host).is_some() {
             return 2;
         }
         0
     }
 
-    pub fn other_os(&self, host: Os) -> Option<Os> {
+    pub fn other_installed_os(&self, host: Os) -> Option<Os> {
         self.source
             .installations
             .iter()
-            .find(|i| i.os != host && i.os != Os::Unknown && i.state != "files_missing")
+            .find(|i| {
+                i.os != host
+                    && i.os != Os::Unknown
+                    && matches!(i.state.as_str(), "installed" | "external")
+            })
             .map(|i| i.os)
     }
 
@@ -238,7 +258,7 @@ impl Game {
                 self.source.in_library
                     && !self.source.game_pass_only
                     && !self.source.is_demo
-                    && !exposed_games_backend::catalog::demo_title(&self.title)
+                    && !raesir_backend::catalog::demo_title(&self.title)
             }
             2 => self.source.game_pass,
             _ => false,
@@ -285,11 +305,97 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exposed_games_backend::{catalog, model::Installation};
+    use raesir_backend::{
+        catalog,
+        model::{FerestreTest, Installation},
+    };
+
+    #[test]
+    fn xbox_compatibility_uses_steam_only_for_untested_editions() {
+        use CompatibilityBadge::*;
+        let mut game = catalog::entry("xbox", "9MT5NJ5W7B8Z", "Fixture", vec![], "test");
+        assert_eq!(
+            xbox_compatibility(&game, Os::Linux, None),
+            Some(XboxCompatibility {
+                badge: None,
+                label: "Untested on Linux",
+            })
+        );
+        for (edition, badge) in [
+            (
+                SteamEdition::Listed(Some(Compatibility::Playable)),
+                Some(Happy),
+            ),
+            (
+                SteamEdition::Listed(Some(Compatibility::Verified)),
+                Some(Happy),
+            ),
+            (
+                SteamEdition::Listed(Some(Compatibility::Unsupported)),
+                Some(Sad),
+            ),
+            (SteamEdition::Listed(None), None),
+            (SteamEdition::Missing, Some(Sick)),
+        ] {
+            assert_eq!(
+                xbox_compatibility(&game, Os::Linux, Some(edition))
+                    .unwrap()
+                    .badge,
+                badge,
+            );
+        }
+        game.ferestre_pc_package = true;
+        for (state, badge, label) in [
+            (FerestreState::Playable, Some(Tick), "Verified on Linux"),
+            (
+                FerestreState::PlayableWithIssues,
+                Some(Happy),
+                "Playable with issues",
+            ),
+            (FerestreState::Menus, Some(Sad), "Menus only"),
+            (FerestreState::Broken, Some(Sad), "Doesn't run on Linux"),
+            (
+                FerestreState::Untested,
+                Some(Happy),
+                "Steam Deck playable · Xbox untested",
+            ),
+        ] {
+            game.ferestre_test = Some(FerestreTest {
+                state,
+                last_verified: Some("2026-11-22".into()),
+                summary: None,
+            });
+            assert_eq!(
+                xbox_compatibility(
+                    &game,
+                    Os::Linux,
+                    Some(SteamEdition::Listed(Some(Compatibility::Verified)))
+                ),
+                Some(XboxCompatibility { badge, label }),
+            );
+        }
+        assert!(xbox_compatibility(&game, Os::Windows, None).is_none());
+        game.ferestre_unsupported_package = true;
+        assert_eq!(
+            xbox_compatibility(&game, Os::Linux, None),
+            Some(XboxCompatibility {
+                badge: Some(Sad),
+                label: "Can't install on Linux",
+            })
+        );
+        game.xbox_console_only = true;
+        assert_eq!(
+            xbox_compatibility(&game, Os::Linux, None),
+            Some(XboxCompatibility {
+                badge: Some(Sad),
+                label: "Xbox console only",
+            })
+        );
+    }
 
     #[test]
     fn xbox_notice_tracks_os_and_client_filters_and_each_linux_system() {
-        let mut report: exposed_games_backend::model::Report = serde_json::from_value(serde_json::json!({
+        let mut report: raesir_backend::model::Report = serde_json::from_value(serde_json::json!({
             "host_os":"linux","games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null,
             "linux_systems":[{"root":"/","xbox_runtime":true},{"root":"/mounted/linux","xbox_runtime":false}]
         })).unwrap();
@@ -315,7 +421,7 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn ferestre_setup_targets_only_the_current_linux_installation() {
-        let mut report: exposed_games_backend::model::Report =
+        let mut report: raesir_backend::model::Report =
             serde_json::from_value(serde_json::json!({
                 "host_os":"linux","games":[],"libraries":[],"volumes":[],"warnings":[],
                 "owned_account":null,
@@ -447,6 +553,7 @@ mod tests {
             vec![(Os::Windows, "installed")],
         );
         assert_eq!(game.installed(0, Os::Linux), 2);
+        assert_eq!(game.other_installed_os(Os::Linux), Some(Os::Windows));
         assert_eq!(game.installed(1, Os::Linux), 0);
         assert!(game.matches("", None, 0, 1, Os::Linux));
         assert!(!game.matches("", None, 1, 1, Os::Linux));
@@ -463,7 +570,7 @@ mod tests {
             assert_eq!(game.installed(0, host), 1);
             assert_eq!(game.installed(1, host), 1);
             assert_eq!(game.installed(2, host), 2);
-            assert_ne!(game.other_os(host), Some(host));
+            assert_ne!(game.other_installed_os(host), Some(host));
             assert_eq!(
                 game.duplicate_systems(host),
                 vec![if host == Os::Linux {
@@ -514,14 +621,13 @@ mod tests {
     }
 
     #[test]
-    fn remembered_foreign_install_keeps_its_os_badge_without_claiming_ready_files() {
-        let game = game(
-            vec![Os::Linux, Os::Windows],
-            vec![(Os::Windows, "unavailable")],
-        );
-        assert_eq!(game.other_os(Os::Linux), Some(Os::Windows));
-        assert_eq!(game.installed(0, Os::Linux), 0);
-        assert!(!game.matches("", None, 1, 0, Os::Linux));
-        assert!(game.matches("", None, 2, 2, Os::Linux));
+    fn unverified_foreign_install_does_not_show_an_installed_badge() {
+        for state in ["unavailable", "files_missing", "incomplete"] {
+            let game = game(vec![Os::Linux, Os::Windows], vec![(Os::Windows, state)]);
+            assert_eq!(game.other_installed_os(Os::Linux), None);
+            assert_eq!(game.installed(0, Os::Linux), 0);
+            assert!(!game.matches("", None, 1, 0, Os::Linux));
+            assert!(game.matches("", None, 2, 2, Os::Linux));
+        }
     }
 }

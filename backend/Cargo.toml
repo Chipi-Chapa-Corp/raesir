@@ -1,13 +1,13 @@
 [package]
-name = "exposed-games-backend"
+name = "raesir-backend"
 version = "0.1.1"
 license = "GPL-3.0-only"
-description = "Game library discovery and client integration for Exposed Games"
+description = "Game library discovery and client integration for Raesir"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "exposed-games-scan"
+name = "raesir-scan"
 path = "src/bin/scan.rs"
 
 [dependencies]
@@ -19,23 +19,34 @@ tempfile = "3"
 libloading = "0.8"
 steam-vdf-parser = "0.1.2"
 roxmltree = "0.21"
-rusqlite = { version = "0.41", features = ["bundled"] }
+# Share the SQLite native library with Modde's SQLx dependency.
+rusqlite = { version = "0.38", features = ["bundled"] }
 serde_yaml_ng = "0.10"
 prost = "0.14"
 shlex = "1"
 scraper = "0.27"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+bbscope = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 thunderstore-engine = "=0.3.0"
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1"
+uuid = { version = "1", features = ["v4"] }
+modde-core = { git = "https://github.com/caniko/modde-rs.git", rev = "24b161698abfb3c1aae76f71264b8ccd94d7ffe1", default-features = false }
+modde-games = { git = "https://github.com/caniko/modde-rs.git", rev = "24b161698abfb3c1aae76f71264b8ccd94d7ffe1", default-features = false, features = ["all-games"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 minisign-verify = "0.3"
 tar = { version = "0.4", default-features = false }
 zbus = { version = "5", features = ["blocking-api"] }
 zstd = "0.13"
+keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -108,14 +108,14 @@ fn ferestre_workers_report_sign_in_and_unclassified_failures() {
                 "7",
                 "FERESTRE_TRANSFER_DIAGNOSTIC_V1 backend-exit 0",
                 None,
-                Some("Ferestre stopped (exit code 7). See output.log for details."),
+                Some("Xbox download stopped (exit code 7). See output.log for details."),
             ),
             (
                 "0",
                 "",
                 None,
                 Some(
-                    "Ferestre reported success, but the installed game files or version could not be verified.",
+                    "Could not verify the installed Xbox game files or version.",
                 ),
             ),
         ] {

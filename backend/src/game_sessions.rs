@@ -48,7 +48,7 @@ pub fn running<'a>(
 }
 
 pub fn quit(game: &LibraryGame, processes: &[ProcessId]) -> Result<(), String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
         return Err("Game actions are disabled in this diagnostic profile".into());
     }
     let target = Target::new(game);

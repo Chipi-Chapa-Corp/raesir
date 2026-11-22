@@ -164,7 +164,7 @@ pub const RUNTIME_JOB: &str = "ferestre:runtime";
 pub(crate) const CONSOLE_ONLY_MESSAGE: &str =
     "This Xbox Store edition only contains console packages.";
 pub(crate) const UNSUPPORTED_PACKAGE_MESSAGE: &str =
-    "This Xbox edition uses a Windows package Ferestre cannot install.";
+    "This Xbox edition can't be installed on Linux.";
 
 pub(crate) fn install_blocker(product: &str) -> Option<&'static str> {
     let products = crate::xbox_store::products(&[product], "neutral")?;
@@ -256,12 +256,10 @@ pub fn mark_tested_titles(report: &mut Report) {
     if report.host_os != Os::Linux || !report.catalog.iter().any(|game| game.store == "xbox") {
         return;
     }
-    let Some(mut command) = managed_cli()
-        .map(|dir| host_command(&dir.join(CLI)))
-        .or_else(|| discovery::program("ferestre").map(Command::new))
-    else {
+    let Some(client) = Client::discover() else {
         return;
     };
+    let mut command = client.command();
     command.args(["--json", "titles"]);
     if let Ok(value) = account::query(
         command,
@@ -542,15 +540,15 @@ pub fn install_managed(maintenance: bool) -> Result<(), String> {
 }
 
 fn check_setup_enabled() -> Result<(), String> {
-    if env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
-        || env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some()
+    if env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+        || env::var_os("RAESIR_DISABLE_NETWORK").is_some()
     {
         return Err("Ferestre setup is disabled in this diagnostic profile".into());
     }
     Ok(())
 }
 
-mod account;
+pub(crate) mod account;
 pub(crate) use account::{library_cache_path, library_cached, library_signed_out};
 pub use account::{refresh_library, sign_in};
 
@@ -595,7 +593,7 @@ mod install {
 
         let http = Client::builder()
             .https_only(true)
-            .user_agent("ExposedGames/0.1")
+            .user_agent("Raesir/0.1")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(180))
             .build()

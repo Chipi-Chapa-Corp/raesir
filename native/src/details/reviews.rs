@@ -1,5 +1,5 @@
 use super::*;
-use exposed_games_backend::details::{
+use raesir_backend::details::{
     Review,
     reviews::{Page, Query, SteamReviews},
 };
@@ -149,13 +149,13 @@ impl DetailsPage {
                 .to_owned()
         };
         let dates = if selected[3] == 5 {
-            exposed_games_backend::details::reviews::date_range(&custom(0), &custom(1))
+            raesir_backend::details::reviews::date_range(&custom(0), &custom(1))
         } else {
             let days = [0, 1, 7, 30, 365][selected[3]];
             Ok(if days == 0 {
                 (0, 0)
             } else {
-                let end = exposed_games_backend::details::now().min(u32::MAX as u64) as u32;
+                let end = raesir_backend::details::now().min(u32::MAX as u64) as u32;
                 (end.saturating_sub(days * 86400), end)
             })
         };
@@ -549,7 +549,7 @@ impl DetailsPage {
                 });
             content = content.child(columns);
         } else {
-            let since = exposed_games_backend::details::review_cutoff(
+            let since = raesir_backend::details::review_cutoff(
                 [0, 1, 7, 30, 365, 0][self.review_state.selected[3]],
             );
             let recommendation = match self.review_state.selected[0] {
@@ -763,7 +763,7 @@ impl DetailsPage {
                             })
                             .when_some(url, |d, url| {
                                 d.cursor_pointer().on_click(move |_, _, cx| {
-                                    if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_none() {
+                                    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
                                         cx.open_url(&url);
                                     }
                                 })

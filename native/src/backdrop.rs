@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use exposed_games_backend::{details::Details, model::LibraryGame};
+use raesir_backend::{details::Details, model::LibraryGame};
 use gpui::{prelude::*, *};
 use std::{
     cell::Cell,
@@ -275,7 +275,7 @@ mod tests {
     }
     #[test]
     fn background_uses_first_available_content_instead_of_cover() {
-        use exposed_games_backend::details::Media;
+        use raesir_backend::details::Media;
         let mut details = Details {
             media: vec![
                 Media {

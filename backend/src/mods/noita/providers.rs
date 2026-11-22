@@ -1,4 +1,5 @@
 use super::*;
+use crate::mods::providers::http;
 type CompanionDownload = Option<(PathBuf, String, Vec<String>)>;
 pub(super) type Download = (
     Package,
@@ -8,74 +9,7 @@ pub(super) type Download = (
     Option<SourceFile>,
 );
 
-fn http() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent("ExposedGames/0.1")
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(45))
-        .build()
-        .map_err(|e| e.to_string())
-}
-
 impl Manager {
-    pub(super) fn provider_json(&self, url: &str, refresh: bool) -> Result<Value, String> {
-        self.provider_json_inner(url, refresh, true)
-    }
-
-    pub(in crate::mods) fn refresh_provider_json(&self, url: &str) -> Result<Value, String> {
-        self.provider_json_inner(url, true, false)
-    }
-
-    fn provider_json_inner(&self, url: &str, refresh: bool, stale: bool) -> Result<Value, String> {
-        let path = self
-            .cache
-            .join("providers")
-            .join(format!("{}.json", launch::hash(url.as_bytes())));
-        let cached = || {
-            fs::read(&path)
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-        };
-        let fresh = fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(1800));
-        if !refresh
-            && fresh
-            && let Some(value) = cached()
-        {
-            return Ok(value);
-        }
-        let fetch = || {
-            if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
-                return Err("Mod networking is disabled".to_owned());
-            }
-            let mut data = Vec::new();
-            http()?
-                .get(url)
-                .send()
-                .and_then(|r| r.error_for_status())
-                .map_err(|e| e.to_string())?
-                .take(16 * 1024 * 1024 + 1)
-                .read_to_end(&mut data)
-                .map_err(|e| e.to_string())?;
-            if data.len() > 16 * 1024 * 1024 {
-                return Err("Provider response is too large".into());
-            }
-            let value: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-            crate::storage::write_json(&path, &value)?;
-            Ok(value)
-        };
-        fetch().or_else(|error| {
-            if stale {
-                cached().ok_or(error)
-            } else {
-                Err(error)
-            }
-        })
-    }
-
     fn download(&self, url: &str) -> Result<PathBuf, String> {
         self.download_versioned(url, "")
     }
@@ -96,7 +30,7 @@ impl Manager {
         if path.is_file() {
             return Ok(path);
         }
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
             return Err("Mod networking is disabled".into());
         }
         let response = http()?
@@ -399,7 +333,7 @@ fn recipe_package(recipe: &recipes::Recipe) -> Package {
         downloads: 0,
         deprecated: false,
         categories: recipe.categories.clone(),
-        source: "Exposed Games catalog".into(),
+        source: "Raesir catalog".into(),
     }
 }
 

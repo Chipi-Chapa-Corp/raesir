@@ -1,6 +1,13 @@
 use crate::{discovery, model::*};
 use std::{collections::BTreeMap, path::Path};
 
+pub fn client_label(client: &str) -> &str {
+    match client {
+        "Ferestre" => "Xbox",
+        _ => client,
+    }
+}
+
 pub fn url(client: &str, url: String) -> GameAction {
     GameAction {
         client: client.into(),

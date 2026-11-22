@@ -3,10 +3,12 @@ use crate::details::text_button;
 
 #[derive(Clone)]
 pub(super) enum Dialog {
-    Nexus,
+    Nexus {
+        page: Option<String>,
+    },
     Files {
         id: String,
-        files: Vec<exposed_games_backend::mods::ModFile>,
+        files: Vec<raesir_backend::mods::ModFile>,
     },
     Create,
     Rename {
@@ -45,6 +47,7 @@ impl ModBrowser {
         if self.loading || self.installing.is_some() {
             return;
         }
+        self.catalog_task = None;
         let name = match &mode {
             Dialog::Rename { name, .. } => name.as_str(),
             _ => "",
@@ -170,7 +173,7 @@ impl ModBrowser {
             return;
         };
         let (operation, id) = match mode {
-            Dialog::Nexus => {
+            Dialog::Nexus { .. } => {
                 self.submit_nexus(cx);
                 return;
             }
@@ -204,9 +207,8 @@ impl ModBrowser {
                 this.loading = false;
                 match result {
                     Ok((snapshot, _)) => {
-                        this.snapshot = Some(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.dialog = None;
-                        this.rebuild_rows(cx);
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -222,14 +224,14 @@ impl ModBrowser {
         let Some(mode) = &self.dialog else {
             return div().into_any_element();
         };
-        if matches!(mode, Dialog::Nexus) {
+        if matches!(mode, Dialog::Nexus { .. }) {
             return self.nexus_dialog(cx);
         }
         if let Dialog::Files { id, files } = mode {
             return self.modworkshop_files_dialog(id, files, cx);
         }
         let (heading, note, action, editing, destructive) = match mode {
-            Dialog::Nexus => unreachable!(),
+            Dialog::Nexus { .. } => unreachable!(),
             Dialog::Files { .. } => unreachable!(),
             Dialog::Create => (
                 "New profile".to_owned(),

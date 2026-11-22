@@ -47,7 +47,7 @@ pub fn load(dir: &Path, report: &mut Report) {
 
 /// Refresh off the UI thread; keep the last complete catalog on failure.
 pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
         return Ok(false);
     }
     if !force
@@ -63,7 +63,7 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
-        .user_agent("ExposedGames/0.1")
+        .user_agent("Raesir/0.1")
         .build()
         .map_err(|e| e.to_string())?;
     let ids = product_ids(&json(&client, LIST)?)?;

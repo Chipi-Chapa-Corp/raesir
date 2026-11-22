@@ -1,5 +1,5 @@
 use super::*;
-use exposed_games_backend::player_stats::{Achievement, PlayerStats};
+use raesir_backend::player_stats::{Achievement, PlayerStats};
 
 fn hours(seconds: u64) -> String {
     let n = seconds as f64 / 3600.;
@@ -26,7 +26,7 @@ fn status(a: &Achievement) -> String {
     let mut parts = Vec::new();
     if a.unlocked {
         if let Some(date) = a.unlocked_at {
-            let date = exposed_games_backend::details::display_date(&date.to_string());
+            let date = raesir_backend::details::display_date(&date.to_string());
             if !date.is_empty() {
                 parts.push(date);
             }
@@ -260,8 +260,10 @@ impl DetailsPage {
                 .await;
             if this
                 .update(cx, |this, cx| {
+                    this.stats_loading = this.game.store == "xbox"
+                        && !cached.account.is_empty()
+                        && !cached.has_data();
                     this.set_stats(cached, cx);
-                    this.stats_loading = false;
                 })
                 .is_err()
             {
@@ -275,7 +277,11 @@ impl DetailsPage {
                     stats
                 })
                 .await;
-            this.update(cx, |this, cx| this.set_stats(stats, cx)).ok();
+            this.update(cx, |this, cx| {
+                this.stats_loading = false;
+                this.set_stats(stats, cx);
+            })
+            .ok();
         }));
     }
     pub(super) fn close_achievements(&mut self, window: &mut Window, cx: &mut Context<Self>) {

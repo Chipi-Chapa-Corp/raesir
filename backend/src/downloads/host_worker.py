@@ -159,11 +159,11 @@ def ferestre_failure(lines):
         if line == "no user token (entry not found); sign in again":
             return dict(error="XboxSignInRequired")
         if line == "Selection failed" or line.startswith("no PC package found"):
-            return dict(detail="Ferestre could not select a compatible PC package for this Xbox edition")
+            return dict(detail="Could not find a compatible PC download for this Xbox edition")
         if line.startswith("No .msixvc file found"):
             if empty_packages:
                 return dict(detail="The Xbox Store returned no downloadable PC package. Check again before retrying.")
-            return dict(detail="This Xbox game uses a package format that Ferestre cannot install")
+            return dict(detail="This Xbox edition can't be installed on Linux")
         words = line.split()
         if len(words) != 3 or words[0] != "FERESTRE_TRANSFER_DIAGNOSTIC_V1":
             continue
@@ -178,14 +178,14 @@ def ferestre_failure(lines):
                      "transfer-range", "transfer-eof", "transfer-status"):
             return dict(detail="The Xbox download connection failed. Retry to continue")
         if stage in ("disk-space", "transfer-io"):
-            return dict(detail="Ferestre could not write the game data. Check free space and permissions")
+            return dict(detail="Could not write the Xbox game files. Check free space and permissions")
         if stage == "installation-busy":
             return dict(detail="The game is running or its files are in use")
     return None
 
 try:
     game_lease = None
-    if "EXPOSED_GAMES_DISABLE_ACTIONS" in os.environ:
+    if "RAESIR_DISABLE_ACTIONS" in os.environ:
         raise RuntimeError("actions disabled")
     if request.get("game_lock"):
         path = Path(request["game_lock"])
@@ -290,12 +290,12 @@ try:
                     elif ferestre_game:
                         progress.update(detail=None, controllable=True)
                         if result == 0:
-                            progress["detail"] = "Ferestre reported success, but the installed game files or version could not be verified."
+                            progress["detail"] = "Could not verify the installed Xbox game files or version."
                         elif failure_reason:
                             progress.update(failure_reason)
                         else:
                             reason = f"exit code {result}" if result > 0 else f"signal {-result}"
-                            progress["detail"] = f"Ferestre stopped ({reason}). See output.log for details."
+                            progress["detail"] = f"Xbox download stopped ({reason}). See output.log for details."
                     else:
                         progress["detail"] = "The client could not finish this download. Sign in to the client and retry."
                 else:

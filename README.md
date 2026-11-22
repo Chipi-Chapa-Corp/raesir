@@ -1,22 +1,22 @@
-# Exposed Games
+# Raesir
 
-<img src="build/icon.svg" width="96" height="96" alt="Exposed Games icon">
+<img src="build/icon.svg" width="96" height="96" alt="Raesir icon">
 
 Existing settings, cached libraries, and mod profiles from earlier releases
-are reused from their original directories when no Exposed Games storage exists.
-New installations use `com.chipichapa.exposedgames`; the executable is
-`exposed-games` and diagnostic environment variables use `EXPOSED_GAMES_`.
+are reused from their original directories when no Raesir storage exists.
+New installations use `com.chipichapa.raesir`; the executable is
+`raesir` and diagnostic environment variables use `RAESIR_`.
 
 One library for your games across Windows and Linux.
 
-Exposed Games brings Steam, Epic Games, EA, Ubisoft Connect, Xbox, and Wargaming games together, including libraries managed through Heroic, Lutris, and Bottles.
+Raesir brings Steam, Epic Games, EA, Ubisoft Connect, Xbox, and Wargaming games together, including libraries managed through Heroic, Lutris, and Bottles.
 
 - Find installed and owned games, with search and filters that remember your choices.
 - See games on another OS, including duplicate installations across dual boot.
 - Browse game descriptions, trailers, screenshots, reviews, and system requirements.
 - Launch, install, and uninstall games through your existing clients, or open their libraries and store pages.
 
-Keep your game clients installed and signed in. Exposed Games uses their existing libraries and launch tools.
+Keep your game clients installed and signed in. Raesir uses their existing libraries and launch tools.
 
 The selector beside the launcher filters switches between All, Purchased (the default),
 and Game Pass. Game Pass includes Microsoft's full PC catalog across Game Pass tiers for the US market,
@@ -49,7 +49,7 @@ cargo run --release
 
 Click a game to see its details. Right-click for game actions. Use **Ctrl + / − / 0** to adjust text size.
 
-When you select **Play**, the button shows **Starting…** until Exposed Games
+When you select **Play**, the button shows **Starting…** until Raesir
 detects the game process. The pause icon then offers **Quit game**. Play returns
 after the game exits. Linux game process tracking uses Python 3 on the host.
 
@@ -60,7 +60,7 @@ display controls query Steam directly. Date and playtime filters support custom
 ranges, and each list can load additional pages. Reviewer names link to their
 public Steam profiles.
 
-On compatible 64-bit Windows and Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through Steam in the background. Downloads continue if you close Exposed Games. An isolated helper checks the Steam client interface before sending requests. Other platforms use Steam's dialogs.
+On compatible 64-bit Windows and Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Raesir. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; other builds use Steam's own dialogs.
 
 Steam ownership is read from a running, signed-in client on 64-bit Windows and
 Linux, without a Web API key. Failed or signed-out lookups keep the prior
@@ -70,42 +70,42 @@ Steam client closed.
 
 Settings opens a popup with **Automatic game updates**, enabled by default.
 Available updates replace Play with **Update** on cards and game pages. With
-automatic updates enabled, Exposed Games starts those updates; turning it off leaves
+automatic updates enabled, Raesir starts those updates; turning it off leaves
 them available for manual installation. Running transfers show **Pause** and
 their progress, and paused transfers show **Resume**. The Downloads popup uses
-the same state and controls. This setting governs requests made by Exposed Games;
+the same state and controls. This setting governs requests made by Raesir;
 existing clients retain their own automatic-update settings.
 
-Update checks run at startup and periodically while Exposed Games is open. Steam uses
+Update checks run at startup and periodically while Raesir is open. Steam uses
 its client's known update state; Epic checks installed Legendary/Heroic profiles,
 and Xbox on Linux can use an installed Ferestre helper. Epic and Ferestre
 transfers use those clients' existing accounts and install locations. Managed
-workers retain progress across Exposed Games restarts, continue after Exposed Games closes,
+workers retain progress across Raesir restarts, continue after Raesir closes,
 and coordinate with mod/game leases. A transfer is complete only after the
 client exits successfully and commits its expected installation version.
 
-EA app and Ubisoft Connect expose their native download queues to Exposed Games on
+EA app and Ubisoft Connect expose their native download queues to Raesir on
 Windows and in discovered Linux Wine/Proton profiles, including configured
 Lutris and Bottles runners. Downloads started in either client also appear in
-Exposed Games. Progress, Pause/Resume, and available game updates use the same cards,
+Raesir. Progress, Pause/Resume, and available game updates use the same cards,
 game pages, and Downloads popup as other transfers. Ubisoft's pause control
 belongs to its active queue, so queued cards cannot pause another game.
 Native installation dialogs still handle directories, languages, and licenses.
 
-Exposed Games enables the clients' loopback interfaces when opening them and verifies
+Raesir enables the clients' loopback interfaces when opening them and verifies
 the owning executable and prefix before connecting. If a client was already
-running without that interface, quit it once and reopen it through Exposed Games;
-Exposed Games never force-restarts it or interrupts its downloads. Keep the clients
+running without that interface, quit it once and reopen it through Raesir;
+Raesir never force-restarts it or interrupts its downloads. Keep the clients
 signed in. Unsupported interfaces fail explicitly rather than fabricating
 progress or working controls. No API keys or copied credentials are needed.
 
 Clients without verified direct controls continue to handle their own install
-dialogs. Exposed Games tracks those requested installs in Downloads until their
+dialogs. Raesir tracks those requested installs in Downloads until their
 installation metadata confirms completion, and offers **Open in game client**.
 It does not invent percentages or expose a nonfunctional Pause button for them.
 
 For development, run `./dev`. It builds incrementally with optimized UI and image
-processing, then launches Exposed Games. Close the app or press **Ctrl+C**, then run
+processing, then launches Raesir. Close the app or press **Ctrl+C**, then run
 `./dev` again to pick up changes. No watcher or Dioxus CLI is needed.
 
 `./dev` allows one run per workspace and stops its process group on exit. It
@@ -118,10 +118,34 @@ the budget can temporarily be exceeded. Preview maintenance with
 
 ## Mods
 
+Open **Nexus Mods** from a PC game's details page to search its public Nexus
+catalog inside Raesir. **All mods** is the default view. Use the **Trending**
+filter for Nexus's trending list. More results load as you scroll.
+Selecting a mod opens its description in Raesir. The store button on that
+description opens the Nexus website.
+
+Public search and mod details work while signed out. In a registered build, **Sign in to
+Nexus Mods** opens browser approval and the banner disappears when Raesir is
+connected. **Settings** lets you disconnect the account. Builds awaiting
+registration show that status on Nexus tabs.
+
+Signed-in accounts can install mods where Raesir has an installer. Raesir uses
+[Modde](https://github.com/caniko/modde-rs)'s game registry to identify supported
+store editions and its installer to analyze and stage archives. Mods for a
+supported local installation are copied into the game using its layout. Raesir
+tracks the files for uninstall and reports any collision with existing files.
+Noita retains its profile installer. Archives
+requiring an interactive installer or a separate deployment step are reported
+when opened. Check each mod's requirements before playing.
+
+Raesir downloads the main file when Nexus permits a direct download. If several
+files are suitable, Raesir asks which one to use. When Nexus requires a website
+download, choose **Import archive** with the downloaded file.
+
 Supported games have a **Mods** bubble on their details page. Browse a virtualized
 card grid with cached mod icons. The header switches to mod search, profile selection,
 and All / Installed / Not installed filters. Click a card to open its details inside
-Exposed Games and install it with its dependencies. This uses public, key-free Thunderstore APIs and
+Raesir and install it with its dependencies. This uses public, key-free Thunderstore APIs and
 [thunderstore-engine](https://github.com/endoze/thunderstore-engine); games match the
 upstream store identifiers rather than title guesses.
 
@@ -130,10 +154,15 @@ recipes from [`backend/data/mod-recipes.json`](backend/data/mod-recipes.json).
 Entangled Worlds is the first recipe. It downloads the mod and the native proxy
 from the same public GitHub release; arbitrary GitHub URLs are not accepted.
 The **Install Mod** card imports an archive downloaded from a Noita Nexus page.
-There is no general local-folder import, and no API keys are required.
 
-Installed mods are checked automatically at startup and hourly while Exposed Games is
-open, across all Exposed Games profiles, including inactive profiles and games currently
+On Steam, open **Nexus Mods** to install Stardew Valley mods through Modde.
+Set up [SMAPI](https://smapi.io/) to load them. Existing Raesir SMAPI profiles
+are still accessible from **Mods**. On native Steam, **Launch modded** can
+continue using those profiles. On Xbox PC, the Nexus tab supports browsing
+and **Show profile mods** can reveal files from an existing profile.
+
+Installed mods are checked automatically at startup and hourly while Raesir is
+open, across all Raesir profiles, including inactive profiles and games currently
 uninstalled. Thunderstore, ModWorkshop and bundled recipes update in the
 background. ModWorkshop retains the chosen file variant; old installs with an
 ambiguous variant ask you to choose their file once. Nexus imports continue to
@@ -163,7 +192,7 @@ state on exit. Installed mods and world saves are kept. Close a running modded
 game/proxy before switching modes.
 
 On Linux, Entangled Worlds joins the Steam session that owns Noita. Flatpak Steam
-uses `flatpak enter` on an existing instance; Exposed Games checks the owning process,
+uses `flatpak enter` on an existing instance; Raesir checks the owning process,
 PID namespace and file access before opening the proxy. It preserves the proxy's
 lobby environment and launches Noita with the recorded Proton tool and the Steam
 runtimes declared by that tool's installed manifests. Missing sessions, runtimes
@@ -178,12 +207,12 @@ the current launcher adapter without reinstalling their downloads.
 
 Select mod profiles from the profile menu, with pencil/trash controls on each row.
 The adjacent plus pill creates a profile. Each profile has its own mod set.
-Mod cards keep square icons and open a details page inside Exposed Games, using the same
+Mod cards keep square icons and open a details page inside Raesir, using the same
 layout as game pages. **Launch modded** appears beside Play
 on the details page and library cards when a local installation has enabled mods.
 Steam’s normal Play explicitly disables the loader. Installs publish a complete profile
 revision only after all dependencies succeed, and retain the previous revision.
-Exposed Games records direct installs separately from automatic dependencies in each
+Raesir records direct installs separately from automatic dependencies in each
 profile revision. Uninstall confirmation lists automatic dependencies that are
 no longer needed and removes them together. Shared dependencies, dependencies
 needed by disabled mods, and direct installs stay installed. Older installs with
@@ -198,7 +227,7 @@ data directory without expanding its sandbox permissions.
 
 ## Cover artwork
 
-Exposed Games uses official store artwork first. For Steam games with missing portraits or
+Raesir uses official store artwork first. For Steam games with missing portraits or
 Steam's generated banner with blurred padding, it automatically checks
 [PCGamingWiki](https://www.pcgamingwiki.com/wiki/PCGamingWiki:API) by exact Steam app ID.
 If that has no suitable portrait, it checks public [LaunchBox Games Database](https://gamesdb.launchbox-app.com/)
@@ -215,7 +244,7 @@ no manual cache deletion.
 
 ## Games on another OS
 
-Exposed Games can read libraries on accessible Windows and Linux partitions. On Linux, mount banners offer read-only access with approval through your desktop. Partitions mounted by Exposed Games are unmounted when you close it.
+Raesir can read libraries on accessible Windows and Linux partitions. On Linux, mount banners offer read-only access with approval through your desktop. Partitions mounted by Raesir are unmounted when you close it.
 
 On Linux, discovery treats multi-device Btrfs filesystems as one pool and scans the mount points reported across its members. An unmounted pool's banner shows its device count and raw capacity.
 
@@ -224,12 +253,12 @@ Windows needs a compatible filesystem reader to access Linux partitions, such as
 ## Xbox games on Linux
 
 On x86-64 Linux, open the Xbox library and select **Set up Xbox** if no Xbox client is installed.
-Exposed Games verifies the Ferestre release signature and installs the CLI and its supporting files in your user data directory.
+Raesir verifies the Ferestre release signature and installs the CLI and its supporting files in your user data directory.
 Select **Install Xbox runtime** to download the runtime before or after signing in.
-The Xbox library and Downloads show the current stage and bytes received. The background download continues if you close Exposed Games.
-Select **Sign in to Xbox** to open the Microsoft sign-in window and import the account's library. Game downloads and launches use the controls in Exposed Games.
+The Xbox library and Downloads show the current stage and bytes received. The background download continues if you close Raesir.
+Select **Sign in to Xbox** to open the Microsoft sign-in window and import the account's library. Game downloads and launches use the controls in Raesir.
 
-Exposed Games also detects an existing [Ferestre](https://github.com/icex/ferestre) or
+Raesir also detects an existing [Ferestre](https://github.com/icex/ferestre) or
 [Xodus Nexus](https://github.com/domsvoboda/xodus-nexus) installation.
 Compatibility depends on the game. The Xbox library shows Xbox PC titles, with games managed by other stores listed under those stores.
 

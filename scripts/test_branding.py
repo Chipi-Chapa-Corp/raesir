@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_ID = "com.chipichapa.exposedgames"
+APP_ID = "com.chipichapa.raesir"
 
 
 def config(path):
@@ -29,27 +29,27 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(native_id.group(1), APP_ID)
         manifest = json.loads((ROOT / "build" / f"{APP_ID}.json").read_text())
         self.assertEqual(manifest["app-id"], APP_ID)
-        self.assertEqual(manifest["command"], "exposed-games")
+        self.assertEqual(manifest["command"], "raesir")
         desktop = config(ROOT / "build" / f"{APP_ID}.desktop")["Desktop Entry"]
-        self.assertEqual(desktop["Name"], "Exposed Games")
-        self.assertEqual(desktop["Exec"], "exposed-games")
+        self.assertEqual(desktop["Name"], "Raesir")
+        self.assertEqual(desktop["Exec"], "raesir")
         self.assertEqual(desktop["Icon"], APP_ID)
         self.assertEqual(desktop["StartupWMClass"], APP_ID)
         appstream = ET.parse(ROOT / "build" / f"{APP_ID}.metainfo.xml")
         self.assertEqual(appstream.findtext("id"), APP_ID)
-        self.assertEqual(appstream.findtext("name"), "Exposed Games")
+        self.assertEqual(appstream.findtext("name"), "Raesir")
         self.assertEqual(appstream.findtext("launchable"), f"{APP_ID}.desktop")
-        ref = config(ROOT / "build/exposed-games.flatpakref")["Flatpak Ref"]
+        ref = config(ROOT / "build/raesir.flatpakref")["Flatpak Ref"]
         self.assertEqual(ref["Name"], APP_ID)
-        self.assertEqual(ref["Title"], "Exposed Games")
+        self.assertEqual(ref["Title"], "Raesir")
 
     def test_executable_names(self):
         native = tomllib.loads((ROOT / "native/Cargo.toml").read_text())
         backend = tomllib.loads((ROOT / "backend/Cargo.toml").read_text())
-        self.assertEqual(native["package"]["name"], "exposed-games")
-        self.assertEqual(native["bin"][0]["name"], "exposed-games")
-        self.assertEqual(backend["package"]["name"], "exposed-games-backend")
-        self.assertEqual(backend["bin"][0]["name"], "exposed-games-scan")
+        self.assertEqual(native["package"]["name"], "raesir")
+        self.assertEqual(native["bin"][0]["name"], "raesir")
+        self.assertEqual(backend["package"]["name"], "raesir-backend")
+        self.assertEqual(backend["bin"][0]["name"], "raesir-scan")
 
     def test_icon_is_self_contained_vector_art(self):
         svg = ET.parse(ROOT / "build/icon.svg").getroot()

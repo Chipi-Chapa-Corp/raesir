@@ -16,9 +16,9 @@ pub(super) struct Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            selected: "exposed-games".into(),
+            selected: "raesir".into(),
             profiles: vec![NamedProfile {
-                id: "exposed-games".into(),
+                id: "raesir".into(),
                 name: "Default".into(),
             }],
         }
@@ -27,7 +27,7 @@ impl Default for Registry {
 
 pub(super) fn is_default_profile(id: &str) -> bool {
     // Existing registries keep their IDs so external profile pointers stay valid.
-    matches!(id, "exposed-games" | "raesir")
+    matches!(id, "raesir" | "exposed-games")
 }
 
 fn valid_id(id: &str) -> bool {
@@ -71,7 +71,7 @@ impl Manager {
 
     pub(super) fn selected_id(&self, community: &str) -> String {
         self.registry(community)
-            .map_or_else(|_| "exposed-games".into(), |r| r.selected)
+            .map_or_else(|_| "raesir".into(), |r| r.selected)
     }
 
     pub(super) fn profile_root(&self, community: &str, id: &str) -> PathBuf {
@@ -97,6 +97,8 @@ impl Manager {
                 // mutations report the error instead of guessing.
                 let installed = if recipes::by_id(community).is_some() {
                     super::noita::installed(&path).unwrap_or_default()
+                } else if community == stardew::DOMAIN {
+                    stardew::installed(&path).unwrap_or_default()
                 } else {
                     dependencies::Reasons::read(&path)
                         .unwrap_or_default()
@@ -106,7 +108,7 @@ impl Manager {
                     active: p.id == registry.selected,
                     id: p.id,
                     name: p.name,
-                    source: "Exposed Games".into(),
+                    source: "Raesir".into(),
                     path,
                     installed,
                 }
@@ -209,6 +211,13 @@ impl Manager {
         let revisions = self
             .own_profile_path(slug, id)
             .and_then(|p| p.parent().map(Path::to_path_buf));
+        let _smapi_revisions = if slug == stardew::DOMAIN
+            && let Some(path) = &revisions
+        {
+            self.lock_smapi_revisions(path)?
+        } else {
+            Vec::new()
+        };
         registry.profiles.retain(|p| p.id != id);
         if registry.selected == id {
             registry.selected = registry.profiles[0].id.clone();
@@ -291,18 +300,18 @@ mod tests {
         fs::write(revision.join("mod.dll"), b"installed mod").unwrap();
         crate::storage::write_json(
             &root.join("profiles.json"),
-            &serde_json::json!({"selected":"raesir", "profiles":[{"id":"raesir", "name":"Default"}]}),
+            &serde_json::json!({"selected":"exposed-games", "profiles":[{"id":"exposed-games", "name":"Default"}]}),
         ).unwrap();
         crate::storage::write_json(
             &root.join("current.json"),
             &serde_json::json!({"revision":"profile-before-rename"}),
         )
         .unwrap();
-        assert_eq!(manager.selected_id("peak"), "raesir");
-        assert_eq!(manager.profile_root("peak", "raesir"), root);
+        assert_eq!(manager.selected_id("peak"), "exposed-games");
+        assert_eq!(manager.profile_root("peak", "exposed-games"), root);
         let profiles = manager.profiles("peak");
         let selected = manager.selected("peak", &profiles).unwrap();
-        assert_eq!(selected.source, "Exposed Games");
+        assert_eq!(selected.source, "Raesir");
         assert_eq!(selected.path, revision.canonicalize().unwrap());
         assert_eq!(
             fs::read(selected.path.join("mod.dll")).unwrap(),
@@ -339,7 +348,7 @@ mod tests {
             },
         );
         let original = manager
-            .profile_root("peak", "exposed-games")
+            .profile_root("peak", "raesir")
             .join("revisions/profile-original");
         let entries = vec![
             entry("Dependency", vec![]),
@@ -353,7 +362,7 @@ mod tests {
         }
         crate::storage::write_json(
             &manager
-                .profile_root("peak", "exposed-games")
+                .profile_root("peak", "raesir")
                 .join("current.json"),
             &serde_json::json!({"revision":"profile-original"}),
         )
@@ -384,7 +393,7 @@ mod tests {
             b"Dependency"
         );
         assert!(original.join("BepInEx/plugins/Owner-Test/mod.dll").exists());
-        manager.delete_profile(&game, "exposed-games").unwrap();
+        manager.delete_profile(&game, "raesir").unwrap();
         assert!(!original.exists());
         assert_eq!(manager.selected_id("peak"), other);
         assert_eq!(manager.profiles("peak")[0].installed.len(), 1);
@@ -443,7 +452,7 @@ mod tests {
         assert_eq!(manager.profiles("peak").len(), 1);
         manager.create_profile(&game, "New profile").unwrap();
         let id = manager.selected_id("peak");
-        assert_ne!(id, "exposed-games");
+        assert_ne!(id, "raesir");
         assert!(
             manager
                 .selected("peak", &manager.profiles("peak"))
@@ -454,9 +463,9 @@ mod tests {
         manager.rename_profile(&game, &id, "Renamed").unwrap();
         assert_eq!(manager.selected_id("peak"), id);
         manager.delete_profile(&game, &id).unwrap();
-        assert_eq!(manager.selected_id("peak"), "exposed-games");
+        assert_eq!(manager.selected_id("peak"), "raesir");
         assert_eq!(fs::read(path.join("mod.dll")).unwrap(), b"keep original");
-        assert!(manager.delete_profile(&game, "exposed-games").is_err());
+        assert!(manager.delete_profile(&game, "raesir").is_err());
         assert!(manager.create_profile(&game, "../escape").is_err());
         assert!(manager.create_profile(&game, " ").is_err());
         assert!(manager.rename_profile(&game, "missing", "Name").is_err());

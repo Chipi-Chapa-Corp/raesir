@@ -36,6 +36,8 @@ pub struct Details {
     pub scores: Vec<String>,
     pub media: Vec<Media>,
     pub requirements: Vec<Requirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_metadata: Option<ModMetadata>,
     pub reviews: Vec<Review>,
     #[serde(default)]
     pub steam_reviews: Option<reviews::SteamReviews>,
@@ -46,6 +48,20 @@ pub struct Details {
     pub updated: u64,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ModMetadata {
+    pub version: String,
+    pub last_updated: String,
+    pub requirements: Vec<ModRequirement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModRequirement {
+    pub name: String,
+    pub notes: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Media {
     pub url: String,
     pub preview: String,
@@ -53,6 +69,14 @@ pub struct Media {
     pub video: bool,
 }
 impl Media {
+    pub fn thumbnail_url(&self) -> &str {
+        if self.video || !self.preview.is_empty() {
+            &self.preview
+        } else {
+            &self.url
+        }
+    }
+
     pub fn poster_url(&self) -> String {
         let source = if self.video { &self.preview } else { &self.url };
         if let Some(url) = crate::artwork::xbox_viewer_url(source) {
@@ -272,7 +296,7 @@ pub fn cached(game: &LibraryGame, root: &Path) -> Option<Details> {
     (details.key == game.key).then_some(details)
 }
 pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
-    if std::env::var_os("EXPOSED_GAMES_DISABLE_NETWORK").is_some() {
+    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
         return Err("Game details are offline. Cached information is still available.".into());
     }
     let client = http()?;
@@ -297,13 +321,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
     }
     if game.store != "steam" && (details.description.is_empty() || details.reviews.is_empty()) {
         // Resolve exact editions only; never silently attach another game's reviews.
-        if let Ok(value) = get_json(
-            client,
-            &format!(
-                "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
-                crate::catalog::encode(&game.title)
-            ),
-        ) {
+        if let Ok(value) = steam_store_search(client, &game.title) {
             if let Some(id) = array(&value, "items")
                 .iter()
                 .find(|v| same_title(&text(v, "name"), &game.title))
@@ -406,7 +424,7 @@ fn direct_video(media: &Media) -> bool {
 fn http() -> Result<&'static Client, String> {
     static HTTP: LazyLock<Result<Client, String>> = LazyLock::new(|| {
         Client::builder()
-            .user_agent("ExposedGames/0.1")
+            .user_agent("Raesir/0.1")
             .timeout(Duration::from_secs(12))
             .connect_timeout(Duration::from_secs(4))
             .build()
@@ -439,6 +457,15 @@ fn response(request: RequestBuilder) -> Result<Vec<u8>, String> {
 fn get_json(client: &Client, url: &str) -> Result<Value, String> {
     serde_json::from_slice(&response(client.get(url))?)
         .map_err(|_| "Store returned invalid information".into())
+}
+pub(crate) fn steam_store_search(client: &Client, title: &str) -> Result<Value, String> {
+    get_json(
+        client,
+        &format!(
+            "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
+            crate::catalog::encode(title)
+        ),
+    )
 }
 fn post_json(client: &Client, url: &str, body: Value) -> Result<Value, String> {
     serde_json::from_slice(&response(client.post(url).json(&body))?)
@@ -494,7 +521,7 @@ fn clean(s: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-fn same_title(a: &str, b: &str) -> bool {
+pub(crate) fn same_title(a: &str, b: &str) -> bool {
     fn normalize(s: &str) -> String {
         s.split_whitespace()
             .map(|word| {
@@ -521,7 +548,7 @@ fn same_title(a: &str, b: &str) -> bool {
     }
     normalize(a) == normalize(b)
 }
-fn safe_url(s: &str) -> bool {
+pub(crate) fn safe_url(s: &str) -> bool {
     reqwest::Url::parse(s).is_ok_and(|u| {
         u.scheme() == "https"
             && u.host_str()

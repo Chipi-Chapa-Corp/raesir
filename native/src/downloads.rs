@@ -4,7 +4,7 @@ use crate::{
     header::{action_button, pill},
     icons::icon,
 };
-use exposed_games_backend::{
+use raesir_backend::{
     downloads::format_bytes,
     steam_control::{Error, Operation, Phase, Progress},
 };
@@ -247,7 +247,7 @@ impl Launcher {
             .collect();
         if let Some((key, progress)) = self
             .download_operations
-            .get_key_value(exposed_games_backend::ferestre::RUNTIME_JOB)
+            .get_key_value(raesir_backend::ferestre::RUNTIME_JOB)
             .filter(|(_, progress)| progress.active())
         {
             installing.push((key, progress));
@@ -316,7 +316,7 @@ impl Launcher {
         let progress = &self.download_operations;
         let speed = self.download_rates.label(progress);
         let runtime = progress
-            .get(exposed_games_backend::ferestre::RUNTIME_JOB)
+            .get(raesir_backend::ferestre::RUNTIME_JOB)
             .filter(|state| state.active())
             .cloned();
         let mut entries: Vec<_> = self
@@ -459,12 +459,12 @@ impl Launcher {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = game.source.key.clone();
-        let ferestre = !exposed_games_backend::actions::library_handoff_allowed(&game.source);
+        let ferestre = !raesir_backend::actions::library_handoff_allowed(&game.source);
         let steam_update = game.source.store == "steam"
             && state.operation == Operation::Update
             && !state.controllable;
         let update_now = state.phase == Phase::Available && state.operation == Operation::Update;
-        let blocked = exposed_games_backend::actions::install_limitation(&game.source);
+        let blocked = raesir_backend::actions::install_limitation(&game.source);
         let sign_in = needs_xbox_sign_in(state);
         let operation = state.operation;
         let label = if let Some(reason) = blocked {

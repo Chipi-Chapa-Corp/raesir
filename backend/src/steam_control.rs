@@ -54,7 +54,7 @@ impl Error {
                 "Steam's background installation controls are unavailable. Open Steam to manage this game."
             }
             Self::SignedOut => "Sign in to the local Steam client, then try again.",
-            Self::XboxSignInRequired => "Ferestre could not authenticate your Xbox account.",
+            Self::XboxSignInRequired => "Sign in to Xbox again to continue.",
             Self::NotOwned => "This game is not available to the current Steam account.",
             Self::Running => "Close the game before changing its installation.",
             Self::Disk => {
@@ -481,7 +481,7 @@ fn request(root: &Path, appid: u32, operation: &str) -> Result<Status, Error> {
         return Err(Error::Rejected);
     }
     if matches!(operation, "install" | "uninstall" | "pause" | "resume")
-        && std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+        && std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
     {
         return Err(Error::Unavailable);
     }

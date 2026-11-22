@@ -1,8 +1,8 @@
 [Flatpak Ref]
-Name=com.chipichapa.exposedgames
+Name=com.chipichapa.raesir
 Branch=stable
-Title=Exposed Games
+Title=Raesir
 Url=https://chipi-chapa-corp.github.io/raesir/flatpak
 RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
 IsRuntime=false
-SuggestRemoteName=exposed-games
+SuggestRemoteName=raesir

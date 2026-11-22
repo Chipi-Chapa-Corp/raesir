@@ -1,16 +1,24 @@
 use super::*;
 use thunderstore_engine::profile;
 
+pub(super) fn changes_allowed() -> Result<(), String> {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
+        && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none()
+    {
+        return Err("Mod changes are disabled in this diagnostic profile".into());
+    }
+    Ok(())
+}
+
 impl Manager {
     pub fn uninstall(&self, game: &LibraryGame, package: &str) -> Result<Snapshot, String> {
         if recipes::for_game(game).is_some() {
             return self.noita_uninstall(game, package);
         }
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
-            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none()
-        {
-            return Err("Mod changes are disabled in this diagnostic profile".into());
+        if stardew::matches(game) {
+            return self.uninstall_smapi(game, package);
         }
+        changes_allowed()?;
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
@@ -50,11 +58,10 @@ impl Manager {
         if recipes::for_game(game).is_some() {
             return self.noita_install(game, package);
         }
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
-            && std::env::var_os("EXPOSED_GAMES_MODS_TEST_INSTALL").is_none()
-        {
-            return Err("Mod installation is disabled in this diagnostic profile".into());
+        if stardew::matches(game) {
+            return Err("Download the archive from Nexus and use Install Mod".into());
         }
+        changes_allowed()?;
         let _guard = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let _profile_lease =
             self.profile_lease(community(game).ok_or("Unsupported mod community")?)?;
@@ -338,7 +345,7 @@ mod tests {
         let mut manager = Manager::new(&dir.path().join("data"), &dir.path().join("cache"));
         manager.leases = dir.path().join("leases");
         let game = crate::catalog::entry("steam", "2379780", "Balatro", vec![], "fixture");
-        let root = manager.profile_root("balatro", "exposed-games");
+        let root = manager.profile_root("balatro", "raesir");
         let revisions = manager.revisions_dir(&game).unwrap();
         fs::create_dir_all(&revisions).unwrap();
         let pending = tempfile::Builder::new()

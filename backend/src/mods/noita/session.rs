@@ -59,7 +59,7 @@ impl Manager {
         game: &LibraryGame,
         args: &[String],
     ) -> Result<LaunchTask, String> {
-        if std::env::var_os("EXPOSED_GAMES_DISABLE_ACTIONS").is_some()
+        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
             && !super::super::diagnostic_launch_enabled()
         {
             return Err("Game launches are disabled in this diagnostic profile".into());
@@ -107,7 +107,7 @@ impl Manager {
                     .is_some()
             {
                 return Err(format!(
-                    "The game already has a manually installed {folder} folder. Move that copy before launching the Exposed Games profile."
+                    "The game already has a manually installed {folder} folder. Move that copy before launching the Raesir profile."
                 ));
             }
         }
@@ -649,7 +649,7 @@ mod tests {
         fs::write(saves.join("save00/mod_config.xml"), original_mods).unwrap();
         fs::write(saves.join("save_shared/config.xml"), original_config).unwrap();
         fs::write(saves.join("save00/world.dat"), b"existing world bytes").unwrap();
-        let root = manager.profile_root("noita", "exposed-games");
+        let root = manager.profile_root("noita", "raesir");
         let profile = root.join("revisions/profile-test");
         fs::create_dir_all(profile.join("mods/testmod")).unwrap();
         fs::create_dir_all(profile.join("tools/test")).unwrap();
