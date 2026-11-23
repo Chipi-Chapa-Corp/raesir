@@ -433,25 +433,25 @@ impl Backend {
             }
         }
         if kind == "update" {
-            let progress = self
-                .current_download_progress()
+            self.current_download_progress()
                 .remove(key)
                 .filter(|p| p.operation == Operation::Update && !matches!(p.phase, Phase::Complete))
                 .ok_or("This game has no available update")?;
             self.control_download(key, true)?;
-            return Ok(if key.starts_with("steam:") && !progress.controllable {
-                "Opened Steam Downloads"
-            } else {
-                "Update requested"
-            }
-            .into());
+            return Ok("Update requested".into());
+        }
+        if kind == "steam-downloads" {
+            actions::dispatch(&ActionTarget::Url {
+                url: "steam://open/downloads".into(),
+            })?;
+            return Ok("Opened Steam Downloads".into());
         }
         let action = actions::resolve(&report, key, kind)?;
-        if kind == "install"
-            && self.fixture.is_none()
-            && self.client_downloads.install(&report, key)?
+        if kind == "library"
+            && let Some(game) = report.catalog.iter().find(|game| game.key == key)
+            && self.client_downloads.open_library(&report, game)?
         {
-            return Ok("Installation sent to the game client".into());
+            return Ok(format!("Sent to {}", action.client));
         }
         if kind == "install"
             && let Some(game) = report.catalog.iter().find(|g| g.key == key)
@@ -499,53 +499,10 @@ impl Backend {
                 .map(|_| "Sent to Steam".into())
                 .map_err(|error| error.message().into());
         }
-        if kind == "install"
-            && let Some(game) = report
-                .catalog
-                .iter()
-                .find(|g| g.key == key && g.store == "steam")
-        {
-            if let Some(client) = self.steam.status().clients.first() {
-                self.steam.preserve(&client.root);
-            }
-            let result = actions::perform(&report, key, kind)?;
-            if let Some(client) = self.steam.status().clients.first() {
-                let mut progress = Progress::starting(Operation::Install);
-                progress.controllable = false;
-                self.steam_jobs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        key.into(),
-                        SteamJob {
-                            root: client.root.clone(),
-                            library: PathBuf::from(&client.root),
-                            appid: game.id.parse().unwrap_or(0),
-                            progress,
-                            started: std::time::Instant::now(),
-                        },
-                    );
-            }
-            return Ok(result);
+        if kind == "install" {
+            return Err("Background installation is unavailable for this game".into());
         }
-        let result = actions::perform(&report, key, kind)?;
-        if kind == "install"
-            && let Some(game) = report.catalog.iter().find(|g| g.key == key)
-        {
-            let mut progress = Progress::starting(Operation::Install);
-            progress.phase = Phase::Queued;
-            progress.controllable = false;
-            progress.detail = Some(format!(
-                "Continue installing in {}",
-                raesir_backend::catalog::client_label(&game.client)
-            ));
-            self.handoffs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key.into(), progress);
-            self.save_handoffs();
-        }
-        Ok(result)
+        actions::perform(&report, key, kind)
     }
 
     pub(crate) fn running_games(
@@ -612,6 +569,10 @@ impl Backend {
                             "Installation managed by {}",
                             raesir_backend::catalog::client_label(&game.client)
                         ));
+                    } else {
+                        // An old request may have stopped at an unopened client dialog.
+                        progress.phase = Phase::Failed;
+                        progress.detail = Some("The client did not start this installation".into());
                     }
                 } else {
                     progress.phase = Phase::Failed;
@@ -685,23 +646,8 @@ impl Backend {
                     game.install = None;
                 }
             } else {
-                // Explicit documented handoff on unsupported builds/platforms;
-                // never reuse an old cached native action from another client.
-                if local {
-                    game.uninstall = Some(raesir_backend::catalog::url(
-                        "Steam",
-                        format!("steam://uninstall/{appid}"),
-                    ));
-                } else if game.in_library && game.client_os.contains(&Os::host()) {
-                    let mut action = raesir_backend::catalog::url(
-                        "Steam",
-                        format!("steam://install/{appid}"),
-                    );
-                    action.note = Some("Steam will open its installation dialog.".into());
-                    game.install = Some(action);
-                } else {
-                    game.install = None;
-                }
+                game.install = None;
+                game.uninstall = None;
             }
             // Adopt downloads already in progress, including after restarting
             // Raesir. A missing payload by itself is not a download operation.
@@ -760,7 +706,7 @@ impl Backend {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
             {
-                self.client_downloads.refresh(&report, false, false);
+                self.client_downloads.refresh(&report, false);
                 if self.automatic_game_updates() {
                     self.client_downloads.automatic(&report);
                 }
@@ -832,12 +778,6 @@ impl Backend {
                 progress.phase = Phase::Failed;
                 progress.error = Some(steam_control::Error::Rejected);
             }
-            if progress.phase == Phase::Starting
-                && !snapshot.progress.controllable
-                && progress.operation == Operation::Install
-            {
-                progress.detail = Some("Finish the installation in Steam".into());
-            }
             let mut jobs = self.steam_jobs.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(job) = jobs.get_mut(&key)
                 && job.started == snapshot.started
@@ -897,28 +837,7 @@ impl Backend {
             .cloned()
             .ok_or_else(|| Error::Busy.message().to_string())?;
         if !snapshot.progress.controllable {
-            if !resume {
-                return Err("Pause this download in the game client".into());
-            }
-            self.steam.preserve(&snapshot.root);
-            if snapshot.progress.operation == Operation::Update {
-                return actions::dispatch(&ActionTarget::Url {
-                    url: "steam://open/downloads".into(),
-                });
-            }
-            actions::dispatch(&ActionTarget::Url {
-                url: format!("steam://install/{}", snapshot.appid),
-            })?;
-            if let Some(job) = self
-                .steam_jobs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .get_mut(key)
-            {
-                job.progress.phase = Phase::Starting;
-                job.started = std::time::Instant::now();
-            }
-            return Ok(());
+            return Err(Error::Unavailable.message().into());
         }
         let result = self.steam.control(
             &snapshot.root,
@@ -1050,19 +969,15 @@ impl Backend {
         };
         self.steam_actions(&mut (*report).clone());
         let mut errors = self.downloads.check_updates(&report, force);
-        errors.extend(
-            self.client_downloads
-                .refresh(&report, true, self.automatic_game_updates()),
-        );
+        errors.extend(self.client_downloads.refresh(&report, true));
         if self.automatic_game_updates() {
             let steam_running = self.steam.running();
             for (key, progress) in self.current_download_progress() {
                 if progress.operation == Operation::Update
                     && progress.phase == Phase::Available
+                    && progress.controllable
                     && (!key.starts_with("steam:")
-                        || (steam_running
-                            && progress.controllable
-                            && progress.scheduled_at.is_none()))
+                        || (steam_running && progress.scheduled_at.is_none()))
                 {
                     if let Err(error) = self.control_download_with_steam_start(&key, true, false) {
                         errors.push(error);

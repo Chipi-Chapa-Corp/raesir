@@ -32,7 +32,7 @@ Scrolling cancels obsolete HTTP requests; finished thumbnail writes
 run separately from first paint. Development builds optimize the image codecs and
 card processing so debug builds retain normal thumbnail performance.
 
-Wargaming support reads Game Center's registered installations on Windows, mounted Windows drives, and configured Wine/Proton prefixes (including Lutris and Bottles). Launch opens the game's page in Game Center; select **Play** there. Install and uninstall actions also use the existing client. Production games can show details and reviews from their matching Steam edition. Complete account libraries, historical playtime, and Wargaming achievements are not imported yet.
+Wargaming support reads Game Center's registered installations on Windows, mounted Windows drives, and configured Wine/Proton prefixes (including Lutris and Bottles). The client badge on the game's page opens the game in Game Center for play and installation management. Production games can show details and reviews from their matching Steam edition. Complete account libraries, historical playtime, and Wargaming achievements are not imported yet.
 
 ## Run
 
@@ -60,7 +60,7 @@ display controls query Steam directly. Date and playtime filters support custom
 ranges, and each list can load additional pages. Reviewer names link to their
 public Steam profiles.
 
-On compatible 64-bit Windows and Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Raesir. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; other builds use Steam's own dialogs.
+On compatible 64-bit Windows and Linux Steam builds, Install downloads new games to Steam's main local library and Uninstall removes the local game through your existing Steam session, in the background. Game actions update when the operation finishes. Downloads continue if you close Raesir. The background bridge uses Steam's private client interface in an isolated helper, with compatibility checks; unsupported Steam builds leave these controls unavailable.
 
 Steam ownership is read from a running, signed-in client on 64-bit Windows and
 Linux, without a Web API key. Failed or signed-out lookups keep the prior
@@ -86,23 +86,22 @@ client exits successfully and commits its expected installation version.
 
 EA app and Ubisoft Connect expose their native download queues to Raesir on
 Windows and in discovered Linux Wine/Proton profiles, including configured
-Lutris and Bottles runners. Downloads started in either client also appear in
-Raesir. Progress, Pause/Resume, and available game updates use the same cards,
-game pages, and Downloads popup as other transfers. Ubisoft's pause control
-belongs to its active queue, so queued cards cannot pause another game.
-Native installation dialogs still handle directories, languages, and licenses.
+Lutris and Bottles runners. Connected clients support updates and Pause/Resume
+in Raesir. Ubisoft's pause control belongs to its active queue, so queued cards
+cannot pause another game.
 
-Raesir enables the clients' loopback interfaces when opening them and verifies
-the owning executable and prefix before connecting. If a client was already
-running without that interface, quit it once and reopen it through Raesir;
-Raesir never force-restarts it or interrupts its downloads. Keep the clients
-signed in. Unsupported interfaces fail explicitly rather than fabricating
-progress or working controls. No API keys or copied credentials are needed.
+Startup, library refresh, and automatic update checks leave closed desktop
+clients closed. Opening EA or Ubisoft from the client badge on a game's page
+enables the download interface for a matching local profile. If your client
+is already open without the interface, quit it once and use that badge again. Raesir verifies the owning executable
+and prefix before connecting and leaves existing sessions running.
 
-Clients without verified direct controls continue to handle their own install
-dialogs. Raesir tracks those requested installs in Downloads until their
-installation metadata confirms completion, and offers **Open in game client**.
-It does not invent percentages or expose a nonfunctional Pause button for them.
+Steam, Legendary, and Ferestre support background installation when a
+compatible local profile is available. Raesir offers installation and removal
+controls when it can send those operations directly. Use the client badge on
+a game's page for operations that need the client's interface. When starting a game
+through Steam or Heroic, Raesir requests the client's background launch mode.
+A client can still present its own sign-in or DRM prompts.
 
 For development, run `./dev`. It builds incrementally with optimized UI and image
 processing, then launches Raesir. Close the app or press **Ctrl+C**, then run

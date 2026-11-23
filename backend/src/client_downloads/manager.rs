@@ -4,7 +4,7 @@ use super::{
     transport,
 };
 use crate::{
-    model::Report,
+    model::{LibraryGame, Report},
     steam_control::{Operation, Phase, Progress},
     storage,
 };
@@ -32,17 +32,10 @@ struct State {
     contexts: Vec<Context>,
     discovered: Option<Instant>,
     polled: Option<Instant>,
-    started: HashMap<String, Instant>,
-    pending: HashMap<String, Pending>,
     leases: HashMap<String, Vec<std::fs::File>>,
     waiting: HashMap<String, Instant>,
     checked: HashMap<String, Instant>,
     automatic: Option<Instant>,
-}
-
-struct Pending {
-    at: Instant,
-    action: String,
 }
 
 pub struct Manager {
@@ -93,7 +86,10 @@ impl Manager {
             state.automatic = Some(Instant::now());
         }
         for (key, progress) in self.snapshot() {
-            if progress.operation == Operation::Update && progress.phase == Phase::Available {
+            if progress.operation == Operation::Update
+                && progress.phase == Phase::Available
+                && progress.controllable
+            {
                 let _ = self.control(report, &key, true);
             }
         }
@@ -138,7 +134,7 @@ impl Manager {
 
     /// Polls every live client, including downloads started outside Raesir.
     /// No filesystem scanning or IPC happens when the UI reads snapshot().
-    pub fn refresh(&self, report: &Report, updates: bool, start_clients: bool) -> Vec<String> {
+    pub fn refresh(&self, report: &Report, updates: bool) -> Vec<String> {
         let Ok(mut state) = self.operation.try_lock() else {
             return vec![];
         };
@@ -156,18 +152,8 @@ impl Manager {
         let mut errors = vec![];
         for context in state.contexts.clone() {
             let root = crate::epic::key(&context.root);
-            let available = context.verified(port(context.client));
-            if !available
-                && start_clients
-                && std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none()
-                && !state.started.contains_key(&root)
-            {
-                state.started.insert(root.clone(), Instant::now());
-                if let Err(error) = context.start() {
-                    errors.push(error);
-                }
-            }
-            if !available {
+            if !context.verified(port(context.client)) {
+                state.checked.remove(&root);
                 for job in self
                     .jobs
                     .write()
@@ -177,73 +163,7 @@ impl Manager {
                 {
                     job.progress.controllable = false;
                 }
-                let expired: Vec<_> = state
-                    .pending
-                    .iter()
-                    .filter(|(key, p)| {
-                        p.at.elapsed() > Duration::from_secs(120)
-                            && self
-                                .jobs
-                                .read()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .get(*key)
-                                .is_some_and(|j| j.root == root)
-                    })
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for key in expired {
-                    state.pending.remove(&key);
-                    if let Some(job) = self
-                        .jobs
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_mut(&key)
-                    {
-                        job.progress.phase = Phase::Failed;
-                        job.progress.detail = Some(format!(
-                            "Quit {} once, then retry through Raesir to enable download integration",
-                            context.client.name()
-                        ));
-                    }
-                }
                 continue;
-            }
-            let pending: Vec<_> = state
-                .pending
-                .iter()
-                .filter_map(|(key, p)| {
-                    self.jobs
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(key)
-                        .filter(|j| j.root == root)
-                        .map(|j| (key.clone(), j.id.clone(), p.action.clone(), p.at))
-                })
-                .collect();
-            for (key, id, action, at) in pending {
-                if !context::game(report, &context, &id).is_some_and(|g| g.key == key) {
-                    state.pending.remove(&key);
-                    continue;
-                }
-                match self.request(&context, &action, &id, false) {
-                    Ok(value) => {
-                        self.merge(report, &context, &value);
-                        state.pending.remove(&key);
-                    }
-                    Err(_) if at.elapsed() < Duration::from_secs(120) => {}
-                    Err(error) => {
-                        state.pending.remove(&key);
-                        if let Some(job) = self
-                            .jobs
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get_mut(&key)
-                        {
-                            job.progress.phase = Phase::Failed;
-                            job.progress.detail = Some(error);
-                        }
-                    }
-                }
             }
             let check = updates || !state.checked.contains_key(&root);
             match self.request(&context, "snapshot", "", check) {
@@ -313,54 +233,23 @@ impl Manager {
         errors
     }
 
-    /// Returns false for stores/profiles managed by a different adapter.
-    pub fn install(&self, report: &Report, key: &str) -> Result<bool, String> {
-        let Some(game) = report.catalog.iter().find(|g| g.key == key) else {
+    /// Open a client the user selected, enabling its download interface when needed.
+    pub fn open_library(&self, report: &Report, game: &LibraryGame) -> Result<bool, String> {
+        if !matches!(game.store.as_str(), "ea" | "ubisoft") {
             return Ok(false);
-        };
+        }
         let mut state = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         Self::discover(&mut state, report);
-        let candidates: Vec<_> = state
-            .contexts
-            .iter()
-            .filter(|c| c.owns(game, report))
-            .cloned()
-            .collect();
-        let context =
-            match candidates.as_slice() {
-                [] => return Ok(false),
-                [context] => context.clone(),
-                _ => return Err(
-                    "More than one client profile matches this game; select its installation first"
-                        .into(),
-                ),
-            };
-        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
-            return Err("Client actions are disabled".into());
+        let mut candidates = state.contexts.iter().filter(|context| context.owns(game, report));
+        let Some(context) = candidates.next() else { return Ok(false) };
+        if candidates.next().is_some() || context.verified(port(context.client)) {
+            return Ok(false);
         }
-        let ready = context.verified(port(context.client));
-        if !ready {
-            context.start()?;
-        }
-        if context.client == Client::Ea || !ready {
-            crate::actions::perform(report, key, "install")?;
-        } else if ready {
-            let value = self.request(&context, "install", &game.id, false)?;
-            self.merge(report, &context, &value);
-        }
-        let mut progress = Progress::starting(Operation::Install);
-        progress.controllable = false;
-        progress.detail = Some(format!("Confirm installation in {}", context.client.name()));
-        self.jobs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(key.into())
-            .or_insert(Job {
-                root: crate::epic::key(&context.root),
-                id: game.id.clone(),
-                progress,
-            });
-        self.save();
+        context.open_library(game)?;
+        let root = crate::epic::key(&context.root);
+        state.checked.remove(&root);
+        state.polled = None;
+        self.observing.store(true, Ordering::Relaxed);
         Ok(true)
     }
 
@@ -402,19 +291,8 @@ impl Manager {
         } else {
             None
         };
-        if action == "update" && !context.verified(port(context.client)) {
-            context.start()?;
-            state.pending.insert(
-                key.into(),
-                Pending {
-                    at: Instant::now(),
-                    action: action.into(),
-                },
-            );
-        } else {
-            let value = self.request(context, action, &job.id, false)?;
-            self.merge(report, context, &value);
-        }
+        let value = self.request(context, action, &job.id, false)?;
+        self.merge(report, context, &value);
         if let Some(leases) = leases {
             state.leases.insert(key.into(), leases);
         }
@@ -708,6 +586,34 @@ mod tests {
             prefix: None,
         };
         (dir, manager, report, context)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_checks_and_requests_leave_a_closed_client_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, manager, report, context) = fixture("ea");
+        std::fs::create_dir(&context.root).unwrap();
+        let exe = context.root.join(context.client.executable());
+        let marker = context.root.join("started");
+        let marker_path = shlex::try_quote(marker.to_str().unwrap()).unwrap();
+        std::fs::write(&exe, format!("#!/bin/sh\n: > {marker_path}\n")).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        manager.merge(&report, &context, &json!({"patches": ["42"]}));
+        {
+            let mut state = manager.operation.lock().unwrap();
+            state.contexts.push(context);
+            state.discovered = Some(Instant::now());
+        }
+
+        assert!(manager.refresh(&report, true).is_empty());
+        let progress = &manager.snapshot()["ea:42"];
+        assert_eq!(progress.phase, Phase::Available);
+        assert!(!progress.controllable);
+        manager.automatic(&report);
+        assert!(manager.control(&report, "ea:42", true).is_err());
+        assert!(!marker.exists());
     }
 
     #[test]

@@ -42,11 +42,17 @@ impl Context {
         )
     }
 
-    pub fn start(&self) -> Result<(), String> {
+    pub fn open_library(&self, game: &LibraryGame) -> Result<(), String> {
         let exe = self.root.join(self.client.executable());
-        let args: Vec<String> = match self.client {
-            Client::Ubisoft => vec!["-upc_stealth".into(), "-upc_enable_dev_ui_tools".into()],
-            Client::Ea => vec!["--remote-debugging-port=9394".into()],
+        let args = match self.client {
+            Client::Ubisoft => vec![
+                "-upc_enable_dev_ui_tools".into(),
+                format!("uplay://open/game/{}", crate::catalog::encode(&game.id)),
+            ],
+            Client::Ea => vec![
+                "--remote-debugging-port=9394".into(),
+                "origin2://library/open".into(),
+            ],
         };
         let action = if let Some(prefix) = &self.prefix {
             if prefix.client == "Bottles" {

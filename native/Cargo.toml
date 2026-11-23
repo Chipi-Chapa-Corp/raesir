@@ -22,6 +22,15 @@ unicode-segmentation = "1"
 image_codec = { package = "image", version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif-native"] }
 tempfile = "3"
 
+[target.'cfg(any(target_os = "linux", windows))'.dependencies]
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm"] }
+
 [build-dependencies]
 winresource = { version = "0.1.31", default-features = false }
 

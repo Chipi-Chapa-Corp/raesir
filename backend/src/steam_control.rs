@@ -155,7 +155,7 @@ impl Progress {
     }
     pub fn blocks_play(&self) -> bool {
         self.active()
-            || self.phase == Phase::Available
+            || (self.phase == Phase::Available && self.controllable)
             || self.operation == Operation::Update && self.phase == Phase::Failed
     }
     pub fn label(&self) -> String {

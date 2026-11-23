@@ -75,9 +75,6 @@ async function raesirUbisoft(input) {
             if (!queue.myDownloads.some(row => String(row.myGameId) === String(input.id))) {
                 upc.sendMessage(new messages.MessageDownloadGame({ myGameId: gameId, mySetActive: false }));
             }
-        } else if (input.action === "install") {
-            const installation = await System.import("@shared/upc/messages/Install.message");
-            upc.sendMessage(new installation.MessageInstallGame({ myGameId: gameId }));
         } else {
             throw new Error("Unsupported Ubisoft action");
         }

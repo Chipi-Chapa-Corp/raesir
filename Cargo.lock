@@ -5736,10 +5736,13 @@ dependencies = [
  "image",
  "libloading",
  "raesir-backend",
+ "raw-window-handle",
  "serde_json",
  "tempfile",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
  "winresource",
+ "x11rb",
 ]
 
 [[package]]

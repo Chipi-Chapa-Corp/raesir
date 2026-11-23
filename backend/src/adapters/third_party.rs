@@ -184,7 +184,7 @@ pub fn scan(scan: &mut Scan<'_>) {
                 if executable.is_file() {
                     let uri = match game.store.as_str() {
                         "ea" => format!(
-                            "origin2://game/launch?offerIds={}&autoDownload=1",
+                            "origin2://game/launch?offerIds={}&autoDownload=0",
                             catalog::encode(&game.id)
                         ),
                         "ubisoft" => format!("uplay://launch/{}", catalog::encode(&game.id)),
@@ -233,7 +233,7 @@ fn uri(scan: &Scan<'_>, game: &LibraryGame) -> String {
                 .map(|g| g.aliases.join(","))
                 .unwrap_or_else(|| game.id.clone());
             format!(
-                "origin2://game/launch?offerIds={}&autoDownload=1",
+                "origin2://game/launch?offerIds={}&autoDownload=0",
                 catalog::encode(&ids)
             )
         }
@@ -303,11 +303,7 @@ fn attach_runtimes(scan: &mut Scan<'_>) {
                     {
                         *last = address;
                     }
-                    action.note = Some(format!(
-                        "Select {} in the client to finish installing, then refresh your library.",
-                        game.title
-                    ));
-                    game.install = Some(action);
+                    game.library = Some(action);
                     continue;
                 }
                 let address = uri(scan, &scan.games[index]);

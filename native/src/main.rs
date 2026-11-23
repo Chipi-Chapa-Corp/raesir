@@ -962,6 +962,123 @@ impl Launcher {
     }
 }
 
+#[cfg(windows)]
+fn hide_windows_border(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DwmSetWindowAttribute,
+    };
+
+    if let Ok(handle) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(handle) = handle.as_raw()
+    {
+        let color = DWMWA_COLOR_NONE;
+        // Windows 11 accepts this attribute. Older versions retain their
+        // system outline and native resize hit testing still works.
+        unsafe {
+            DwmSetWindowAttribute(
+                handle.hwnd.get() as _,
+                DWMWA_BORDER_COLOR as u32,
+                (&raw const color).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn x11_window_id(window: &Window) -> Option<u32> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn hide_x11_frame(window: &Window) -> Result<(), Box<dyn std::error::Error>> {
+    use x11rb::{protocol::xproto::*, wrapper::ConnectionExt as _};
+
+    if matches!(window.window_decorations(), Decorations::Server)
+        && let Some(id) = x11_window_id(window)
+    {
+        // GPUI requests a server frame if X11 compositing is unavailable.
+        // An opaque client window can still ask the window manager to remove it.
+        let (connection, _) = x11rb::connect(None)?;
+        let hints = connection.intern_atom(false, b"_MOTIF_WM_HINTS")?.reply()?.atom;
+        const HINT_DECORATIONS: u32 = 1 << 1;
+        connection
+            .change_property32(PropMode::REPLACE, id, hints, hints, &[HINT_DECORATIONS, 0, 0, 0, 0])?
+            .check()?;
+    }
+    Ok(())
+}
+
+fn client_titlebar(window: &Window) -> bool {
+    #[cfg(target_os = "linux")]
+    if x11_window_id(window).is_some() {
+        return true;
+    }
+    cfg!(windows) || matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
+#[cfg(target_os = "linux")]
+fn resize_border(window: &Window) -> Div {
+    let mut border = div().absolute().inset_0();
+    if client_titlebar(window) && !window.is_maximized() && !window.is_fullscreen() {
+        let tiling = match window.window_decorations() {
+            Decorations::Client { tiling } => tiling,
+            Decorations::Server => Tiling::default(),
+        };
+        let grip = px(5.);
+        let handle = |edge: ResizeEdge| {
+            div().absolute().cursor(edge.into()).on_mouse_down(
+                MouseButton::Left,
+                move |_, window, _| {
+                    window.start_window_resize(edge);
+                },
+            )
+        };
+        border = border
+            .when(!tiling.top, |d| {
+                d.child(handle(ResizeEdge::Top).top_0().w_full().h(grip))
+            })
+            .when(!tiling.bottom, |d| {
+                d.child(handle(ResizeEdge::Bottom).bottom_0().w_full().h(grip))
+            })
+            .when(!tiling.left, |d| {
+                d.child(handle(ResizeEdge::Left).left_0().h_full().w(grip))
+            })
+            .when(!tiling.right, |d| {
+                d.child(handle(ResizeEdge::Right).right_0().h_full().w(grip))
+            })
+            .when(!tiling.top && !tiling.left, |d| {
+                d.child(handle(ResizeEdge::TopLeft).top_0().left_0().size(grip))
+            })
+            .when(!tiling.top && !tiling.right, |d| {
+                d.child(handle(ResizeEdge::TopRight).top_0().right_0().size(grip))
+            })
+            .when(!tiling.bottom && !tiling.left, |d| {
+                d.child(
+                    handle(ResizeEdge::BottomLeft)
+                        .bottom_0()
+                        .left_0()
+                        .size(grip),
+                )
+            })
+            .when(!tiling.bottom && !tiling.right, |d| {
+                d.child(
+                    handle(ResizeEdge::BottomRight)
+                        .bottom_0()
+                        .right_0()
+                        .size(grip),
+                )
+            });
+    }
+    border
+}
+
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         steam_deck::request_details(self, cx);
@@ -1009,6 +1126,8 @@ impl Render for Launcher {
             self.row_height = row_height;
             self.reset_rows();
         }
+        #[cfg(target_os = "linux")]
+        let border = resize_border(window);
         artwork::maintain(self, window, cx);
         let this = cx.weak_entity();
         let rows = list(self.rows.clone(), move |row, _, cx| {
@@ -1223,14 +1342,25 @@ impl Render for Launcher {
                 d.when_some(self.details.clone(), |d, page| d.child(page))
             })
             .when_some(self.mods.clone(), |d, mods| d.child(mods))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .w_full()
-                    .h(rems(0.5))
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
-            )
+            .when(client_titlebar(window) && !window.is_fullscreen(), |d| {
+                let drag_area = div().absolute().top_0().w_full().h(rems(0.6));
+                #[cfg(windows)]
+                let drag_area = drag_area.window_control_area(WindowControlArea::Drag);
+                #[cfg(not(windows))]
+                let drag_area = drag_area.on_mouse_down(MouseButton::Left, |event, window, _| {
+                    if event.click_count == 2 {
+                        window.zoom_window();
+                    } else {
+                        window.start_window_move();
+                    }
+                });
+                d.child(drag_area)
+            })
+            .map(|d| {
+                #[cfg(target_os = "linux")]
+                let d = d.child(border);
+                d
+            })
             .when(self.details.is_some() && self.mods.is_none(), |d| {
                 d.when_some(self.download_summary(), |d, label| {
                     d.child(
@@ -1374,6 +1504,7 @@ fn main() {
                     window_bounds: Some(WindowBounds::Maximized(bounds)),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Raesir".into()),
+                        appears_transparent: true,
                         ..Default::default()
                     }),
                     window_decorations: Some(WindowDecorations::Client),
@@ -1389,6 +1520,12 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
+                    #[cfg(windows)]
+                    hide_windows_border(window);
+                    #[cfg(target_os = "linux")]
+                    if let Err(error) = hide_x11_frame(window) {
+                        eprintln!("Could not hide the native X11 frame: {error}");
+                    }
                     let root = cx.new(|cx| Launcher::new(app_backend.clone(), window, cx));
                     let weak = root.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {

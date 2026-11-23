@@ -41,7 +41,9 @@ impl Client {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
+            // CREATE_NO_WINDOW only suppresses a console. Also request
+            // SW_HIDE for Steam's initial window, in addition to -silent.
+            command.creation_flags(0x08000000).show_window(0);
         }
         command
     }
@@ -95,6 +97,34 @@ pub fn clients() -> Vec<Client> {
         )
     });
     result
+}
+
+pub(crate) fn launch_target(
+    root: &Path,
+    appid: u32,
+    args: &[String],
+) -> Result<crate::model::ActionTarget, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Could not find the owning Steam client")?;
+    let (program, mut argv) = match clients()
+        .into_iter()
+        .find(|client| Path::new(&client.root) == root)
+    {
+        Some(client) => (client.program, client.prefix),
+        None => {
+            let program = root.join(if cfg!(windows) { "steam.exe" } else { "steam.sh" });
+            if !program.is_file() {
+                return Err("Could not start this game's Steam client in the background".into());
+            }
+            (program, Vec::new())
+        }
+    };
+    argv.extend(["-silent".into(), "-applaunch".into(), appid.to_string()]);
+    argv.extend_from_slice(args);
+    Ok(
+        crate::catalog::command("Steam", program.to_string_lossy().into_owned(), argv).target,
+    )
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
@@ -313,19 +343,6 @@ pub struct Status {
 impl Manager {
     pub fn running(&self) -> bool {
         snapshot().processes().values().any(|p| is_steam(p.name()))
-    }
-
-    /// A mutation delegated through a client URL must survive Raesir closing too.
-    pub fn preserve(&self, root: &str) {
-        if let Some(lease) = self
-            .lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-            && lease.client.root == root
-        {
-            lease.keep_running = true;
-        }
     }
 
     pub fn status(&self) -> Status {

@@ -211,7 +211,15 @@ mod tests {
             let mut game = catalog::entry(store, product, product, vec![], "fixture");
             game.in_library = true;
             game.client_os.push(Os::host());
-            game.install = Some(catalog::url("Fixture", "https://example.com".into()));
+            game.install = Some(if store == "xbox" {
+                catalog::command(
+                    "Ferestre",
+                    "fixture".into(),
+                    vec!["install".into(), product.into()],
+                )
+            } else {
+                catalog::url("Steam", format!("steam://install/{product}"))
+            });
             report.catalog.push(game);
         }
         storage::write_json(&dir.path().join("inventory.json"), &report).unwrap();
@@ -236,7 +244,8 @@ mod tests {
         assert_eq!(console.title, "Unrailed!");
         assert!(console.xbox_console_only && console.install.is_none());
         let key = console.key.clone();
-        assert!(report.catalog[1..].iter().all(actions::can_install));
+        assert!(actions::can_install(&report.catalog[1]));
+        assert!(!actions::can_install(&report.catalog[2]));
         report.catalog[0].install = report.catalog[1].install.clone();
         assert!(!actions::can_install(&report.catalog[0]));
         assert_eq!(

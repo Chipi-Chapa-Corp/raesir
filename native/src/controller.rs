@@ -441,6 +441,7 @@ impl Launcher {
                 .await;
             let refresh = result.is_ok() && kind == "uninstall" && steam_operation.is_none();
             let modded = result.is_ok() && kind == "launch-modded";
+            let opened_client = result.is_ok() && kind == "library";
             this.update(cx, |this, cx| {
                 this.pending_action = None;
                 if launching && result.is_err() {
@@ -462,6 +463,9 @@ impl Launcher {
                 }
                 if modded {
                     this.watch_modded(cx);
+                }
+                if opened_client {
+                    this.watch_downloads(cx);
                 }
                 cx.notify();
             })

@@ -160,7 +160,7 @@ pub fn queue_pill(
 fn download_entry(game: &crate::library::Game, progress: &Progress) -> bool {
     !game.source.xbox_console_only
         && progress.operation.downloads()
-        && (progress.blocks_play() || progress.phase == Phase::Failed)
+        && progress.phase != Phase::Complete
 }
 
 fn queue_order(progress: &Progress) -> (u8, u64) {
@@ -584,7 +584,7 @@ impl Launcher {
                                 state.phase,
                                 Phase::Available | Phase::Paused | Phase::Failed
                             )
-                            && (state.controllable || state.phase == Phase::Available),
+                            && state.controllable,
                         |d| {
                             d.child(
                                 action_button(
@@ -651,11 +651,7 @@ impl Launcher {
                         },
                     )
                     .when(
-                        blocked.is_none()
-                            && (steam_update
-                                || (!ferestre
-                                    && !state.controllable
-                                    && state.phase != Phase::Available)),
+                        blocked.is_none() && (steam_update || (!ferestre && !state.controllable)),
                         |d| {
                             let key = key.clone();
                             d.child(
@@ -679,7 +675,7 @@ impl Launcher {
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         if steam_update {
-                                            this.control_download(key.clone(), true, cx);
+                                            this.action(key.clone(), "steam-downloads", cx);
                                         } else {
                                             this.action(key.clone(), "library", cx);
                                         }

@@ -864,7 +864,7 @@ impl ModBrowser {
             )
     }
 
-    fn header(&self, viewport: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, viewport: f32, show_controls: bool, cx: &mut Context<Self>) -> AnyElement {
         let owner = self.owner.clone();
         let close_owner = self.owner.clone();
         let settings_owner = self.owner.clone();
@@ -1049,24 +1049,26 @@ impl ModBrowser {
                                 },
                             )),
                     )
-                    .child(
-                        pill()
-                            .child(
-                                button("mods-min", "minimize", false)
-                                    .on_click(|_, window, _| window.minimize_window()),
-                            )
-                            .child(
-                                button("mods-max", "maximize", false)
-                                    .on_click(|_, window, _| window.zoom_window()),
-                            )
-                            .child(button("mods-close", "close", false).on_click(
-                                move |_, window, cx| {
-                                    close_owner
-                                        .update(cx, |owner, cx| owner.close(window, cx))
-                                        .ok();
-                                },
-                            )),
-                    ),
+                    .when(show_controls, |d| {
+                        d.child(
+                            pill()
+                                .child(
+                                    button("mods-min", "minimize", false)
+                                        .on_click(|_, window, _| window.minimize_window()),
+                                )
+                                .child(
+                                    button("mods-max", "maximize", false)
+                                        .on_click(|_, window, _| window.zoom_window()),
+                                )
+                                .child(button("mods-close", "close", false).on_click(
+                                    move |_, window, cx| {
+                                        close_owner
+                                            .update(cx, |owner, cx| owner.close(window, cx))
+                                            .ok();
+                                    },
+                                )),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -1264,7 +1266,7 @@ impl Render for ModBrowser {
                     )
                 },
             )
-            .child(self.header(viewport, cx))
+            .child(self.header(viewport, crate::client_titlebar(window), cx))
             .when(self.profiles_open, |d| {
                 d.child(self.profile_menu(profile_bounds, cx))
             })

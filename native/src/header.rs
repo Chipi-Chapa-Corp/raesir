@@ -446,6 +446,7 @@ impl Header {
 
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_controls = crate::client_titlebar(window);
         let layout = self.state.layout();
         let top_button_width = layout.top_button_width;
         let wide = layout.rows == 1;
@@ -524,23 +525,35 @@ impl Render for Header {
                                         ),
                                     ),
                             )
-                            .child(
-                                pill()
-                                    .child(
-                                        sized_button("min", "minimize", false, top_button_width)
+                            .when(show_controls, |d| {
+                                d.child(
+                                    pill()
+                                        .child(
+                                            sized_button(
+                                                "min",
+                                                "minimize",
+                                                false,
+                                                top_button_width,
+                                            )
                                             .on_click(|_, window, _| window.minimize_window()),
-                                    )
-                                    .child(
-                                        sized_button("max", "maximize", false, top_button_width)
+                                        )
+                                        .child(
+                                            sized_button(
+                                                "max",
+                                                "maximize",
+                                                false,
+                                                top_button_width,
+                                            )
                                             .on_click(|_, window, _| window.zoom_window()),
-                                    )
-                                    .child(
-                                        sized_button("close", "close", false, top_button_width)
-                                            .on_click(self.listener(|this, _, window, cx| {
-                                                this.close(window, cx)
-                                            })),
-                                    ),
-                            ),
+                                        )
+                                        .child(
+                                            sized_button("close", "close", false, top_button_width)
+                                                .on_click(self.listener(|this, _, window, cx| {
+                                                    this.close(window, cx)
+                                                })),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .when(layout.rows == 2, |d| {

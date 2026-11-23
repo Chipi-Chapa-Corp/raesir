@@ -10,7 +10,7 @@ function load(name, globals) {
     return context;
 }
 function ubisoft() {
-    const names = ['QueryGetDownloadQueue','QueryGetGamesWithPendingPatches','MessageDownloadProgress','MessageDownloadCompleted','MessagePauseDownload','MessageResumeDownload','MessageDownloadGame','MessageInstallGame','QueryGetProducts'];
+    const names = ['QueryGetDownloadQueue','QueryGetGamesWithPendingPatches','MessageDownloadProgress','MessageDownloadCompleted','MessagePauseDownload','MessageResumeDownload','MessageDownloadGame','QueryGetProducts'];
     const messages = Object.fromEntries(names.map(name => [name, class { constructor(data) { this.type = name; Object.assign(this, data); if(name.startsWith('Query')) this.myQueryName=name; } }]));
     const queue = { myIsPaused: false, myDownloads: [
         { myId: 10, myGameId: 42, myState: 2, myIsActive: true, myType: 'DownloadType_Edison' },

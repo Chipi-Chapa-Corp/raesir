@@ -141,7 +141,6 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
         ));
         if local(&item.installations) {
             item.launch = Some(url("Steam", format!("steam://rungameid/{id}")));
-            item.uninstall = Some(url("Steam", format!("steam://uninstall/{id}")));
         }
         result.push(item);
     }
@@ -209,12 +208,6 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
                     "Epic",
                     format!("com.epicgames.launcher://apps/{app}?action=launch&silent=true"),
                 ));
-                if cfg!(windows) {
-                    item.uninstall = Some(url(
-                        "Epic",
-                        format!("com.epicgames.launcher://apps/{app}?action=uninstall&silent=true"),
-                    ));
-                }
             } else if let (Some(program), Some(profile)) = (&legendary, profile) {
                 let mut action = command(
                     "Legendary",
@@ -246,20 +239,6 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
                 item.uninstall = Some(action);
             }
         }
-        if local(&item.installations) && item.uninstall.is_none() {
-            let mut manage = if heroic {
-                discovery::desktop_command("heroic").map(|(p, a)| command("Heroic", p, a))
-            } else {
-                None
-            };
-            if let Some(action) = &mut manage {
-                action.note = Some(format!(
-                    "Select {} in {} to finish uninstalling.",
-                    game.title, action.client
-                ));
-            }
-            item.uninstall = manage;
-        }
         result.push(item);
     }
     for game in &report.ea.games {
@@ -279,7 +258,7 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
         }
         item.client = "EA app".into();
         let launch_url = format!(
-            "origin2://game/launch?offerIds={}&autoDownload=1",
+            "origin2://game/launch?offerIds={}&autoDownload=0",
             encode(&game.aliases.join(","))
         );
         item.store_page = Some(url(
@@ -288,10 +267,6 @@ pub fn from_report(report: &Report) -> Vec<LibraryGame> {
         ));
         if cfg!(windows) && local(&item.installations) {
             item.launch = Some(url("EA app", launch_url));
-            let mut action = url("Windows", "ms-settings:appsfeatures".into());
-            action.note =
-                Some("Select this game in Windows Installed Apps to complete removal.".into());
-            item.uninstall = Some(action);
         }
         result.push(item);
     }
@@ -457,18 +432,35 @@ pub fn visible(game: &LibraryGame) -> bool {
         && game.installations.is_empty())
 }
 
-/// Populate client install handoffs, including snapshots saved before install actions existed.
+/// Recompute supported actions, including for snapshots with old client handoffs.
 pub fn hydrate_install_actions(report: &mut Report) {
+    let epic_installs: Vec<_> = report
+        .catalog
+        .iter()
+        .filter_map(|game| {
+            if game.store != "epic" || !game.client_os.contains(&Os::host()) {
+                return None;
+            }
+            let request = crate::downloads::install_request(report, game)?;
+            let mut action = command("Legendary", request.program, request.args);
+            if let ActionTarget::Command { env, .. } = &mut action.target {
+                *env = request.env;
+            }
+            Some((game.key.clone(), action))
+        })
+        .collect();
+    let mut epic_installs: std::collections::HashMap<_, _> = epic_installs.into_iter().collect();
     for game in &mut report.catalog {
-        if game.xbox_console_only
-            || game.ferestre_unsupported_package
-            || !game.in_library
-            || !game.client_os.contains(&Os::host())
-            || local(&game.installations)
-        {
+        if game.store == "epic" {
+            game.install = epic_installs.remove(&game.key);
+        } else if game.store != "xbox" || !crate::actions::can_install(game) {
             game.install = None;
-        } else if game.install.is_none() {
-            game.install = crate::actions::install_action(game).ok();
+        }
+        if !crate::actions::background_uninstall(game) {
+            game.uninstall = None;
+        }
+        if game.store == "wargaming" {
+            game.launch = None;
         }
     }
 }
@@ -496,7 +488,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn old_snapshots_gain_install_actions_and_installed_games_lose_them() {
+    fn cached_steam_dialog_actions_are_cleared_before_capability_detection() {
         let mut report = crate::steam::scan_sources(
             &[],
             &[],
@@ -509,20 +501,12 @@ mod tests {
         let mut game = entry("steam", "42", "Game", vec![], "steam");
         game.in_library = true;
         game.client_os.push(Os::host());
-        let mut old = serde_json::to_value(game).unwrap();
-        old.as_object_mut().unwrap().remove("install");
-        report.catalog.push(serde_json::from_value(old).unwrap());
-        hydrate_install_actions(&mut report);
-        assert!(crate::actions::can_install(&report.catalog[0]));
-        report.catalog[0].installations.push(Installation {
-            library: "fixture".into(),
-            path: "/fixture".into(),
-            os: Os::host(),
-            state: "installed".into(),
-            last_seen: 0,
-        });
+        game.install = Some(url("Steam", "steam://install/42".into()));
+        game.uninstall = Some(url("Steam", "steam://uninstall/42".into()));
+        report.catalog.push(game);
         hydrate_install_actions(&mut report);
         assert!(report.catalog[0].install.is_none());
+        assert!(report.catalog[0].uninstall.is_none());
     }
 
     #[test]

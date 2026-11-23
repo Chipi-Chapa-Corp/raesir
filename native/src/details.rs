@@ -1802,7 +1802,7 @@ impl Render for DetailsPage {
                         .flex()
                         .justify_between()
                         .child(back)
-                        .child(controls),
+                        .when(crate::client_titlebar(window), |d| d.child(controls)),
                 )
             })
             .child(dropdown)
