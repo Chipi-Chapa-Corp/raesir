@@ -11,6 +11,11 @@ pub fn assets() -> AssetRegistry {
         };
     }
     [
+        asset!("source-gamebanana", "mod-sources/gamebanana.png"),
+        asset!("source-nexus", "mod-sources/nexus.png"),
+        asset!("source-thunderstore", "mod-sources/thunderstore.png"),
+        asset!("source-modworkshop", "mod-sources/modworkshop.png"),
+        asset!("eye", "lucide/eye.svg"),
         asset!("tux", "tux.png"),
         asset!("macos", "macos.svg"),
         asset!("spinner", "lucide/loader-circle.svg"),
@@ -66,6 +71,10 @@ pub fn assets() -> AssetRegistry {
         asset!("not-installed", "adwaita/cloud-deploy-symbolic.svg"),
         asset!("gamepad", "adwaita/input-gaming-symbolic.svg"),
         asset!("install", "adwaita/folder-download-symbolic.svg"),
+        asset!(
+            "document-open-symbolic",
+            "adwaita/document-open-symbolic.svg"
+        ),
         asset!("stop", "adwaita/media-playback-stop-symbolic.svg"),
         asset!("trash", "adwaita/user-trash-symbolic.svg"),
         asset!("this", "adwaita/computer-symbolic.svg"),
@@ -109,6 +118,18 @@ pub fn icon(name: &'static str) -> Svg {
         .size(rems(size))
         .flex_none()
         .text_color(rgb(color))
+}
+
+pub fn mod_source_icon(source: &str) -> AnyElement {
+    let asset = match source {
+        "GameBanana" => "source-gamebanana",
+        "Nexus Mods" => "source-nexus",
+        "Thunderstore" => "source-thunderstore",
+        "ModWorkshop" => "source-modworkshop",
+        "Steam Workshop" => return icon("steam").into_any_element(),
+        _ => return icon("mods").into_any_element(),
+    };
+    img(asset).size(rems(1.45)).object_fit(ObjectFit::Contain).into_any_element()
 }
 
 pub fn system_icon(platform: &str) -> Img {

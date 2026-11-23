@@ -12,7 +12,7 @@ use std::{
 };
 
 pub(crate) const SOURCE: &str = "game-pass:pc";
-const COMPATIBILITY_VERSION: u8 = 3;
+const COMPATIBILITY_VERSION: u8 = 4;
 // Same PC collection, platform and subscription context as Xbox's catalog page.
 const LIST: &str = "https://catalog.gamepass.com/sigls/v3?id=97c6c862-d28a-4907-a3d5-c401f2296a53&language=en-us&market=US&platformContext=pc&subscriptionContext=cfq7ttc0khs0";
 
@@ -40,7 +40,8 @@ fn cached(dir: &Path) -> Option<Catalog> {
 }
 
 pub fn load(dir: &Path, report: &mut Report) {
-    if let Some(catalog) = cached(dir) {
+    if let Some(mut catalog) = cached(dir) {
+        crate::xbox_store::load(dir, report.host_os, &mut catalog.games);
         apply(report, &catalog);
     }
 }
@@ -126,7 +127,7 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
     }
     let ferestre_bundles =
         ferestre_bundles(&games, &bundle_products, products_by_id.values().copied());
-    let catalog = Catalog {
+    let mut catalog = Catalog {
         updated: now(),
         games,
         bundle_products: Some(bundle_products),
@@ -134,6 +135,7 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
         compatibility_version: COMPATIBILITY_VERSION,
     };
     storage::write_json(&dir.join("game-pass.json"), &catalog)?;
+    crate::xbox_store::load(dir, report.host_os, &mut catalog.games);
     apply(report, &catalog);
     Ok(true)
 }
@@ -213,10 +215,10 @@ fn product(value: &Value) -> Option<LibraryGame> {
     game.is_game = Some(true);
     game.client = "Xbox".into();
     game.client_os = vec![Os::Windows];
+    use crate::ferestre::PackageSupport;
+    let support = crate::ferestre::package_support(value);
+    game.xbox_console_only = support == PackageSupport::ConsoleOnly;
     if game.store == "xbox" {
-        use crate::ferestre::PackageSupport;
-        let support = crate::ferestre::package_support(value);
-        game.xbox_console_only = support == PackageSupport::ConsoleOnly;
         game.ferestre_unsupported_package =
             cfg!(target_os = "linux") && support == PackageSupport::Unsupported;
         game.ferestre_pc_package = support == PackageSupport::Msixvc;
@@ -396,6 +398,21 @@ fn apply_with_install_actions(
                 .filter(|game| bundle_product(game).is_some()),
         )
     {
+        if incoming.xbox_console_only {
+            // Reconcile Xbox editions by product ID. Titles shared with a PC
+            // edition or a different launcher do not identify the same package.
+            if let Some(game) = report
+                .catalog
+                .iter_mut()
+                .find(|game| game.store == "xbox" && game.id.eq_ignore_ascii_case(&incoming.id))
+                && game.installations.is_empty()
+                && !game.ferestre_pc_package
+                && !game.ferestre_unsupported_package
+            {
+                game.xbox_console_only = true;
+            }
+            continue;
+        }
         let primary = bundle_product(incoming);
         let ferestre_primary = primary.filter(|_| {
             report.host_os == Os::Linux
@@ -438,8 +455,6 @@ fn apply_with_install_actions(
                 {
                     game.ferestre_pc_package = incoming.ferestre_pc_package;
                     game.ferestre_unsupported_package = incoming.ferestre_unsupported_package;
-                    game.xbox_console_only =
-                        incoming.xbox_console_only && game.installations.is_empty();
                 }
             }
             if ferestre_primary == Some(&game.id)
@@ -525,6 +540,68 @@ mod tests {
             title_key("Ghost Recon Wildlands"),
             title_key("Ghost Recon Breakpoint")
         );
+    }
+
+    #[test]
+    fn console_products_do_not_hide_desktop_editions_with_the_same_title() {
+        let mut report: Report = serde_json::from_value(json!({"host_os":"linux",
+            "games":[],"libraries":[],"volumes":[],"warnings":[],"owned_account":null}))
+        .unwrap();
+        let mut console = fixture();
+        console["Properties"] = json!({});
+        console["DisplaySkuAvailabilities"] = json!([{"Sku": {"Properties": {"Packages": [{
+            "PackageFormat": "MSIXVC", "PlatformDependencies": [{"PlatformName": "Windows.Xbox"}]
+        }]}}}]);
+        let console_game = product(&console).unwrap();
+        let mut mixed = console.clone();
+        mixed["ProductId"] = json!("9DESKTOP0001");
+        mixed["DisplaySkuAvailabilities"][0]["Sku"]["Properties"]["Packages"][0]
+            ["PlatformDependencies"].as_array_mut().unwrap()
+            .push(json!({"PlatformName": "Windows.Desktop"}));
+        let mixed_game = product(&mixed).unwrap();
+        let mut partner_console = console;
+        partner_console["ProductId"] = json!("9CONSOLE0001");
+        partner_console["Properties"] = fixture()["Properties"].clone();
+        let partner_console_game = product(&partner_console).unwrap();
+        assert!(console_game.xbox_console_only && partner_console_game.xbox_console_only);
+        assert!(mixed_game.ferestre_pc_package);
+        report.catalog.push(catalog::entry(
+            "xbox",
+            &console_game.id,
+            &console_game.title,
+            vec![],
+            "account",
+        ));
+        report.catalog.push(catalog::entry(
+            "ubisoft",
+            "609",
+            &console_game.title,
+            vec![],
+            "pc",
+        ));
+        let pass = Catalog {
+            games: vec![console_game, mixed_game, partner_console_game],
+            ..Catalog::default()
+        };
+        for _ in 0..2 {
+            apply_with_install_actions(&mut report, &pass, |_| None);
+            let visible: Vec<_> = report
+                .catalog
+                .iter()
+                .filter(|game| catalog::visible(game))
+                .collect();
+            assert_eq!(visible.len(), 2);
+            assert!(
+                visible
+                    .iter()
+                    .any(|game| game.id == "9DESKTOP0001" && game.game_pass)
+            );
+            assert!(
+                visible
+                    .iter()
+                    .any(|game| game.id == "609" && !game.game_pass)
+            );
+        }
     }
 
     #[test]

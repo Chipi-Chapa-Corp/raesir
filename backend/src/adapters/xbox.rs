@@ -115,6 +115,11 @@ fn ferestre_library(
     config_dir: &Path,
     client: Option<&ferestre::Client>,
 ) {
+    // Mounted roots can yield arbitrary directories as home candidates. Only
+    // probe a foreign home for account selection when Ferestre data is present.
+    if !home.local && !state.is_dir() && !config_dir.is_dir() {
+        return;
+    }
     let legacy = state.join("library.json");
     // Keep the inventory source stable across account switches and out of the
     // per-account directories. Only the selected Store account may grant access.

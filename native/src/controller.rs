@@ -1,10 +1,11 @@
 use crate::{Launcher, backend::PartitionChoice, library::Game};
-use raesir_backend::{catalog, model::Report, steam_control::Operation};
+use raesir_backend::{model::Report, steam_control::Operation};
 use gpui::*;
 use std::{collections::HashMap, sync::Arc};
 
 impl Launcher {
     pub fn start(&mut self, cx: &mut Context<Self>) {
+        crate::compatibility::load_cached(self, cx);
         let backend = self.backend.clone();
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let cached = cx
@@ -42,7 +43,6 @@ impl Launcher {
         self.games = report
             .catalog
             .iter()
-            .filter(|g| catalog::visible(g))
             .cloned()
             .filter_map(Game::new)
             .map(|mut game| {
@@ -60,6 +60,24 @@ impl Launcher {
                 game
             })
             .collect();
+        let missing = |key: &str| !self.games.iter().any(|game| game.source.key == key);
+        if self
+            .details
+            .as_ref()
+            .is_some_and(|page| missing(&page.read(cx).game().key))
+        {
+            self.details = None;
+        }
+        if self
+            .mods
+            .as_ref()
+            .is_some_and(|page| missing(&page.read(cx).game().key))
+        {
+            self.mods = None;
+        }
+        if self.confirm.as_deref().is_some_and(missing) {
+            self.confirm = None;
+        }
         self.report = Some(report);
         self.start_mod_updates(cx);
         self.start_game_updates(cx);
@@ -392,15 +410,26 @@ impl Launcher {
         if (launching || kind == "uninstall") && self.game_activity.contains_key(&key) {
             return;
         }
-        self.pending_action = Some(key.clone());
-        if launching {
+        let launch_game = if launching {
+            let Some(game) = self.games.iter().find(|game| game.source.key == key) else {
+                self.notice("Game is no longer in the library".into(), cx);
+                return;
+            };
+            let game = Arc::new(game.source.clone());
             self.game_activity.insert(
                 key.clone(),
-                crate::game_activity::Activity::Starting(std::time::Instant::now()),
+                crate::game_activity::GameSession {
+                    game: game.clone(),
+                    activity: crate::game_activity::Activity::Starting(std::time::Instant::now()),
+                    started_by_raesir: None,
+                },
             );
             self.refresh_game_activity(cx);
-            self.watch_game_activity(cx);
-        }
+            Some(game)
+        } else {
+            None
+        };
+        self.pending_action = Some(key.clone());
         let steam_operation = if kind == "update" {
             Some(raesir_backend::steam_control::Operation::Update)
         } else if kind == "install" {
@@ -435,18 +464,31 @@ impl Launcher {
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             let action_key = key.clone();
-            let result = cx
+            let (result, new_game_session) = cx
                 .background_executor()
-                .spawn(async move { backend.action(&action_key, kind) })
+                .spawn(async move {
+                    let new_game_session = launch_game.as_deref().is_some_and(|game| {
+                        raesir_backend::game_sessions::running(std::iter::once(game))
+                            .is_ok_and(|games| games.is_empty())
+                    });
+                    (backend.action(&action_key, kind), new_game_session)
+                })
                 .await;
             let refresh = result.is_ok() && kind == "uninstall" && steam_operation.is_none();
             let modded = result.is_ok() && kind == "launch-modded";
             let opened_client = result.is_ok() && kind == "library";
             this.update(cx, |this, cx| {
                 this.pending_action = None;
-                if launching && result.is_err() {
-                    this.game_activity.remove(&key);
-                    this.refresh_game_activity(cx);
+                if launching {
+                    if result.is_err() {
+                        this.game_activity.remove(&key);
+                        this.refresh_game_activity(cx);
+                    } else if let Some(session) = this.game_activity.get_mut(&key) {
+                        session.started_by_raesir = Some(new_game_session);
+                        session.activity =
+                            crate::game_activity::Activity::Starting(std::time::Instant::now());
+                        this.watch_game_activity(cx);
+                    }
                 }
                 if steam_operation.is_some() {
                     this.set_download_progress(this.backend.current_download_progress(), cx);

@@ -13,7 +13,7 @@ use std::{
 };
 pub mod media;
 mod providers;
-pub(crate) use providers::{ea_cover, epic_cover};
+pub(crate) use providers::{ea_cover, epic_cover, steam_parent, steam_product};
 pub mod reviews;
 pub mod rich;
 
@@ -52,6 +52,24 @@ pub struct ModMetadata {
     pub version: String,
     pub last_updated: String,
     pub requirements: Vec<ModRequirement>,
+    #[serde(default)]
+    pub likes: Option<u64>,
+    #[serde(default)]
+    pub downloads: Option<u64>,
+    #[serde(default)]
+    pub views: Option<u64>,
+    #[serde(default)]
+    pub changelog: Vec<ModPost>,
+    #[serde(default)]
+    pub comments: Vec<ModPost>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ModPost {
+    pub title: String,
+    pub author: String,
+    pub date: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,6 +157,21 @@ pub struct Review {
 }
 
 impl Review {
+    pub fn display_author(&self) -> &str {
+        if !self.steam_id.is_empty()
+            && (self.author.trim().is_empty()
+                || self.author.strip_prefix("Steam user ") == Some(self.steam_id.as_str()))
+        {
+            "Steam reviewer"
+        } else {
+            &self.author
+        }
+    }
+
+    fn needs_steam_author(&self) -> bool {
+        !self.steam_id.is_empty() && self.display_author() == "Steam reviewer"
+    }
+
     pub fn matches_filters(&self, since: &str, recommended: Option<bool>) -> bool {
         (since.is_empty() || self.date.as_str() >= since)
             && recommended.is_none_or(|value| self.recommended() == Some(value))
@@ -295,6 +328,126 @@ pub fn cached(game: &LibraryGame, root: &Path) -> Option<Details> {
     details.normalize();
     (details.key == game.key).then_some(details)
 }
+
+pub fn refresh_cached_review_authors(game: &LibraryGame, root: &Path) -> Option<Details> {
+    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        return None;
+    }
+    let mut details = cached(game, root)?;
+    let pages = details.steam_reviews.as_mut()?;
+    if !reviews::resolve_page_authors(http().ok()?, &mut [&mut pages.main, &mut pages.recent]) {
+        return None;
+    }
+    reviews::copy_author_names(pages, &mut details.reviews);
+    let _ = crate::storage::write_json(&path(game, root), &details);
+    Some(details)
+}
+
+fn store_details(client: &Client, game: &LibraryGame, details: &mut Details) -> Result<(), String> {
+    match game.store.as_str() {
+        "epic" => providers::epic(client, game, details),
+        "ea" => providers::ea(client, game, details),
+        "ubisoft" => providers::ubisoft(client, game, details),
+        "xbox" => providers::xbox(client, game, details),
+        "wargaming" => providers::wargaming(client, game, details),
+        _ => Err("This store does not supply game details yet.".into()),
+    }
+}
+
+pub(crate) fn matching_steam_app(client: &Client, title: &str) -> Option<String> {
+    let value = steam_store_search(client, title).ok()?;
+    array(&value, "items")
+        .iter()
+        .find(|row| same_title(&text(row, "name"), title))?
+        .get("id")?
+        .as_u64()
+        .map(|id| id.to_string())
+}
+
+impl Details {
+    pub fn first_screenshot(&self) -> Option<&Media> {
+        self.media
+            .iter()
+            .find(|media| !media.video && !media.url.is_empty())
+    }
+
+    fn has_metadata_gaps(&self) -> bool {
+        self.description.is_empty()
+            || self.developers.is_empty()
+            || self.publishers.is_empty()
+            || self.genres.is_empty()
+            || self.released.is_empty()
+            || self.age_rating.is_empty()
+            || self.scores.is_empty()
+            || self.media.is_empty()
+            || self.requirements.is_empty()
+            || self.reviews.is_empty()
+            || self.store_url.is_none()
+    }
+
+    fn inherit_missing(&mut self, other: Self, original_edition: bool) {
+        macro_rules! fill {
+            ($field:ident) => {
+                if self.$field.is_empty() {
+                    self.$field = other.$field;
+                }
+            };
+        }
+        if self.description.is_empty() {
+            self.description = other.description;
+            self.description_html = other.description_html;
+            self.description_blocks = other.description_blocks;
+        }
+        fill!(developers);
+        fill!(publishers);
+        fill!(genres);
+        fill!(released);
+        fill!(age_rating);
+        fill!(scores);
+        if original_edition {
+            let screenshot_missing = self.first_screenshot().is_none();
+            let video_missing = !self.media.iter().any(|media| media.video);
+            self.media.extend(other.media.into_iter().filter(|media| {
+                if media.video {
+                    video_missing
+                } else {
+                    screenshot_missing
+                }
+            }));
+        } else if self.media.is_empty() || !self.media.iter().any(direct_video) {
+            self.media.extend(other.media);
+        }
+        fill!(requirements);
+        if self.reviews.is_empty() && !other.reviews.is_empty() {
+            self.reviews = other.reviews;
+            self.review_summary = other.review_summary;
+            self.review_source = other.review_source;
+            self.steam_reviews = other.steam_reviews;
+        }
+        if original_edition && self.store_url.is_none() {
+            self.store_url = other.store_url;
+        }
+        self.sources.push(if original_edition {
+            "Additional information from the original Steam edition".into()
+        } else {
+            "Additional information from the matching Steam edition".into()
+        });
+    }
+}
+
+pub(crate) fn store_screenshot(client: &Client, game: &LibraryGame) -> Option<String> {
+    let mut details = Details::default();
+    if let Some(id) = (game.store == "wargaming")
+        .then(|| crate::adapters::wargaming_steam_app(&game.id))
+        .flatten()
+    {
+        providers::steam(client, id, &mut details, false).ok()?;
+    } else {
+        store_details(client, game, &mut details).ok()?;
+    }
+    details.first_screenshot().map(|media| media.url.clone())
+}
+
 pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
     if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
         return Err("Game details are offline. Cached information is still available.".into());
@@ -305,90 +458,39 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
         title: game.title.clone(),
         ..Default::default()
     };
-    let result = match game.store.as_str() {
-        "steam" => providers::steam(client, &game.id, &mut details, true),
-        "epic" => providers::epic(client, game, &mut details),
-        "ea" => providers::ea(client, game, &mut details),
-        "ubisoft" => providers::ubisoft(client, game, &mut details),
-        "xbox" => providers::xbox(client, game, &mut details),
-        "wargaming" => providers::wargaming(client, game, &mut details),
-        _ => Err("This store does not supply game details yet.".into()),
+    let mut parent = None;
+    let result = if game.store == "steam" {
+        parent = providers::steam_parent(&game.id, None);
+        providers::steam(client, &game.id, &mut details, true).map(|discovered_parent| {
+            parent = discovered_parent.or(parent.take());
+        })
+    } else {
+        store_details(client, game, &mut details)
     };
     details.developers.retain(|s| !s.trim().is_empty());
     details.publishers.retain(|s| !s.trim().is_empty());
     if let Err(error) = result {
         details.warnings.push(error);
     }
-    if game.store != "steam" && (details.description.is_empty() || details.reviews.is_empty()) {
-        // Resolve exact editions only; never silently attach another game's reviews.
-        if let Ok(value) = steam_store_search(client, &game.title) {
-            if let Some(id) = array(&value, "items")
-                .iter()
-                .find(|v| same_title(&text(v, "name"), &game.title))
-                .and_then(|v| v.get("id"))
-                .and_then(Value::as_u64)
-            {
-                let mut other = Details::default();
-                if providers::steam(client, &id.to_string(), &mut other, true).is_ok() {
-                    let enriched = details.description.is_empty()
-                        || details.developers.is_empty()
-                        || details.publishers.is_empty()
-                        || details.genres.is_empty()
-                        || details.released.is_empty()
-                        || details.age_rating.is_empty()
-                        || details.scores.is_empty()
-                        || details.media.is_empty()
-                        || details.requirements.is_empty();
-                    if details.description.is_empty() {
-                        details.description = other.description;
-                        details.description_html = other.description_html;
-                    }
-                    if details.developers.is_empty() {
-                        details.developers = other.developers;
-                    }
-                    if details.publishers.is_empty() {
-                        details.publishers = other.publishers;
-                    }
-                    if details.released.is_empty() {
-                        details.released = other.released;
-                    }
-                    if details.age_rating.is_empty() {
-                        details.age_rating = other.age_rating;
-                    }
-                    if details.scores.is_empty() {
-                        details.scores = other.scores;
-                    }
-                    if details.genres.is_empty() {
-                        details.genres = other.genres;
-                    }
-                    if details.media.is_empty() || !details.media.iter().any(direct_video) {
-                        details.media.extend(other.media);
-                        details
-                            .sources
-                            .push("Additional media from the matching Steam edition".into());
-                    }
-                    if details.requirements.is_empty() {
-                        details.requirements = other.requirements;
-                    }
-                    if details.reviews.is_empty() {
-                        details.reviews = other.reviews;
-                        details.review_summary = other.review_summary;
-                        details.review_source = other.review_source;
-                        details.steam_reviews = other.steam_reviews;
-                    }
-                    if enriched {
-                        details
-                            .sources
-                            .push("Additional information from the matching Steam edition".into());
-                    }
-                }
-            }
+    if game.store != "steam" && details.has_metadata_gaps() {
+        parent = matching_steam_app(client, &game.title);
+    }
+    if let Some(id) = parent.filter(|_| details.has_metadata_gaps()) {
+        let mut original = Details::default();
+        if providers::steam(client, &id, &mut original, details.reviews.is_empty()).is_ok() {
+            details.inherit_missing(original, game.store == "steam");
         }
     }
     if details.description.is_empty()
         && details.media.is_empty()
         && details.requirements.is_empty()
         && details.reviews.is_empty()
+        && details.developers.is_empty()
+        && details.publishers.is_empty()
+        && details.genres.is_empty()
+        && details.released.is_empty()
+        && details.age_rating.is_empty()
+        && details.scores.is_empty()
     {
         return Err(details
             .warnings
@@ -411,6 +513,17 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
     });
     details.media.truncate(24);
     details.reviews.truncate(20);
+    if let Some(pages) = details.steam_reviews.as_mut()
+        && pages.needs_author_names()
+        && let Some(previous) = cached(game, root).and_then(|data| data.steam_reviews)
+        && previous.appid == pages.appid
+    {
+        reviews::copy_author_names(&previous, &mut pages.main.reviews);
+        reviews::copy_author_names(&previous, &mut pages.recent.reviews);
+        if details.review_source == "Steam players" {
+            reviews::copy_author_names(pages, &mut details.reviews);
+        }
+    }
     details.normalize();
     details.updated = now();
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
@@ -522,31 +635,7 @@ fn clean(s: &str) -> String {
         .join("\n")
 }
 pub(crate) fn same_title(a: &str, b: &str) -> bool {
-    fn normalize(s: &str) -> String {
-        s.split_whitespace()
-            .map(|word| {
-                let word = word
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>();
-                match word.as_str() {
-                    "i" => "1".into(),
-                    "ii" => "2".into(),
-                    "iii" => "3".into(),
-                    "iv" => "4".into(),
-                    "v" => "5".into(),
-                    "vi" => "6".into(),
-                    "vii" => "7".into(),
-                    "viii" => "8".into(),
-                    "ix" => "9".into(),
-                    "x" => "10".into(),
-                    _ => word,
-                }
-            })
-            .collect()
-    }
-    normalize(a) == normalize(b)
+    crate::catalog::title_key(a) == crate::catalog::title_key(b)
 }
 pub(crate) fn safe_url(s: &str) -> bool {
     reqwest::Url::parse(s).is_ok_and(|u| {
@@ -712,6 +801,56 @@ mod tests {
         assert!(!safe_url("https://127.0.0.1/private"));
         assert!(safe_url("https://store-images.s-microsoft.com/image/test"));
     }
+    #[test]
+    fn linked_editions_keep_their_own_metadata_and_fill_gaps() {
+        let mut edition = Details {
+            key: "steam:367540".into(),
+            title: "Starbound - Unstable".into(),
+            developers: vec!["Edition developer".into()],
+            media: vec![Media {
+                url: "edition.jpg".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let original = Details {
+            title: "Starbound".into(),
+            description: "Original description".into(),
+            developers: vec!["Original developer".into()],
+            publishers: vec!["Publisher".into()],
+            media: vec![
+                Media {
+                    url: "original.jpg".into(),
+                    ..Default::default()
+                },
+                Media {
+                    url: "trailer.mp4".into(),
+                    video: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        edition.inherit_missing(original, true);
+        assert_eq!(edition.key, "steam:367540");
+        assert_eq!(edition.title, "Starbound - Unstable");
+        assert_eq!(edition.description, "Original description");
+        assert_eq!(edition.developers, ["Edition developer"]);
+        assert_eq!(edition.publishers, ["Publisher"]);
+        assert_eq!(edition.first_screenshot().unwrap().url, "edition.jpg");
+        assert_eq!(edition.media.len(), 2);
+        assert_eq!(edition.media[1].url, "trailer.mp4");
+        assert_eq!(steam_parent("367540", None).as_deref(), Some("211820"));
+        assert_eq!(
+            steam_parent("2", Some(&json!({"fullgame":{"appid":"1"}}))).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            steam_parent("1", Some(&json!({"fullgame":{"appid":"1"}}))),
+            None
+        );
+    }
+
     #[test]
     fn cached_details_reject_other_games_and_corrupt_json() {
         let dir = tempfile::tempdir().unwrap();

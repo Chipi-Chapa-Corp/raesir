@@ -6,21 +6,6 @@ const GAME_CATALOG: &str = "https://data.nexusmods.com/file/nexus-data/games.jso
 pub(super) const GRAPHQL: &str = "https://api.nexusmods.com/v2/graphql";
 const PAGE_SIZE: u32 = 36;
 
-pub struct NexusPage {
-    pub packages: Vec<Package>,
-    pub next: Option<u32>,
-}
-
-pub fn can_browse_nexus(game: &LibraryGame) -> bool {
-    !game.xbox_console_only
-        && !game.is_demo
-        && game.is_game != Some(false)
-        && matches!(
-            game.store.as_str(),
-            "steam" | "epic" | "xbox" | "ea" | "ubisoft" | "wargaming" | "gog"
-        )
-}
-
 pub fn has_managed_nexus(game: &LibraryGame) -> bool {
     recipes::for_game(game).is_some()
 }
@@ -31,17 +16,8 @@ struct NexusGame {
     domain_name: String,
 }
 
-fn normalized_title(title: &str) -> String {
-    title
-        .replace(['™', '®'], "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
 fn game_domain(catalog: &[NexusGame], title: &str) -> Option<String> {
-    let title = normalized_title(title);
+    let title = providers::normalized_title(title);
     if title.is_empty() {
         return None;
     }
@@ -51,7 +27,7 @@ fn game_domain(catalog: &[NexusGame], title: &str) -> Option<String> {
                 .domain_name
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b))
-            && normalized_title(&entry.name) == title
+            && providers::normalized_title(&entry.name) == title
     });
     let domain = &matches.next()?.domain_name;
     matches
@@ -110,7 +86,7 @@ impl Manager {
         game: &LibraryGame,
         refresh: bool,
     ) -> Result<Option<Snapshot>, String> {
-        if !can_browse_nexus(game) {
+        if !can_discover_mods(game) {
             return Err("Nexus browsing is available for PC games".into());
         }
         let recipe = recipes::for_game(game);
@@ -121,7 +97,13 @@ impl Manager {
         } else {
             // Vortex's catalog has names and Nexus domains, without store IDs.
             let value = self
-                .provider_json(GAME_CATALOG, refresh)
+                .provider_json_inner(GAME_CATALOG, refresh, true, || {
+                    providers::read_json(|| {
+                        Ok(providers::http()?
+                            .get(GAME_CATALOG)
+                            .timeout(Duration::from_secs(10)))
+                    })
+                })
                 .map_err(|error| format!("Could not load the Nexus game catalog: {error}"))?;
             let catalog: Vec<NexusGame> = serde_json::from_value(value)
                 .map_err(|error| format!("Invalid Nexus game catalog: {error}"))?;
@@ -161,10 +143,10 @@ impl Manager {
         domain: &str,
         query: &str,
         offset: u32,
-        trending: bool,
+        order: CatalogOrder,
         refresh: bool,
-    ) -> Result<NexusPage, String> {
-        if trending {
+    ) -> Result<CatalogPage, String> {
+        if order == CatalogOrder::Trending {
             let query = query.to_lowercase();
             let mut packages = self.nexus_trending(domain, refresh)?;
             packages.retain(|p| {
@@ -173,14 +155,15 @@ impl Manager {
                         .to_lowercase()
                         .contains(&query)
             });
-            return Ok(NexusPage {
+            return Ok(CatalogPage {
                 packages,
-                next: None,
+                ..Default::default()
             });
         }
-        let body = catalog_request(domain, query, offset);
+        let body = catalog_request(domain, query, offset, order);
         let request = || {
-            let response = providers::read_json(|| graphql(&body))?;
+            let response =
+                providers::read_json(|| Ok(graphql(&body)?.timeout(Duration::from_secs(10))))?;
             if !response["data"]["mods"]["nodes"].is_array() {
                 return Err("Nexus Mods could not return this page of results".into());
             }
@@ -321,13 +304,17 @@ pub(super) fn image_url(url: Option<String>) -> Option<String> {
     })
 }
 
-fn catalog_request(domain: &str, query: &str, offset: u32) -> Value {
+fn catalog_request(domain: &str, query: &str, offset: u32, order: CatalogOrder) -> Value {
     let mut filter = json!({"gameDomainName": [{"op": "EQUALS", "value": domain}]});
-    let sort = if query.is_empty() {
-        json!([{"endorsements": {"direction": "DESC"}}])
-    } else {
+    if !query.is_empty() {
         let term = query.chars().take(150).collect::<String>();
         filter["nameStemmed"] = json!([{"op": "MATCHES", "value": term}]);
+    }
+    let sort = if order == CatalogOrder::Downloads {
+        json!([{"downloads": {"direction": "DESC"}}])
+    } else if query.is_empty() {
+        json!([{"endorsements": {"direction": "DESC"}}])
+    } else {
         json!([{"relevance": {"direction": "DESC"}}, {"endorsements": {"direction": "DESC"}}])
     };
     json!({
@@ -336,7 +323,7 @@ fn catalog_request(domain: &str, query: &str, offset: u32) -> Value {
     })
 }
 
-fn decode_page(response: Value, domain: &str, offset: u32) -> Result<NexusPage, String> {
+fn decode_page(response: Value, domain: &str, offset: u32) -> Result<CatalogPage, String> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Catalog {
@@ -379,7 +366,11 @@ fn decode_page(response: Value, domain: &str, offset: u32) -> Result<NexusPage, 
             )
         })
         .collect();
-    Ok(NexusPage { packages, next })
+    Ok(CatalogPage {
+        packages,
+        next,
+        ..Default::default()
+    })
 }
 
 pub(super) fn package_id(id: &str) -> Result<u64, String> {
@@ -453,12 +444,12 @@ mod tests {
         assert!(manager.nexus_snapshot(&game, false).unwrap().is_none());
         game.title = "Fixture Game".into();
         game.xbox_console_only = true;
-        assert!(!can_browse_nexus(&game));
+        assert!(!can_discover_mods(&game));
     }
 
     #[test]
     fn search_is_scoped_to_the_game_and_paginates_using_the_returned_count() {
-        let request = catalog_request("fixturegame", "rare mod", 36);
+        let request = catalog_request("fixturegame", "rare mod", 36, CatalogOrder::All);
         let filter = &request["variables"]["filter"];
         assert_eq!(filter["gameDomainName"][0]["value"], "fixturegame");
         assert_eq!(filter["nameStemmed"][0]["value"], "rare mod");

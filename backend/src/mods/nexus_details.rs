@@ -18,6 +18,15 @@ struct Mod {
     category: Option<Category>,
     #[serde(default)]
     gallery_images: Vec<GalleryImage>,
+    #[serde(default)]
+    stats: NexusStats,
+}
+
+#[derive(Default, Deserialize)]
+struct NexusStats {
+    endorsements: Option<u64>,
+    downloads: Option<u64>,
+    views: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +125,10 @@ fn decode_details(data: Mod, extra: &Value, domain: &str, id: u64) -> Details {
             version: data.version.unwrap_or_default(),
             last_updated: display_date(extra["updatedAt"].as_str().unwrap_or_default()),
             requirements: mod_requirements(&extra["modRequirements"], domain, &data.game_id),
+            likes: data.stats.endorsements,
+            downloads: data.stats.downloads,
+            views: data.stats.views,
+            ..Default::default()
         }),
         ..Default::default()
     }

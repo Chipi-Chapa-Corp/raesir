@@ -12,6 +12,11 @@ pub(super) fn changes_allowed() -> Result<(), String> {
 
 impl Manager {
     pub fn uninstall(&self, game: &LibraryGame, package: &str) -> Result<Snapshot, String> {
+        if deadlock::matches(game)
+            && (package.starts_with("gamebanana:") || package.starts_with("deadlock-local:"))
+        {
+            return self.uninstall_deadlock(game, package);
+        }
         if recipes::for_game(game).is_some() {
             return self.noita_uninstall(game, package);
         }
@@ -55,6 +60,9 @@ impl Manager {
     /// Install into a new revision and publish its pointer only after the engine
     /// has installed the complete dependency closure.
     pub fn install(&self, game: &LibraryGame, package: &str) -> Result<Snapshot, String> {
+        if deadlock::matches(game) && package.starts_with("gamebanana:") {
+            return self.install_deadlock(game, package, || false);
+        }
         if recipes::for_game(game).is_some() {
             return self.noita_install(game, package);
         }

@@ -97,7 +97,7 @@ impl Manager {
                     if value["suspended"].as_bool() == Some(true) {
                         continue;
                     }
-                    packages.push(modworkshop_package(value)?);
+                    packages.push(crate::mods::modworkshop::package(value)?);
                 }
             }
             Ok::<_, String>(())
@@ -204,7 +204,7 @@ impl Manager {
         let url = file["download_url"]
             .as_str()
             .ok_or("This file has no download URL")?;
-        let mut package = modworkshop_package(&value)?;
+        let mut package = crate::mods::modworkshop::package(&value)?;
         package.version = file["version"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -230,6 +230,9 @@ impl Manager {
     }
 
     pub fn mod_files(&self, game: &LibraryGame, id: &str) -> Result<Vec<ModFile>, String> {
+        if deadlock::matches(game) && id.starts_with("gamebanana:") {
+            return self.deadlock_files(id);
+        }
         let definition = recipes::for_game(game).ok_or("This game does not use ModWorkshop")?;
         let id = id
             .strip_prefix("modworkshop:")
@@ -286,7 +289,7 @@ impl Manager {
             if let Some(instructions) = value["instructions"].as_str().filter(|s| !s.is_empty()) {
                 text.push_str(&format!("\n\n## Installation\n\n{instructions}"));
             }
-            package = Some(modworkshop_package(&value)?);
+            package = Some(crate::mods::modworkshop::package(&value)?);
             markdown = Some(text);
         }
         if let Some(path) = self.own_path(&definition.id)
@@ -335,40 +338,4 @@ fn recipe_package(recipe: &recipes::Recipe) -> Package {
         categories: recipe.categories.clone(),
         source: "Raesir catalog".into(),
     }
-}
-
-fn modworkshop_package(value: &Value) -> Result<Package, String> {
-    let id = value["id"].as_u64().ok_or("Missing ModWorkshop ID")?;
-    let icon = value["thumbnail"]["file"]
-        .as_str()
-        .map(|name| format!("https://storage.modworkshop.net/mods/images/{name}"))
-        .unwrap_or_default();
-    let description = value["short_desc"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or_else(|| value["desc"].as_str())
-        .unwrap_or("")
-        .chars()
-        .take(600)
-        .collect();
-    Ok(Package {
-        id: format!("modworkshop:{id}"),
-        name: value["name"].as_str().unwrap_or("Untitled mod").into(),
-        owner: value["user"]["name"].as_str().unwrap_or("").into(),
-        description,
-        version: value["custom_version"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Latest file")
-            .into(),
-        page: format!("https://modworkshop.net/mod/{id}"),
-        icon,
-        downloads: value["downloads"].as_u64().unwrap_or(0),
-        deprecated: false,
-        categories: value["category"]["name"]
-            .as_str()
-            .map(|s| vec![s.into()])
-            .unwrap_or_default(),
-        source: "ModWorkshop".into(),
-    })
 }

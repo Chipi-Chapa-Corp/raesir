@@ -7,6 +7,9 @@ use crate::{
 use raesir_backend::model::Os;
 use gpui::{prelude::*, *};
 
+mod card;
+pub(crate) use card::{ArtworkCard, CardGrid};
+
 const BANNER_GAP: f32 = 1.;
 
 pub(crate) fn empty_state(
@@ -14,87 +17,142 @@ pub(crate) fn empty_state(
     hint: Option<&'static str>,
     indicator: Option<AnyElement>,
 ) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            pill()
-                .flex_col()
-                .rounded(rems(1.8))
-                .p(rems(2.5))
-                .gap(rems(1.))
-                .child(indicator.unwrap_or_else(|| {
-                    crate::icons::icon("empty-search")
-                        .size(rems(2.))
-                        .into_any_element()
-                }))
-                .child(title)
-                .when_some(hint, |d, hint| {
-                    d.child(
-                        div()
-                            .text_size(rems(1.125))
-                            .text_color(rgb(0xaabdb4))
-                            .child(hint),
-                    )
-                }),
-        )
+    div().flex().items_center().justify_center().child(
+        pill()
+            .flex_col()
+            .rounded(rems(1.8))
+            .p(rems(2.5))
+            .gap(rems(1.))
+            .child(indicator.unwrap_or_else(|| {
+                crate::icons::icon("empty-search")
+                    .size(rems(2.))
+                    .into_any_element()
+            }))
+            .child(title)
+            .when_some(hint, |d, hint| {
+                d.child(
+                    div()
+                        .text_size(rems(1.125))
+                        .text_color(rgb(0xaabdb4))
+                        .child(hint),
+                )
+            }),
+    )
 }
 
 pub(crate) fn text_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
+    text_button_base(id, label)
+        .rounded(rems(0.7))
+        .hover(|s| s.bg(rgba(0xffffff18)))
+}
+
+fn text_button_base(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(id)
+        .flex()
+        .items_center()
+        .gap(rems(0.5))
         .px(rems(1.))
         .py(rems(0.6))
-        .rounded(rems(0.7))
         .cursor_pointer()
-        .hover(|s| s.bg(rgba(0xffffff18)))
         .child(label.into())
 }
 
-impl Launcher {
-    pub fn skeleton(&self, width: f32) -> impl IntoElement + use<> {
-        div()
-            .w(px(width))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_center()
-            .rounded(rems(0.8))
-            .overflow_hidden()
-            .bg(rgba(0x101010a6))
-            .child(
-                div()
-                    .w_full()
-                    .h(px(width * crate::CARD_POSTER_RATIO))
-                    .flex_none()
-                    .rounded_t(rems(0.8))
-                    .bg(rgba(0xffffff1a)),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .h(rems(crate::CARD_TITLE_HEIGHT))
-                    .mt(px(-width
-                        * crate::CARD_POSTER_RATIO
-                        * crate::CARD_TITLE_OVERLAP))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .w(relative(0.7))
-                            .h(rems(1.1))
-                            .rounded_full()
-                            .bg(rgba(0xffffff1a)),
-                    ),
-            )
-    }
+pub(crate) fn pill_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    text_button_base(id, label)
+        .rounded_full()
+        .bg(rgba(0x101010b8))
+        .hover(|s| s.bg(rgba(0x303030b3)))
+}
 
+pub(crate) fn action_banner(message: impl Into<SharedString>) -> Div {
+    pill()
+        .w_full()
+        .rounded(rems(1.4))
+        .px(rems(1.))
+        .py(rems(0.7))
+        .gap(rems(0.8))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .child(message.into()),
+        )
+}
+
+pub(crate) fn banner_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    text_button(id, label)
+        .rounded_full()
+        .bg(rgba(0xffffff12))
+        .flex_none()
+}
+
+pub(crate) fn modal(width: f32, content: impl FnOnce(Div) -> Div) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .bg(rgba(0x00000055))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(content(
+            pill()
+                .flex_col()
+                .items_stretch()
+                .gap(rems(1.))
+                .w(rems(width))
+                .max_w(relative(0.95))
+                .rounded(rems(1.8))
+                .p(rems(2.)),
+        ))
+}
+
+pub(crate) fn dialog_actions() -> Div {
+    div().flex().justify_end().gap(rems(0.5))
+}
+
+fn setting_switch(id: &'static str, label: &'static str, enabled: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap(rems(1.))
+        .py(rems(0.6))
+        .cursor_pointer()
+        .child(label)
+        .child(
+            div()
+                .w(rems(2.8))
+                .h(rems(1.6))
+                .flex_none()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .p(rems(0.2))
+                .bg(if enabled { rgba(0x9ff4bcff) } else { rgba(0xffffff29) })
+                .when(enabled, |d| d.justify_end())
+                .child(div().size(rems(1.2)).rounded_full().bg(if enabled {
+                    rgb(0x20342a)
+                } else {
+                    rgb(0xf0f0f0)
+                })),
+        )
+}
+
+impl Launcher {
     pub fn banners(&self, cx: &mut Context<Self>) -> Div {
         let scope = self.library_scope();
         let store = self.store.map(|s| crate::STORES[s]);
@@ -183,18 +241,16 @@ impl Launcher {
                     (message.to_owned(), label)
                 };
                 d.child(
-                    pill().w_full().rounded(rems(1.4)).px(rems(1.)).py(rems(0.7)).gap(rems(0.8))
-                        .child(div().flex_1().min_w_0().whitespace_normal().child(message))
-                        .child(text_button("configure-ferestre", label).rounded_full().bg(rgba(0xffffff12)).flex_none()
+                    action_banner(message)
+                        .child(banner_button("configure-ferestre", label)
                             .when(action.is_none() && !runtime_active, |d| d.on_click(cx.listener(move |this, _, _, cx| this.configure_ferestre(setup, cx)))))
                         .when(runtime_setup && xbox_link_needed, |d| d.child(
-                            text_button("xbox-sign-in-during-runtime",
+                            banner_button("xbox-sign-in-during-runtime",
                                 if action == Some(FerestreSetup::SignIn) { "Signing in…" } else { "Sign in to Xbox" })
-                                .rounded_full().bg(rgba(0xffffff12)).flex_none()
                                 .when(action.is_none(), |d| d.on_click(cx.listener(|this, _, _, cx| {
                                     this.configure_ferestre(FerestreSetup::SignIn, cx);
                                 })))))
-                        .when(setup == FerestreSetup::Install && !busy, |d| d.child(text_button("nexus-alternative", "Xodus Nexus").rounded_full().bg(rgba(0xffffff12)).flex_none()
+                        .when(setup == FerestreSetup::Install && !busy, |d| d.child(banner_button("nexus-alternative", "Xodus Nexus").flex_none()
                             .on_click(cx.listener(|this, _, _, cx| this.support_project("nexus", cx)))))
                 )
             })
@@ -270,7 +326,7 @@ impl Launcher {
                                         .aria_description(error.clone())
                                         .child("Automatic mount failed")
                                         .tooltip(move |_, cx| {
-                                            cx.new(|_| crate::library::ActionTooltip(error.clone())).into()
+                                            cx.new(|_| crate::header::Tooltip(error.clone())).into()
                                         })
                                 ))),
                     )
@@ -327,7 +383,7 @@ impl Launcher {
             .when(!can_remember, |d| {
                 d.opacity(0.55).tooltip(|_, cx| {
                     cx.new(|_| {
-                        crate::library::ActionTooltip("This partition has no persistent ID".into())
+                        crate::header::Tooltip("This partition has no persistent ID".into())
                     })
                     .into()
                 })
@@ -370,7 +426,7 @@ impl Launcher {
                         .role(Role::Button)
                         .aria_label("Mount read-only")
                         .tooltip(|_, cx| {
-                            cx.new(|_| crate::library::ActionTooltip("Mount read-only".into()))
+                            cx.new(|_| crate::header::Tooltip("Mount read-only".into()))
                                 .into()
                         })
                         .aria_disabled(busy)
@@ -392,7 +448,6 @@ impl Launcher {
             .as_ref()
             .map(|r| r.warnings.clone())
             .unwrap_or_default();
-        let automatic = self.backend.automatic_game_updates();
         let xbox = self.report.as_ref().filter(|report| report.host_os == Os::Linux)
             .and_then(|report| report.linux_systems.iter().find(|system| system.root == "/"))
             .filter(|system| system.xbox_runtime && raesir_backend::ferestre::setup_supported());
@@ -400,11 +455,16 @@ impl Launcher {
         let xbox_runtime_busy = self.download_operations.get(raesir_backend::ferestre::RUNTIME_JOB)
             .is_some_and(|progress| progress.active());
         div().absolute().inset_0()
-            .child(div().absolute().inset_0().on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {
-                this.menu=false; cx.notify();
-            })))
             .child(pill()
             .id("settings-panel")
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if event.button == MouseButton::Left
+                    && !this.settings_bounds.get().contains(&event.position)
+                {
+                    this.menu = false;
+                    cx.notify();
+                }
+            }))
             .absolute()
             .top(rems(4.))
             .right(rems(5.))
@@ -421,21 +481,19 @@ impl Launcher {
             .child(div().flex().items_center().justify_between()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
                 .child(crate::header::button("close-settings","close",false).on_click(cx.listener(|this,_,_,cx| { this.menu=false; cx.notify(); }))))
-            .child(div().id("automatic-game-updates-setting").flex().w_full().items_center().justify_between().gap(rems(1.))
-                .py(rems(0.6)).cursor_pointer()
-                .child(div().flex().flex_col().gap(rems(0.3)).flex_1().min_w_0()
-                    .child("Automatic game updates")
-                    .child(div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal()
-                        .child("Start available game updates automatically in Raesir.")))
-                .child(div().w(rems(2.8)).h(rems(1.6)).flex_none().rounded_full().flex().items_center().p(rems(0.2))
-                    .bg(if automatic { rgba(0x9ff4bcff) } else { rgba(0xffffff29) })
-                    .when(automatic,|d|d.justify_end())
-                    .child(div().size(rems(1.2)).rounded_full().bg(if automatic { rgb(0x20342a) } else { rgb(0xf0f0f0) })))
-                .on_click(cx.listener(move |this,_,_,cx| {
-                    this.backend.set_automatic_game_updates(!automatic);
-                    let backend=this.backend.clone();
+            .child(setting_switch("automatic-game-updates-setting", "Automatic game updates", self.backend.automatic_game_updates())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let backend = this.backend.clone();
+                    backend.set_automatic_game_updates(!backend.automatic_game_updates());
                     cx.background_executor().spawn(async move { backend.save_ui(); }).detach();
                     this.check_game_updates(false,cx);
+                    cx.notify();
+                })))
+            .child(setting_switch("exit-with-game-setting", "Exit with game", self.backend.exit_with_game())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let backend = this.backend.clone();
+                    backend.set_exit_with_game(!backend.exit_with_game());
+                    cx.background_executor().spawn(async move { backend.save_ui(); }).detach();
                     cx.notify();
                 })))
             .when(raesir_backend::mods::nexus_account::configured(), |d| {
@@ -477,12 +535,6 @@ impl Launcher {
                             }))))
                 ))
             })
-            .child(
-                div()
-                    .text_size(rems(1.125))
-                    .text_color(rgb(0xb2c7bc))
-                    .child("Ctrl F to search · Ctrl + / − / 0 for text size"),
-            )
             .children(warnings.into_iter().map(|warning| {
                 div()
                     .text_size(rems(1.125))
@@ -596,51 +648,34 @@ impl Launcher {
                     )
                 }
             });
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(rgba(0x00000055))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                pill()
-                    .flex_col()
-                    .items_stretch()
-                    .gap(rems(1.))
-                    .w(rems(30.))
-                    .rounded(rems(1.8))
-                    .p(rems(2.))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("Uninstall {}?", game.title)),
-                    )
-                    .child(div().text_size(rems(1.125)).whitespace_normal().child(note))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap(rems(0.5))
-                            .child(
-                                text_button("cancel-uninstall", "Cancel").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.confirm = None;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                text_button("confirm-uninstall", "Uninstall")
-                                    .bg(rgba(0xff8f8f22))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.confirm = None;
-                                        this.dispatch(key.clone(), "uninstall", cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .into_any_element()
+        modal(30., |panel| {
+            panel
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Uninstall {}?", game.title)),
+                )
+                .child(div().text_size(rems(1.125)).whitespace_normal().child(note))
+                .child(
+                    dialog_actions()
+                        .child(
+                            text_button("cancel-uninstall", "Cancel").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.confirm = None;
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            text_button("confirm-uninstall", "Uninstall")
+                                .bg(rgba(0xff8f8f22))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.confirm = None;
+                                    this.dispatch(key.clone(), "uninstall", cx);
+                                })),
+                        ),
+                )
+        })
+        .into_any_element()
     }
 }

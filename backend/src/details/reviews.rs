@@ -2,6 +2,9 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
+const AUTHOR_NAME_TTL: u64 = 6 * 60 * 60;
+const AUTHOR_RETRY_DELAY: u64 = 60;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Query {
     pub review_type: u8,
@@ -105,14 +108,55 @@ pub struct SteamReviews {
     pub recent: Page,
 }
 
+impl SteamReviews {
+    pub fn needs_author_names(&self) -> bool {
+        self.main
+            .reviews
+            .iter()
+            .chain(&self.recent.reviews)
+            .any(Review::needs_steam_author)
+    }
+}
+
+pub fn copy_author_names(source: &SteamReviews, target: &mut [Review]) {
+    let names = source
+        .main
+        .reviews
+        .iter()
+        .chain(&source.recent.reviews)
+        .filter(|review| !review.steam_id.is_empty() && !review.needs_steam_author())
+        .map(|review| (review.steam_id.as_str(), &review.author))
+        .collect::<HashMap<_, _>>();
+    for review in target
+        .iter_mut()
+        .filter(|review| review.needs_steam_author())
+    {
+        if let Some(name) = names.get(review.steam_id.as_str()) {
+            review.author.clone_from(name);
+        }
+    }
+}
+
 pub fn fetch(appid: &str, query: &Query, recent: bool, cursor: &str) -> Result<Page, String> {
+    let client = http()?;
+    let mut page = fetch_page(client, appid, query, recent, cursor)?;
+    resolve_page_authors(client, &mut [&mut page]);
+    Ok(page)
+}
+
+pub(super) fn fetch_page(
+    client: &Client,
+    appid: &str,
+    query: &Query,
+    recent: bool,
+    cursor: &str,
+) -> Result<Page, String> {
     if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
         return Err("Reviews are offline. Try again when connected.".into());
     }
     let id = appid
         .parse::<u32>()
         .map_err(|_| "Steam product ID is missing")?;
-    let client = http()?;
     let input = query.input(id, recent, cursor);
     let value = get_json(
         client,
@@ -121,80 +165,118 @@ pub fn fetch(appid: &str, query: &Query, recent: bool, cursor: &str) -> Result<P
             crate::catalog::encode(&input.to_string())
         ),
     )?;
-    let mut page = parse(value.get("response").unwrap_or(&value), cursor)?;
-    resolve_page_authors(client, &mut page);
-    Ok(page)
+    parse(value.get("response").unwrap_or(&value), cursor)
 }
 
 // The Community resolver accepts one SteamID per request. Cache public names
 // across the helpful/recent lists and subsequent filter and pagination requests.
-fn resolve_page_authors(client: &Client, page: &mut Page) {
-    static NAMES: LazyLock<std::sync::Mutex<HashMap<String, (u64, String)>>> =
-        LazyLock::new(Default::default);
-    let mut missing = Vec::new();
+pub(super) fn resolve_page_authors(client: &Client, pages: &mut [&mut Page]) -> bool {
+    type NameCache = HashMap<String, (u64, Option<String>)>;
+    static NAMES: LazyLock<std::sync::Mutex<NameCache>> = LazyLock::new(Default::default);
+    let mut missing = HashSet::new();
+    let mut changed = false;
+    let mut reviewers = pages
+        .iter_mut()
+        .flat_map(|page| &mut page.reviews)
+        .filter(|review| {
+            !review.steam_id.is_empty() && review.steam_id.bytes().all(|b| b.is_ascii_digit())
+        })
+        .collect::<Vec<_>>();
     {
-        let cache = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-        for review in &mut page.reviews {
-            if review.steam_id.is_empty() {
-                continue;
-            }
-            if let Some((_, name)) = cache
-                .get(&review.steam_id)
-                .filter(|(updated, _)| now().saturating_sub(*updated) < 21600)
-            {
-                review.author = name.clone();
+        let mut cache = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now();
+        let fresh = |(updated, name): &(u64, Option<String>)| {
+            let ttl = if name.is_some() {
+                AUTHOR_NAME_TTL
             } else {
-                missing.push(review.steam_id.clone());
+                AUTHOR_RETRY_DELAY
+            };
+            now.saturating_sub(*updated) < ttl
+        };
+        if cache.len() > 2048 {
+            cache.retain(|_, entry| fresh(entry));
+        }
+        for review in reviewers
+            .iter()
+            .filter(|review| !review.needs_steam_author())
+        {
+            cache.insert(review.steam_id.clone(), (now, Some(review.author.clone())));
+        }
+        for review in reviewers
+            .iter_mut()
+            .filter(|review| review.needs_steam_author())
+        {
+            if let Some((_, name)) = cache.get(&review.steam_id).filter(|entry| fresh(entry)) {
+                if let Some(name) = name {
+                    review.author.clone_from(name);
+                    changed = true;
+                }
+            } else {
+                missing.insert(review.steam_id.clone());
             }
         }
     }
-    missing.sort();
-    missing.dedup();
     if missing.is_empty() {
-        return;
+        return changed;
     }
-    let users = std::thread::scope(|scope| {
-        let jobs = missing.chunks(missing.len().div_ceil(4)).map(|ids| scope.spawn(move || {
-            ids.iter().filter_map(|id| {
-                let request = client.get(format!("https://steamcommunity.com/actions/ajaxresolveusers?steamids={id}"))
-                    .timeout(Duration::from_secs(3));
-                let bytes = response(request).ok()?;
-                let value: Value = serde_json::from_slice(&bytes).ok()?;
-                value.as_array()?.first().cloned()
-            }).collect::<Vec<_>>()
-        })).collect::<Vec<_>>();
+    let missing = missing.into_iter().collect::<Vec<_>>();
+    let names = std::thread::scope(|scope| {
+        let jobs = missing
+            .chunks(missing.len().div_ceil(4))
+            .map(|ids| {
+                scope.spawn(move || {
+                    ids.iter()
+                        .map(|id| (id, lookup_author(client, id)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
         jobs.into_iter()
             .filter_map(|job| job.join().ok())
             .flatten()
-            .collect::<Vec<_>>()
+            .collect::<HashMap<_, _>>()
     });
-    resolve_authors(page, &Value::Array(users));
-    let mut cache = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.len() > 2048 {
-        cache.retain(|_, (updated, _)| now().saturating_sub(*updated) < 21600);
-    }
-    for review in &page.reviews {
-        if !review.steam_id.is_empty() && !review.author.starts_with("Steam user ") {
-            cache.insert(review.steam_id.clone(), (now(), review.author.clone()));
+    for review in reviewers
+        .iter_mut()
+        .filter(|review| review.needs_steam_author())
+    {
+        if let Some(Some(name)) = names.get(&review.steam_id) {
+            review.author.clone_from(name);
+            changed = true;
         }
     }
+    let mut cache = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now();
+    for (id, name) in names {
+        let already_resolved = cache.get(id).is_some_and(|(updated, name)| {
+            name.is_some() && now.saturating_sub(*updated) < AUTHOR_NAME_TTL
+        });
+        if name.is_some() || !already_resolved {
+            cache.insert(id.clone(), (now, name));
+        }
+    }
+    changed
 }
 
-fn resolve_authors(page: &mut Page, users: &Value) {
-    let names: HashMap<_, _> = users
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|u| Some((u["steamid"].as_str()?, u["persona_name"].as_str()?)))
-        .collect();
-    for review in &mut page.reviews {
-        if let Some(name) = names
-            .get(review.steam_id.as_str())
-            .filter(|s| !s.trim().is_empty())
-        {
-            review.author = (*name).into();
-        }
-    }
+fn lookup_author(client: &Client, id: &str) -> Option<String> {
+    let request = client
+        .get("https://steamcommunity.com/actions/ajaxresolveusers")
+        .query(&[("steamids", id)])
+        .timeout(Duration::from_secs(4));
+    let bytes = response(request).ok()?;
+    let users = serde_json::from_slice(&bytes).ok()?;
+    author_name(&users, id).map(str::to_owned)
+}
+
+fn author_name<'a>(users: &'a Value, id: &str) -> Option<&'a str> {
+    users.as_array()?.iter().find_map(|user| {
+        user["steamid"]
+            .as_str()
+            .filter(|candidate| *candidate == id)?;
+        user["persona_name"]
+            .as_str()
+            .filter(|name| !name.trim().is_empty())
+    })
 }
 
 fn parse(value: &Value, requested_cursor: &str) -> Result<Page, String> {
@@ -230,10 +312,8 @@ fn parse(value: &Value, requested_cursor: &str) -> Result<Page, String> {
                 let name = text(&r["author"], "personaname");
                 Review {
                     id: text(r, "recommendationid"),
-                    author: if !name.is_empty() {
+                    author: if !name.trim().is_empty() {
                         name
-                    } else if !steam_id.is_empty() {
-                        format!("Steam user {steam_id}")
                     } else {
                         "Steam reviewer".into()
                     },
@@ -350,11 +430,12 @@ mod tests {
         assert_eq!(page.summary, "Mixed · 2 reviews");
         assert_eq!(page.score, Some(2.5));
         assert_eq!(page.reviews[0].recommended(), Some(true));
-        resolve_authors(
-            &mut page,
-            &json!([{"steamid":"wrong","persona_name":"Wrong"},{"steamid":"76561198000000000","persona_name":"Alsv тest"}]),
+        let users = json!([{"steamid":"wrong","persona_name":"Wrong"},{"steamid":"76561198000000000","persona_name":"Alsv тest"}]);
+        assert!(page.reviews[0].needs_steam_author());
+        assert_eq!(
+            author_name(&users, &page.reviews[0].steam_id),
+            Some("Alsv тest"),
         );
-        assert_eq!(page.reviews[0].author, "Alsv тest");
         assert_eq!(page.reviews[0].text, "Great");
         assert_eq!(page.reviews[0].date, "2025.06.16");
         assert_eq!(page.reviews[0].hours, Some(2.));
@@ -369,6 +450,25 @@ mod tests {
                 .is_none()
         );
         assert!(parse(&json!({"error":"rate limited"}), "*").is_err());
+    }
+
+    #[test]
+    fn cached_numeric_fallbacks_are_replaced_by_resolved_names() {
+        let missing = Review {
+            steam_id: "76561198000000000".into(),
+            author: "Steam user 76561198000000000".into(),
+            ..Default::default()
+        };
+        assert_eq!(missing.display_author(), "Steam reviewer");
+        let mut pages = SteamReviews::default();
+        pages.main.reviews.push(missing.clone());
+        assert!(pages.needs_author_names());
+        pages.main.reviews[0].author = "Rocket Pilot".into();
+        assert!(!pages.needs_author_names());
+        let mut saved = [missing];
+        copy_author_names(&pages, &mut saved);
+        assert_eq!(saved[0].display_author(), "Rocket Pilot");
+        assert_eq!(saved[0].steam_id, "76561198000000000");
     }
     #[test]
     fn custom_dates_include_the_whole_end_day_and_validate() {

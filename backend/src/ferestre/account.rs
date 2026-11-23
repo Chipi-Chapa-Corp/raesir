@@ -39,14 +39,21 @@ fn roles_path(config: &Path) -> PathBuf {
 
 fn roles(config: &Path) -> Result<Option<Roles>, String> {
     let path = roles_path(config);
-    let invalid = "Could not read Xbox account settings";
-    if !path.try_exists().map_err(|_| invalid)? {
+    if !path.try_exists().map_err(|error| {
+        format!("Could not read Xbox account settings at {} ({error})", path.display())
+    })? {
         return Ok(None);
     }
-    let text = crate::steam::read_text(&path).map_err(|_| invalid)?;
-    let roles: Roles = serde_json::from_str(&text).map_err(|_| invalid)?;
+    let text = crate::steam::read_text(&path)
+        .map_err(|error| format!("Could not read Xbox account settings ({error})"))?;
+    let roles: Roles = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "Invalid Xbox account settings at {} (line {}, column {})",
+            path.display(), error.line(), error.column(),
+        )
+    })?;
     if !profile_id(&roles.store) || !profile_id(&roles.player) {
-        return Err(invalid.into());
+        return Err(format!("Invalid Xbox profile selection at {}", path.display()));
     }
     Ok(Some(roles))
 }

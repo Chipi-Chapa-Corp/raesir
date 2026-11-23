@@ -97,6 +97,8 @@ impl Manager {
                 // mutations report the error instead of guessing.
                 let installed = if recipes::by_id(community).is_some() {
                     super::noita::installed(&path).unwrap_or_default()
+                } else if community == deadlock::DOMAIN {
+                    deadlock::installed(&path).unwrap_or_default()
                 } else if community == stardew::DOMAIN {
                     stardew::installed(&path).unwrap_or_default()
                 } else {

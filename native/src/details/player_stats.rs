@@ -19,9 +19,6 @@ fn stats_panel() -> Div {
         .items_stretch()
         .justify_between()
 }
-fn preview_slots(width: f32, rem: f32) -> usize {
-    (((width - 1.).max(0.) / rem + 0.4) / 3.1).floor().max(1.) as usize
-}
 fn status(a: &Achievement) -> String {
     let mut parts = Vec::new();
     if a.unlocked {
@@ -65,12 +62,13 @@ fn achievement_image(a: &Achievement, image: Option<Arc<RenderImage>>, size: f32
         .when_some(image.clone(), |d, image| {
             d.child(
                 img(image)
-                    .size_full()
+                    .size(rems(size))
+                    .aspect_ratio(1.)
                     .rounded(rems(0.6))
                     .object_fit(ObjectFit::Contain),
             )
         })
-        .when(image.is_none() && a.icon.is_empty(), |d| {
+        .when(image.is_none(), |d| {
             d.child(
                 icon(if a.unlocked { "star" } else { "star-empty" })
                     .size(rems(size * 0.55))
@@ -176,10 +174,15 @@ struct AchievementTooltip {
     image: Option<Arc<RenderImage>>,
 }
 impl Render for AchievementTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let a = &self.achievement;
+        let rem = window.rem_size();
+        // Resolve the width before GPUI measures the wrapped text.
+        let width = (rem * 26.)
+            .min(window.viewport_size().width - rem)
+            .max(Pixels::ZERO);
         panel()
-            .max_w(rems(26.))
+            .w(width)
             .p(rems(1.))
             .gap(rems(0.65))
             .text_size(rems(1.125))
@@ -188,19 +191,35 @@ impl Render for AchievementTooltip {
             .shadow_lg()
             .child(
                 div()
+                    .w_full()
                     .flex()
+                    .flex_none()
                     .items_start()
                     .gap(rems(0.75))
                     .child(achievement_image(a, self.image.clone(), 2.7))
-                    .child(paragraph(a.name.clone()).font_weight(FontWeight::SEMIBOLD)),
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            review_paragraph(a.name.clone()).font_weight(FontWeight::SEMIBOLD),
+                        ),
+                    ),
             )
             .when_some(a.description_text(), |d, text| {
-                d.child(paragraph(text.to_owned()))
+                d.child(review_paragraph(text.to_owned()).flex_none())
             })
-            .child(rarity_line(a))
+            .child(rarity_line(a).flex_none())
     }
 }
 impl DetailsPage {
+    fn publish_stats(&mut self, stats: PlayerStats, loading: bool, cx: &mut Context<Self>) {
+        let loading_changed = self.stats_loading != loading;
+        self.stats_loading = loading;
+        if self.stats.as_deref() != Some(&stats) {
+            self.set_stats(stats, cx);
+        } else if loading_changed {
+            cx.notify();
+        }
+    }
+
     fn set_stats(&mut self, stats: PlayerStats, cx: &mut Context<Self>) {
         let top = self.achievement_rows.logical_scroll_top();
         let anchor = self
@@ -260,10 +279,10 @@ impl DetailsPage {
                 .await;
             if this
                 .update(cx, |this, cx| {
-                    this.stats_loading = this.game.store == "xbox"
+                    let loading = this.game.store == "xbox"
                         && !cached.account.is_empty()
                         && !cached.has_data();
-                    this.set_stats(cached, cx);
+                    this.publish_stats(cached, loading, cx);
                 })
                 .is_err()
             {
@@ -278,8 +297,7 @@ impl DetailsPage {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.stats_loading = false;
-                this.set_stats(stats, cx);
+                this.publish_stats(stats, false, cx);
             })
             .ok();
         }));
@@ -294,8 +312,28 @@ impl DetailsPage {
         if self.stats_loading {
             return Some(
                 stats_panel()
-                    .h(rems(8.7))
-                    .bg(rgba(0xffffff20))
+                    .child(skeleton_block(8.75, 1.1).my(rems(0.25)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(rems(0.65))
+                            .w_full()
+                            .child(skeleton_block(2.75, 2.75).flex_none())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(skeleton_lines(&[0.42, 0.95, 0.75])),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(rems(2.7))
+                            .flex()
+                            .gap(rems(0.4))
+                            .overflow_hidden()
+                            .children((0..8).map(|_| skeleton_block(2.7, 2.7).flex_none())),
+                    )
                     .into_any_element(),
             );
         }
@@ -322,7 +360,7 @@ impl DetailsPage {
         if let Some(featured) = featured {
             let a = &stats.achievements[featured];
             block = block.child(
-                self.preview_achievement(a, featured, cx)
+                self.preview_achievement(a, "featured", cx)
                     .w_full()
                     .gap(rems(0.65))
                     .child(
@@ -335,10 +373,11 @@ impl DetailsPage {
                             .child(
                                 paragraph(a.name.clone())
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .line_clamp(2),
+                                    .line_clamp(2)
+                                    .text_ellipsis(),
                             )
                             .when_some(a.description_text(), |d, text| {
-                                d.child(paragraph(text.to_owned()).line_clamp(2))
+                                d.child(paragraph(text.to_owned()).line_clamp(2).text_ellipsis())
                             }),
                     ),
             );
@@ -348,19 +387,19 @@ impl DetailsPage {
                 stats.achievements.len()
             )));
         }
-        let mut icons = div().flex().flex_none().items_center().gap(rems(0.4));
+        let mut icons = div().flex().flex_1().min_w_0().h(rems(2.7))
+            .flex_wrap().items_start().gap(rems(0.4)).overflow_hidden();
         for index in stats
             .highlights()
             .into_iter()
             .filter(|&i| Some(i) != featured)
-            .take(self.achievement_preview_slots.saturating_sub(1))
+            .take(7)
         {
             icons = icons.child(
-                self.preview_achievement(&stats.achievements[index], index, cx)
+                self.preview_achievement(&stats.achievements[index], "tile", cx)
                     .flex_none(),
             );
         }
-        let owner = cx.weak_entity();
         let tiles = div()
             .id("achievement-preview-row")
             .w_full()
@@ -369,20 +408,6 @@ impl DetailsPage {
             .items_center()
             .justify_between()
             .gap(rems(0.4))
-            .on_prepaint(move |paint, window, cx| {
-                let count = preview_slots(
-                    f32::from(paint.bounds.size.width),
-                    f32::from(window.rem_size()),
-                );
-                owner
-                    .update(cx, |this, cx| {
-                        if this.achievement_preview_slots != count {
-                            this.achievement_preview_slots = count;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-            })
             .child(icons)
             .child(
                 div()
@@ -399,9 +424,7 @@ impl DetailsPage {
                     .hover(|s| s.bg(rgba(0xffffff25)))
                     .child(icon("achievement-more").size(rems(1.35)))
                     .when(!self.achievements_open, |d| {
-                        d.tooltip(|_, cx| {
-                            cx.new(|_| DetailTooltip("All achievements".into())).into()
-                        })
+                        d.tooltip(|_, cx| cx.new(|_| Tooltip("All achievements".into())).into())
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.filter_menu = None;
@@ -419,14 +442,14 @@ impl DetailsPage {
     fn preview_achievement(
         &mut self,
         a: &Achievement,
-        index: usize,
+        position: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         self.image(&a.icon, cx);
         let a = a.clone();
         let image = self.images.get(&a.icon).cloned();
         div()
-            .id(("achievement-preview", index))
+            .id(SharedString::from(format!("achievement-{position}-{}", a.id)))
             .flex()
             .items_start()
             .min_w_0()

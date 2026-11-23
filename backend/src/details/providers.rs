@@ -8,7 +8,7 @@ pub(super) fn wargaming(
     let mut supplied = false;
     if let Some(id) = crate::adapters::wargaming_steam_app(&game.id) {
         match steam(client, id, out, true) {
-            Ok(()) => {
+            Ok(_) => {
                 supplied = true;
                 out.sources =
                     vec!["Information and reviews from the matching Steam edition".into()];
@@ -58,32 +58,52 @@ fn parse_wargaming(html: &str, base: &str, out: &mut Details) {
     }
 }
 
+pub(crate) fn steam_product(client: &Client, id: &str) -> Result<Value, String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Steam product ID is missing".into());
+    }
+    let mut value = get_json(
+        client,
+        &format!("https://store.steampowered.com/api/appdetails?appids={id}&cc=us&l=english"),
+    )?;
+    if value[id]["success"] != true {
+        return Err("This Steam edition has no public store page".into());
+    }
+    let data = value[id]["data"].take();
+    if data.is_null() {
+        return Err("Steam returned no product information".into());
+    }
+    Ok(data)
+}
+
+pub(crate) fn steam_parent(id: &str, product: Option<&Value>) -> Option<String> {
+    // The Unstable edition is a separate Steam app without a public store page.
+    if id == "367540" {
+        return Some("211820".into());
+    }
+    let data = product?;
+    let app = &data["fullgame"]["appid"];
+    let parent = app.as_u64().or_else(|| app.as_str()?.parse().ok())?;
+    let parent = parent.to_string();
+    (parent != id && parent != "0").then_some(parent)
+}
+
 pub(super) fn steam(
     client: &Client,
     id: &str,
     out: &mut Details,
     with_reviews: bool,
-) -> Result<(), String> {
-    if !id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("Steam product ID is missing".into());
-    }
-    let value = get_json(
-        client,
-        &format!("https://store.steampowered.com/api/appdetails?appids={id}&cc=us&l=english"),
-    )?;
-    let data = &value[id]["data"];
-    if !value[id]["success"].as_bool().unwrap_or(false) {
-        return Err("This Steam edition has no public store page".into());
-    }
-    parse_steam(data, out);
+) -> Result<Option<String>, String> {
+    let data = steam_product(client, id)?;
+    parse_steam(&data, out);
     out.store_url = Some(format!("https://store.steampowered.com/app/{id}/"));
     out.sources.push("Steam".into());
     if with_reviews {
         let query = reviews::Query::default();
         let (main, recent) = std::thread::scope(|scope| {
-            let recent = scope.spawn(|| reviews::fetch(id, &query, true, "*"));
+            let recent = scope.spawn(|| reviews::fetch_page(client, id, &query, true, "*"));
             (
-                reviews::fetch(id, &query, false, "*"),
+                reviews::fetch_page(client, id, &query, false, "*"),
                 recent
                     .join()
                     .unwrap_or_else(|_| Err("Recent reviews could not be loaded".into())),
@@ -95,7 +115,6 @@ pub(super) fn steam(
         };
         match main {
             Ok(page) => {
-                out.reviews = page.reviews.clone();
                 out.review_summary = page.summary.clone();
                 if let Some(score) = page.score {
                     out.scores.insert(0, format!("Steam players {score:.1}/5"));
@@ -114,10 +133,14 @@ pub(super) fn steam(
                 out.warnings.push(error);
             }
         }
+        reviews::resolve_page_authors(client, &mut [&mut pages.main, &mut pages.recent]);
+        if pages.main.error.is_none() {
+            out.reviews = pages.main.reviews.clone();
+        }
         out.review_source = "Steam players".into();
         out.steam_reviews = Some(pages);
     }
-    Ok(())
+    Ok(steam_parent(id, Some(&data)))
 }
 fn parse_steam(data: &Value, out: &mut Details) {
     out.set_description(text(data, "detailed_description"));

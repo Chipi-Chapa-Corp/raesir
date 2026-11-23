@@ -1,11 +1,9 @@
 use raesir_backend::{
-    model::{FerestreState, LibraryGame, Os},
-    steam_deck::{Compatibility, SteamEdition},
+    model::{FerestreState, Installation, LibraryGame, Os},
+    protondb::{SteamEdition, Tier},
 };
 use gpui::RenderImage;
-use std::sync::Arc;
-
-pub struct ActionTooltip(pub String);
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompatibilityBadge {
@@ -29,10 +27,10 @@ impl CompatibilityBadge {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Tick => "Verified",
-            Self::Happy => "Playable",
-            Self::Sick => "Untested · No Steam match",
-            Self::Sad => "Unsupported",
+            Self::Tick => "Verified, ProtonDB Native or Platinum",
+            Self::Happy => "Playable or ProtonDB Gold",
+            Self::Sick => "ProtonDB Silver or Bronze · Xbox without a Steam match",
+            Self::Sad => "Unsupported or ProtonDB Borked",
         }
     }
 
@@ -49,7 +47,7 @@ impl CompatibilityBadge {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct XboxCompatibility {
+pub struct CompatibilityStatus {
     pub badge: Option<CompatibilityBadge>,
     pub label: &'static str,
 }
@@ -68,16 +66,12 @@ pub fn xbox_compatibility(
     game: &LibraryGame,
     host: Os,
     steam: Option<SteamEdition>,
-) -> Option<XboxCompatibility> {
+) -> Option<CompatibilityStatus> {
     use CompatibilityBadge::*;
-    if game.store != "xbox" {
+    if game.store != "xbox" || game.xbox_console_only || host != Os::Linux {
         return None;
     }
-    let (badge, label) = if game.xbox_console_only {
-        (Some(Sad), "Xbox console only")
-    } else if host != Os::Linux {
-        return None;
-    } else if game.ferestre_unsupported_package {
+    let (badge, label) = if game.ferestre_unsupported_package {
         (Some(Sad), "Can't install on Linux")
     } else {
         match game.ferestre_test.as_ref().map(|test| test.state) {
@@ -86,43 +80,25 @@ pub fn xbox_compatibility(
             Some(FerestreState::Menus) => (Some(Sad), "Menus only"),
             Some(FerestreState::Broken) => (Some(Sad), "Doesn't run on Linux"),
             None | Some(FerestreState::Untested) => match steam {
-                Some(SteamEdition::Listed(Some(
-                    Compatibility::Verified | Compatibility::Playable,
-                ))) => (Some(Happy), "Steam Deck playable · Xbox untested"),
-                Some(SteamEdition::Listed(Some(Compatibility::Unsupported))) => {
-                    (Some(Sad), "Steam Deck unsupported · Xbox untested")
+                Some(SteamEdition::Listed(Some(Tier::Borked))) => {
+                    (Some(Sad), "Steam edition Borked on ProtonDB · Xbox untested")
+                }
+                Some(SteamEdition::Listed(Some(Tier::Silver))) => {
+                    (Some(Sick), "Steam edition ProtonDB Silver · Xbox untested")
+                }
+                Some(SteamEdition::Listed(Some(Tier::Bronze))) => {
+                    (Some(Sick), "Steam edition ProtonDB Bronze · Xbox untested")
+                }
+                Some(SteamEdition::Listed(Some(_))) => {
+                    (Some(Happy), "Steam edition runs according to ProtonDB · Xbox untested")
                 }
                 Some(SteamEdition::Missing) => (Some(Sick), "Xbox untested · No Steam match"),
-                Some(SteamEdition::Listed(None)) => (None, "Xbox untested · Steam rating unknown"),
+                Some(SteamEdition::Listed(None)) => (None, "Xbox untested · No ProtonDB rating"),
                 None => (None, "Untested on Linux"),
             },
         }
     };
-    Some(XboxCompatibility { badge, label })
-}
-
-impl gpui::Render for ActionTooltip {
-    fn render(
-        &mut self,
-        window: &mut gpui::Window,
-        _: &mut gpui::Context<Self>,
-    ) -> impl gpui::IntoElement {
-        use gpui::{prelude::*, *};
-        let rem = window.rem_size();
-        let max_width = (rem * 26.)
-            .min(window.viewport_size().width - rem)
-            .max(Pixels::ZERO);
-        crate::header::pill()
-            .block()
-            .rounded(rems(0.8))
-            .px(rems(0.85))
-            .py(rems(0.55))
-            .max_w(max_width)
-            .whitespace_normal()
-            .text_size(rems(crate::CARD_TITLE_FONT_SIZE))
-            .line_height(rems(1.45))
-            .child(div().min_w_0().child(self.0.clone()))
-    }
+    Some(CompatibilityStatus { badge, label })
 }
 
 pub fn xbox_runtime_notice(
@@ -194,6 +170,9 @@ pub struct Game {
 
 impl Game {
     pub fn new(source: LibraryGame) -> Option<Self> {
+        if !raesir_backend::catalog::visible(&source) {
+            return None;
+        }
         let store = crate::STORES.iter().position(|s| *s == source.store)?;
         Some(Self {
             key: Arc::from(source.key.as_str()),
@@ -218,21 +197,23 @@ impl Game {
         {
             return 1;
         }
-        if scope != 1 && self.other_installed_os(host).is_some() {
+        if scope != 1 && self.foreign_installations(host).next().is_some() {
             return 2;
         }
         0
     }
 
-    pub fn other_installed_os(&self, host: Os) -> Option<Os> {
-        self.source
-            .installations
-            .iter()
-            .find(|i| {
-                i.os != host
-                    && i.os != Os::Unknown
-                    && matches!(i.state.as_str(), "installed" | "external")
-            })
+    fn foreign_installations(&self, host: Os) -> impl Iterator<Item = &Installation> {
+        self.source.installations.iter().filter(move |i| {
+            i.os != host
+                && i.os != Os::Unknown
+                && matches!(i.state.as_str(), "installed" | "external")
+        })
+    }
+
+    pub fn foreign_install_badge(&self, host: Os) -> Option<Os> {
+        self.foreign_installations(host)
+            .find(|i| i.os != Os::Windows || (i.state == "installed" && !i.path.is_empty()))
             .map(|i| i.os)
     }
 
@@ -265,6 +246,14 @@ impl Game {
         }
     }
 
+    fn available_on_host(&self, host: Os) -> bool {
+        host != Os::Unknown
+            && self.source.client_os.contains(&host)
+            && (host != Os::Linux
+                || !self.source.ferestre_unsupported_package
+                || self.installed(1, host) == 1)
+    }
+
     pub fn matches(
         &self,
         query: &str,
@@ -280,19 +269,10 @@ impl Game {
             return true;
         }
         let systems = &self.source.client_os;
-        let unsupported_here = host == Os::Linux
-            && self.source.ferestre_unsupported_package
-            && self.installed(1, host) != 1;
-        if scope == 1
-            && (self.source.xbox_console_only
-                || unsupported_here
-                || host == Os::Unknown
-                || !systems.contains(&host))
-        {
+        if scope == 1 && !self.available_on_host(host) {
             return false;
         }
         if scope == 2
-            && !self.source.xbox_console_only
             && !(host != Os::Windows && self.source.ferestre_unsupported_package)
             && !systems.iter().any(|os| *os != host && *os != Os::Unknown)
         {
@@ -302,12 +282,81 @@ impl Game {
     }
 }
 
+pub(crate) fn sort_matches(
+    matches: &mut [usize],
+    games: &[Game],
+    host: Os,
+    verified: impl Fn(&Game) -> bool,
+) {
+    matches.sort_by_cached_key(|&index| {
+        let game = &games[index];
+        (
+            !game.matches_access(1),
+            game.installed(0, host) == 0,
+            !verified(game),
+            !game.available_on_host(host),
+        )
+    });
+}
+
+pub fn matching_games(
+    games: &[Game],
+    query: &str,
+    filters: crate::backend::LibraryFilters,
+    host: Os,
+) -> Vec<usize> {
+    let mut matches: Vec<_> = games
+        .iter()
+        .enumerate()
+        .filter(|(_, game)| {
+            game.matches_access(filters.access)
+                && game.matches(query, filters.store, filters.status, filters.os, host)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let scope = if query.is_empty() { filters.os } else { 0 };
+    if filters.store.is_some() || scope == 2 {
+        return matches;
+    }
+
+    let title_key = |game: &Game| {
+        (
+            raesir_backend::catalog::title_key(&game.title),
+            game.source.is_demo,
+        )
+    };
+    let installable = |game: &Game| raesir_backend::actions::can_install(&game.source);
+    let mut available_stores = HashMap::new();
+    for &index in &matches {
+        let game = &games[index];
+        if game.title != game.source.id && (game.installed(1, host) == 1 || installable(game)) {
+            let key = title_key(game);
+            if !key.0.is_empty() {
+                *available_stores.entry(key).or_insert(0_usize) |= 1 << game.store;
+            }
+        }
+    }
+    if available_stores.is_empty() {
+        return matches;
+    }
+    matches.retain(|&index| {
+        let game = &games[index];
+        game.title == game.source.id
+            || game.installed(scope, host) != 0
+            || installable(game)
+            || available_stores
+                .get(&title_key(game))
+                .is_none_or(|stores| stores & !(1 << game.store) == 0)
+    });
+    matches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use raesir_backend::{
         catalog,
-        model::{FerestreTest, Installation},
+        model::FerestreTest,
     };
 
     #[test]
@@ -316,22 +365,24 @@ mod tests {
         let mut game = catalog::entry("xbox", "9MT5NJ5W7B8Z", "Fixture", vec![], "test");
         assert_eq!(
             xbox_compatibility(&game, Os::Linux, None),
-            Some(XboxCompatibility {
+            Some(CompatibilityStatus {
                 badge: None,
                 label: "Untested on Linux",
             })
         );
         for (edition, badge) in [
             (
-                SteamEdition::Listed(Some(Compatibility::Playable)),
+                SteamEdition::Listed(Some(Tier::Gold)),
                 Some(Happy),
             ),
             (
-                SteamEdition::Listed(Some(Compatibility::Verified)),
+                SteamEdition::Listed(Some(Tier::Platinum)),
                 Some(Happy),
             ),
+            (SteamEdition::Listed(Some(Tier::Silver)), Some(Sick)),
+            (SteamEdition::Listed(Some(Tier::Bronze)), Some(Sick)),
             (
-                SteamEdition::Listed(Some(Compatibility::Unsupported)),
+                SteamEdition::Listed(Some(Tier::Borked)),
                 Some(Sad),
             ),
             (SteamEdition::Listed(None), None),
@@ -357,7 +408,7 @@ mod tests {
             (
                 FerestreState::Untested,
                 Some(Happy),
-                "Steam Deck playable · Xbox untested",
+                "Steam edition runs according to ProtonDB · Xbox untested",
             ),
         ] {
             game.ferestre_test = Some(FerestreTest {
@@ -369,28 +420,23 @@ mod tests {
                 xbox_compatibility(
                     &game,
                     Os::Linux,
-                    Some(SteamEdition::Listed(Some(Compatibility::Verified)))
+                    Some(SteamEdition::Listed(Some(Tier::Platinum)))
                 ),
-                Some(XboxCompatibility { badge, label }),
+                Some(CompatibilityStatus { badge, label }),
             );
         }
         assert!(xbox_compatibility(&game, Os::Windows, None).is_none());
         game.ferestre_unsupported_package = true;
         assert_eq!(
             xbox_compatibility(&game, Os::Linux, None),
-            Some(XboxCompatibility {
+            Some(CompatibilityStatus {
                 badge: Some(Sad),
                 label: "Can't install on Linux",
             })
         );
         game.xbox_console_only = true;
-        assert_eq!(
-            xbox_compatibility(&game, Os::Linux, None),
-            Some(XboxCompatibility {
-                badge: Some(Sad),
-                label: "Xbox console only",
-            })
-        );
+        assert!(xbox_compatibility(&game, Os::Linux, None).is_none());
+        assert!(Game::new(game).is_none());
     }
 
     #[test]
@@ -467,6 +513,120 @@ mod tests {
         source.client_os = client;
         source.in_library = true;
         Game::new(source).unwrap()
+    }
+
+    #[test]
+    fn library_sort_uses_each_priority_in_order_and_keeps_ties_stable() {
+        let local = Os::Linux;
+        let foreign = Os::Windows;
+        let mut games = [
+            game(vec![local], vec![(local, "installed")]),
+            game(vec![local], vec![(local, "incomplete")]),
+            game(vec![local], vec![(local, "installed")]),
+            game(vec![foreign], vec![(foreign, "installed")]),
+            game(vec![local], vec![(local, "external")]),
+            game(vec![local], vec![(local, "installed")]),
+        ];
+        games[0].source.game_pass_only = true;
+        for index in [0, 1, 3, 4, 5] {
+            games[index].title = "Verified".into();
+        }
+        let mut indices = [0, 1, 2, 3, 4, 5];
+        sort_matches(&mut indices, &games, local, |game| game.title == "Verified");
+        assert_eq!(indices, [4, 5, 3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn combined_library_hides_unavailable_copies_only_with_an_eligible_cross_store_option() {
+        use raesir_backend::{
+            model::{ActionTarget, GameAction},
+            steam_control::Operation,
+        };
+
+        let host = Os::host();
+        let foreign = if host == Os::Windows {
+            Os::Linux
+        } else {
+            Os::Windows
+        };
+        let mut steam = game(vec![host], vec![]);
+        steam.title = "Five Nights at Freddy's".into();
+        steam.source.install = Some(GameAction {
+            client: "Steam".into(),
+            note: None,
+            target: ActionTarget::Steam {
+                root: "fixture".into(),
+                appid: 1,
+                operation: Operation::Install,
+            },
+        });
+        let mut xbox = catalog::entry(
+            "xbox",
+            "example",
+            "Five Nights at Freddy’s®",
+            vec![],
+            "fixture",
+        );
+        xbox.in_library = true;
+        xbox.game_pass = true;
+        xbox.client_os = vec![foreign];
+        let xbox = Game::new(xbox).unwrap();
+        let mut games = [steam, xbox];
+        let filters = crate::backend::LibraryFilters {
+            status: 0,
+            os: 0,
+            store: None,
+            access: 0,
+            verification: None,
+        };
+        let matching = |games: &[Game], filters| matching_games(games, "", filters, host);
+
+        assert_eq!(matching(&games, filters), [0]);
+        assert_eq!(matching_games(&games, "five nights", filters, host), [0]);
+        assert_eq!(
+            matching(
+                &games,
+                crate::backend::LibraryFilters {
+                    store: Some(games[1].store),
+                    ..filters
+                }
+            ),
+            [1]
+        );
+        assert_eq!(
+            matching(
+                &games,
+                crate::backend::LibraryFilters {
+                    access: 2,
+                    ..filters
+                }
+            ),
+            [1]
+        );
+        assert_eq!(
+            matching(&games, crate::backend::LibraryFilters { os: 2, ..filters }),
+            [1]
+        );
+
+        games[1].title.push_str(" 2");
+        assert_eq!(matching(&games, filters), [0, 1]);
+        games[1].title = games[0].title.clone();
+        games[1].source.is_demo = true;
+        assert_eq!(matching(&games, filters), [0, 1]);
+        games[1].source.is_demo = false;
+
+        games[1].source.installations = game(vec![foreign], vec![(foreign, "installed")])
+            .source
+            .installations;
+        assert_eq!(matching(&games, filters), [0, 1]);
+        games[1].source.installations.clear();
+        games[0].source.installations = game(vec![host], vec![(host, "installed")])
+            .source
+            .installations;
+        assert_eq!(matching(&games, filters), [0]);
+        games[0].source.install = None;
+        games[0].source.installations.clear();
+        assert_eq!(matching(&games, filters), [0, 1]);
     }
 
     #[test]
@@ -553,7 +713,7 @@ mod tests {
             vec![(Os::Windows, "installed")],
         );
         assert_eq!(game.installed(0, Os::Linux), 2);
-        assert_eq!(game.other_installed_os(Os::Linux), Some(Os::Windows));
+        assert_eq!(game.foreign_install_badge(Os::Linux), Some(Os::Windows));
         assert_eq!(game.installed(1, Os::Linux), 0);
         assert!(game.matches("", None, 0, 1, Os::Linux));
         assert!(!game.matches("", None, 1, 1, Os::Linux));
@@ -570,7 +730,7 @@ mod tests {
             assert_eq!(game.installed(0, host), 1);
             assert_eq!(game.installed(1, host), 1);
             assert_eq!(game.installed(2, host), 2);
-            assert_ne!(game.other_installed_os(host), Some(host));
+            assert_ne!(game.foreign_install_badge(host), Some(host));
             assert_eq!(
                 game.duplicate_systems(host),
                 vec![if host == Os::Linux {
@@ -624,10 +784,24 @@ mod tests {
     fn unverified_foreign_install_does_not_show_an_installed_badge() {
         for state in ["unavailable", "files_missing", "incomplete"] {
             let game = game(vec![Os::Linux, Os::Windows], vec![(Os::Windows, state)]);
-            assert_eq!(game.other_installed_os(Os::Linux), None);
+            assert_eq!(game.foreign_install_badge(Os::Linux), None);
             assert_eq!(game.installed(0, Os::Linux), 0);
             assert!(!game.matches("", None, 1, 0, Os::Linux));
             assert!(game.matches("", None, 2, 2, Os::Linux));
         }
+    }
+
+    #[test]
+    fn windows_badge_requires_a_confirmed_installation_path() {
+        let mut game = game(vec![Os::Windows], vec![(Os::Windows, "external")]);
+        game.source.installations[0].path.clear();
+        assert_eq!(game.foreign_install_badge(Os::Linux), None);
+        let mut installed = game.source.installations[0].clone();
+        installed.state = "installed".into();
+        game.source.installations.push(installed);
+        assert_eq!(game.foreign_install_badge(Os::Linux), None);
+        game.source.installations[1].path = "/mnt/windows/Game".into();
+        assert_eq!(game.foreign_install_badge(Os::Linux), Some(Os::Windows));
+        assert_eq!(game.foreign_install_badge(Os::Windows), None);
     }
 }

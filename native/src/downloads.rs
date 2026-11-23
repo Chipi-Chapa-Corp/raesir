@@ -152,15 +152,13 @@ pub fn queue_pill(
         .text_size(rems(1.125))
         .child(label)
         .tooltip(|_, cx| {
-            cx.new(|_| crate::library::ActionTooltip("Downloads".into()))
+            cx.new(|_| crate::header::Tooltip("Downloads".into()))
                 .into()
         })
 }
 
-fn download_entry(game: &crate::library::Game, progress: &Progress) -> bool {
-    !game.source.xbox_console_only
-        && progress.operation.downloads()
-        && progress.phase != Phase::Complete
+fn download_entry(progress: &Progress) -> bool {
+    progress.operation.downloads() && progress.phase != Phase::Complete
 }
 
 fn queue_order(progress: &Progress) -> (u8, u64) {
@@ -242,7 +240,7 @@ impl Launcher {
             .filter_map(|game| {
                 let key = &game.source.key;
                 let progress = self.download_operations.get(key)?;
-                download_entry(game, progress).then_some((key, progress))
+                download_entry(progress).then_some((key, progress))
             })
             .collect();
         if let Some((key, progress)) = self
@@ -300,6 +298,10 @@ impl Launcher {
         mut progress: HashMap<String, Progress>,
         cx: &mut Context<Self>,
     ) -> bool {
+        progress.retain(|key, _| {
+            key == raesir_backend::ferestre::RUNTIME_JOB
+                || self.games.iter().any(|game| &game.source.key == key)
+        });
         // A poll started before the popup closed can still return its old failure.
         self.download_failures_dismissed
             .retain(|key, seen| progress.get(key).is_none_or(|current| current == seen));
@@ -325,7 +327,7 @@ impl Launcher {
             .enumerate()
             .filter_map(|(index, game)| {
                 let state = progress.get(&game.source.key)?;
-                download_entry(game, state).then_some((index, state.clone()))
+                download_entry(state).then_some((index, state.clone()))
             })
             .collect();
         entries.sort_by_key(|(index, p)| (queue_order(p), self.games[*index].title.clone()));

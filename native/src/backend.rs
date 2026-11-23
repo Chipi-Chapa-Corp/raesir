@@ -148,6 +148,7 @@ impl Backend {
     }
 
     fn set(&self, mut report: Report) -> Arc<Report> {
+        report.catalog.retain(raesir_backend::catalog::visible);
         if self.fixture.is_none() {
             report.warnings.extend(self.mod_manager.recover_staging());
             self.steam_actions(&mut report);
@@ -503,16 +504,6 @@ impl Backend {
             return Err("Background installation is unavailable for this game".into());
         }
         actions::perform(&report, key, kind)
-    }
-
-    pub(crate) fn running_games(
-        &self,
-        keys: impl Iterator<Item = String>,
-    ) -> Result<HashMap<String, Vec<raesir_backend::game_sessions::ProcessId>>, String> {
-        let report = self.latest_report().ok_or("Library is still loading")?;
-        raesir_backend::game_sessions::running(
-            keys.filter_map(|key| report.catalog.iter().find(|game| game.key == key)),
-        )
     }
 
     pub(crate) fn quit_game(
@@ -942,6 +933,22 @@ impl Backend {
             .insert("automatic_game_updates".into(), serde_json::json!(enabled));
     }
 
+    pub fn exit_with_game(&self) -> bool {
+        self.ui()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("exit_with_game")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn set_exit_with_game(&self, enabled: bool) {
+        self.ui()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("exit_with_game".into(), serde_json::json!(enabled));
+    }
+
     pub fn check_game_updates(&self, force: bool) -> (HashMap<String, Progress>, Vec<String>) {
         if self.fixture.is_some()
             || self.closing.load(Ordering::SeqCst)
@@ -1011,12 +1018,69 @@ impl Backend {
         domain: &str,
         query: &str,
         offset: u32,
-        trending: bool,
+        order: raesir_backend::mods::CatalogOrder,
         refresh: bool,
-    ) -> Result<raesir_backend::mods::NexusPage, String> {
+    ) -> Result<raesir_backend::mods::CatalogPage, String> {
         self.ready()?;
         self.mod_manager
-            .nexus_page(domain, query, offset, trending, refresh)
+            .nexus_page(domain, query, offset, order, refresh)
+    }
+
+    pub fn gamebanana_game(
+        &self,
+        game: &LibraryGame,
+        refresh: bool,
+    ) -> Result<Option<u64>, String> {
+        self.ready()?;
+        self.mod_manager.gamebanana_game(game, refresh)
+    }
+
+    pub fn gamebanana_page(
+        &self,
+        game: u64,
+        query: &str,
+        page: u32,
+        order: raesir_backend::mods::CatalogOrder,
+        refresh: bool,
+    ) -> Result<raesir_backend::mods::CatalogPage, String> {
+        self.ready()?;
+        self.mod_manager
+            .gamebanana_page(game, query, page, order, refresh)
+    }
+
+    pub fn modworkshop_game(
+        &self,
+        game: &LibraryGame,
+        refresh: bool,
+    ) -> Result<Option<u64>, String> {
+        self.ready()?;
+        self.mod_manager.modworkshop_game(game, refresh)
+    }
+
+    pub fn modworkshop_page(
+        &self,
+        game: u64,
+        query: &str,
+        page: u32,
+        order: raesir_backend::mods::CatalogOrder,
+        refresh: bool,
+    ) -> Result<raesir_backend::mods::CatalogPage, String> {
+        self.ready()?;
+        self.mod_manager
+            .modworkshop_page(game, query, page, order, refresh)
+    }
+
+    pub fn workshop_page(
+        &self,
+        game: &LibraryGame,
+        query: &str,
+        page: u32,
+        order: raesir_backend::mods::CatalogOrder,
+        refresh: bool,
+    ) -> Result<raesir_backend::mods::CatalogPage, String> {
+        self.ready()?;
+        self.mod_manager
+            .workshop_page(game, query, page, order, refresh)
     }
 
     pub fn mod_auto_updates_enabled(&self) -> bool {
@@ -1117,17 +1181,29 @@ impl Backend {
         &self,
         game: &LibraryGame,
         package: &str,
-        browse_nexus: bool,
     ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
         self.ready()?;
         if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
             return Err("Mod changes are disabled in this fixture profile".into());
         }
-        let snapshot = if browse_nexus {
+        let snapshot = if package.starts_with("nexus:") {
             self.mod_manager.uninstall_nexus(game, package)?
         } else {
             self.mod_manager.uninstall(game, package)?
         };
+        Ok((snapshot, self.refresh_mods()?))
+    }
+
+    pub fn import_deadlock_mod(
+        &self,
+        game: &LibraryGame,
+        archive: &Path,
+    ) -> Result<(raesir_backend::mods::Snapshot, Arc<Report>), String> {
+        self.ready()?;
+        if self.fixture.is_some() && std::env::var_os("RAESIR_MODS_TEST_INSTALL").is_none() {
+            return Err("Mod changes are disabled in this fixture profile".into());
+        }
+        let snapshot = self.mod_manager.import_deadlock_mod(game, archive)?;
         Ok((snapshot, self.refresh_mods()?))
     }
 
@@ -1213,20 +1289,34 @@ impl Backend {
         cancel: &AtomicBool,
     ) -> Result<artwork::Artwork, String> {
         self.ready()?;
-        if self.fixture.is_some()
+        let result = if self.fixture.is_some()
             && std::env::var_os("RAESIR_ARTWORK_NETWORK_FIXTURE").is_none()
         {
-            return game
-                .cover
+            game.cover
                 .as_ref()
                 .filter(|p| Path::new(p).is_file())
                 .map(|path| artwork::Artwork {
                     path: path.clone(),
                     title: None,
                 })
-                .ok_or("No fixture cover".into());
-        }
-        artwork::fetch_cancelable(game, &self.cache.join("artwork"), cancel)
+                .ok_or("No fixture cover".into())
+        } else {
+            artwork::fetch_cancelable(game, &self.cache.join("artwork"), cancel)
+        };
+        result.or_else(|error| {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(error);
+            }
+            let Some(media) = self
+                .cached_details(game)
+                .and_then(|details| details.first_screenshot().cloned())
+            else {
+                return Err(error);
+            };
+            self.detail_media(&media.url)
+                .map(|path| artwork::Artwork { path, title: None })
+                .map_err(|_| error)
+        })
     }
 
     pub fn support(&self, project: &str) -> Result<(), String> {
@@ -1279,6 +1369,16 @@ impl Backend {
         game: &LibraryGame,
     ) -> Option<raesir_backend::details::Details> {
         raesir_backend::details::cached(game, &self.cache.join("details"))
+    }
+
+    pub fn refresh_cached_review_authors(
+        &self,
+        game: &LibraryGame,
+    ) -> Option<raesir_backend::details::Details> {
+        if self.fixture.is_some() {
+            return None;
+        }
+        raesir_backend::details::refresh_cached_review_authors(game, &self.cache.join("details"))
     }
 
     pub fn player_stats(
@@ -1435,6 +1535,9 @@ impl Backend {
             .achievement_icons
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = icons.get(url) {
+            return Ok(existing.clone());
+        }
         if icons.len() >= 512 {
             if let Some(key) = icons.keys().next().cloned() {
                 icons.remove(&key);
@@ -1723,19 +1826,25 @@ mod tests {
     }
 
     #[test]
-    fn automatic_game_updates_persist_without_replacing_other_preferences() {
+    fn game_preferences_persist_without_replacing_other_preferences() {
         let dir = tempfile::tempdir().unwrap();
         let backend = fixture(dir.path());
         assert!(backend.automatic_game_updates());
+        assert!(!backend.exit_with_game());
         backend.set_zoom(19.);
         backend.set_automatic_game_updates(false);
+        backend.set_exit_with_game(true);
         backend.save_ui();
         let reopened = fixture(dir.path());
         assert!(!reopened.automatic_game_updates());
+        assert!(reopened.exit_with_game());
         assert_eq!(reopened.zoom(), 19.);
         reopened.set_automatic_game_updates(true);
+        reopened.set_exit_with_game(false);
         reopened.save_ui();
-        assert!(fixture(dir.path()).automatic_game_updates());
+        let reopened = fixture(dir.path());
+        assert!(reopened.automatic_game_updates());
+        assert!(!reopened.exit_with_game());
     }
 
     #[test]

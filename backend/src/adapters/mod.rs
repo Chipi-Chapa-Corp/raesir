@@ -46,7 +46,8 @@ pub fn scan(
     if let Some(previous) = previous {
         retain(&mut scan, previous);
     }
-    scan.games.retain(catalog::visible);
+    // Keep package classifications until the store catalogs are reconciled.
+    scan.games.retain(catalog::valid_listing);
     scan.games
         .sort_by_cached_key(|g| (g.title.to_lowercase(), g.key.clone()));
     (scan.games, scan.warnings)
@@ -227,6 +228,25 @@ mod tests {
         assert!(
             matches!(game.launch.as_ref().unwrap().target, ActionTarget::Command { ref args, .. } if args == &["0123456789abcdef"])
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ferestre_only_reports_account_read_errors_for_known_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(".config", dir.path().join(".config")).unwrap();
+        let report = report();
+        let mut scan = fixture(&report, dir.path());
+        scan.homes[0].local = false;
+
+        xbox::scan(&mut scan);
+        assert!(scan.warnings.is_empty());
+
+        fs::create_dir_all(dir.path().join(".local/state/ferestre")).unwrap();
+        xbox::scan(&mut scan);
+        assert_eq!(scan.warnings.len(), 1);
+        assert!(scan.warnings[0].contains("account-roles.json"));
+        assert!(scan.games.is_empty());
     }
 
     #[test]

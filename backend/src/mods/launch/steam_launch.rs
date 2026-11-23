@@ -52,6 +52,19 @@ impl Manager {
         } else {
             None
         };
+        if deadlock::matches(game) {
+            let staged = self.stage_dir(&game_dir);
+            restore_session(&staged)?;
+            if mode == LaunchMode::Modded {
+                self.stage_deadlock(profile_path, &game_dir, &staged)?;
+            }
+            let result = crate::actions::launch_with_args(report, &game.key, extra_args);
+            if let Err(error) = result {
+                restore_session(&staged)?;
+                return Err(error);
+            }
+            return Ok(self.monitor_steam_launch(game_dir, staged, lease, revision_lease));
+        }
         let schema = ECOSYSTEM
             .game(slug)
             .and_then(|g| g.profile())
@@ -144,6 +157,16 @@ impl Manager {
             restore_session(&staged)?;
             return Err(error);
         }
+        Ok(self.monitor_steam_launch(game_dir, staged, lease, revision_lease))
+    }
+
+    fn monitor_steam_launch(
+        &self,
+        game_dir: PathBuf,
+        staged: PathBuf,
+        lease: GameLease,
+        revision_lease: Option<GameLease>,
+    ) -> LaunchTask {
         self.active
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -180,7 +203,7 @@ impl Manager {
             });
             let _ = tx.send(result);
         });
-        Ok(LaunchTask(rx))
+        LaunchTask(rx)
     }
 }
 

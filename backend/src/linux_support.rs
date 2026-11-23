@@ -59,12 +59,9 @@ pub fn scan(report: &Report) -> Vec<LinuxSystem> {
                 root: root.to_string_lossy().into_owned(),
                 xbox_runtime: installed(&root, &foreign_homes)
                     || foreign_homes.iter().any(|home| {
-                        resolve_file(
-                            &root,
-                            &ferestre::cli_directory(&home.join(".local/share"))
-                                .join("usr/bin/ferestre"),
-                        )
-                        .is_some()
+                        ferestre::cli_directories(&home.join(".local/share")).any(|dir| {
+                            resolve_file(&root, &dir.join("usr/bin/ferestre")).is_some()
+                        })
                     }),
                 managed_ferestre: false,
                 ferestre_client: false,

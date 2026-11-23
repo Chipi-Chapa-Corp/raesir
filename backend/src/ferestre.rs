@@ -17,24 +17,31 @@ pub const fn setup_supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 
-fn managed_path() -> Option<PathBuf> {
+fn managed_data_dir() -> Option<PathBuf> {
     if !setup_supported() {
         return None;
     }
     let home = platform::home()?;
-    Some(cli_directory(&host_dir(
-        &home,
-        "XDG_DATA_HOME",
-        ".local/share",
-    )))
+    Some(host_dir(&home, "XDG_DATA_HOME", ".local/share"))
 }
 
-pub(crate) fn cli_directory(data_dir: &Path) -> PathBuf {
-    data_dir.join(storage::APP_ID).join("ferestre/cli")
+pub(crate) fn cli_directories(data_dir: &Path) -> impl Iterator<Item = PathBuf> {
+    [storage::APP_ID]
+        .into_iter()
+        .chain(storage::PREVIOUS_APP_IDS)
+        .map(move |id| cli_directory(data_dir, id))
+}
+
+fn cli_directory(data_dir: &Path, app_id: &str) -> PathBuf {
+    data_dir.join(app_id).join("ferestre/cli")
 }
 
 fn managed_cli() -> Option<PathBuf> {
-    managed_path().filter(|dir| managed_cli_ready(dir))
+    find_managed_cli(&managed_data_dir()?)
+}
+
+fn find_managed_cli(data_dir: &Path) -> Option<PathBuf> {
+    cli_directories(data_dir).find(|dir| managed_cli_ready(dir))
 }
 
 fn managed_cli_ready(dir: &Path) -> bool {
@@ -56,6 +63,43 @@ fn managed_cli_ready(dir: &Path) -> bool {
             metadata.is_file() && executable
         })
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn managed_cli_survives_app_rename() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    let data = tempfile::tempdir().unwrap();
+    let current = cli_directory(data.path(), storage::APP_ID);
+    let previous = cli_directory(data.path(), storage::PREVIOUS_APP_IDS[0]);
+    let write_executable = |dir: &Path, file| {
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_executable(&current, CLI);
+    assert_eq!(find_managed_cli(data.path()), None);
+
+    for file in [
+        CLI,
+        XODUS,
+        XODUS_SERVICE,
+        "usr/lib/ferestre/scripts/proton-wine-shim.sh",
+    ] {
+        write_executable(&previous, file);
+    }
+    assert_eq!(find_managed_cli(data.path()), Some(previous));
+
+    for file in [
+        XODUS,
+        XODUS_SERVICE,
+        "usr/lib/ferestre/scripts/proton-wine-shim.sh",
+    ] {
+        write_executable(&current, file);
+    }
+    assert_eq!(find_managed_cli(data.path()), Some(current));
 }
 
 pub fn managed_installed() -> bool {
@@ -529,7 +573,9 @@ pub fn install_managed(maintenance: bool) -> Result<(), String> {
     check_setup_enabled()?;
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        let path = managed_path().ok_or("Could not find a user data directory for Ferestre")?;
+        let data = managed_data_dir().ok_or("Could not find a user data directory for Ferestre")?;
+        let path = find_managed_cli(&data)
+            .unwrap_or_else(|| cli_directory(&data, storage::APP_ID));
         install::run(&path, maintenance)
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]

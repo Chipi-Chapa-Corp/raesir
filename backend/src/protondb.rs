@@ -3,11 +3,14 @@ use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     io::Read as _,
     path::Path,
     sync::LazyLock,
     time::{Duration, UNIX_EPOCH},
 };
+
+pub mod reviews;
 
 static CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
@@ -21,22 +24,27 @@ static CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Compatibility {
-    Unsupported,
-    Playable,
-    Verified,
+pub enum Tier {
+    Native,
+    Platinum,
+    Gold,
+    Silver,
+    Bronze,
+    Borked,
 }
 
 #[derive(Deserialize, Serialize)]
 struct Rating {
     checked: u64,
-    compatibility: Option<Compatibility>,
+    tier: Option<Tier>,
+    #[serde(default)]
+    total: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SteamEdition {
     Missing,
-    Listed(Option<Compatibility>),
+    Listed(Option<Tier>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -139,82 +147,108 @@ fn match_store_search(response: &Value, title: &str) -> Option<StoreMatch> {
     (response["total"].as_u64()? <= items.len() as u64).then_some(StoreMatch::Missing)
 }
 
-pub fn rating(cache: &Path, app_id: u32) -> Option<Compatibility> {
-    let path = cache.join("steam-deck").join(format!("{app_id}.json"));
-    let previous = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Rating>(&bytes).ok());
+pub fn rating(cache: &Path, app_id: u32) -> Option<Tier> {
+    load_rating(cache, app_id, false)?.tier
+}
+
+pub fn review_count(cache: &Path, app_id: u32) -> Option<u64> {
+    load_rating(cache, app_id, true)?.total
+}
+
+pub fn cached_ratings(cache: &Path) -> HashMap<u32, Tier> {
+    std::fs::read_dir(cache.join("protondb"))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "json" {
+                return None;
+            }
+            let id = path.file_stem()?.to_str()?.parse().ok()?;
+            Some((id, read_rating(&path)?.tier?))
+        })
+        .collect()
+}
+
+fn read_rating(path: &Path) -> Option<Rating> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn load_rating(cache: &Path, app_id: u32, require_count: bool) -> Option<Rating> {
+    let path = cache.join("protondb").join(format!("{app_id}.json"));
+    let previous = read_rating(&path);
     let now = UNIX_EPOCH.elapsed().unwrap_or_default().as_secs();
     if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
-        || previous
-            .as_ref()
-            .is_some_and(|rating| now.saturating_sub(rating.checked) < 86400)
+        || previous.as_ref().is_some_and(|rating| {
+            now.saturating_sub(rating.checked) < 86400 && (!require_count || rating.total.is_some())
+        })
     {
-        return previous.and_then(|rating| rating.compatibility);
+        return previous;
     }
     match fetch(app_id, now) {
         Some(rating) => {
             let _ = storage::write_json(&path, &rating);
-            rating.compatibility
+            Some(rating)
         }
-        None => previous.and_then(|rating| rating.compatibility),
+        None => previous,
     }
 }
 
 fn fetch(app_id: u32, now: u64) -> Option<Rating> {
     let response = CLIENT
         .as_ref()?
-        .get("https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport")
-        .query(&[("nAppID", app_id)])
+        .get(format!(
+            "https://www.protondb.com/api/v1/reports/summaries/{app_id}.json"
+        ))
         .send()
         .ok()?;
     if response.status() == StatusCode::NOT_FOUND {
         return Some(Rating {
             checked: now,
-            compatibility: None,
+            tier: None,
+            total: Some(0),
         });
     }
-    let summary: serde_json::Value =
+    let summary: Value =
         serde_json::from_reader(response.error_for_status().ok()?.take(16 * 1024)).ok()?;
-    report_rating(&summary, app_id, now)
+    report_rating(&summary, now)
 }
 
-fn report_rating(report: &Value, app_id: u32, checked: u64) -> Option<Rating> {
-    let results = &report["results"];
-    if report["success"] != 1 || results["appid"] != app_id {
-        return None;
-    }
-    let compatibility = match results["resolved_category"].as_u64() {
-        Some(1) => Some(Compatibility::Unsupported),
-        Some(2) => Some(Compatibility::Playable),
-        Some(3) => Some(Compatibility::Verified),
+fn report_rating(summary: &Value, checked: u64) -> Option<Rating> {
+    let tier = match summary.get("tier")?.as_str()? {
+        "native" => Some(Tier::Native),
+        "platinum" => Some(Tier::Platinum),
+        "gold" => Some(Tier::Gold),
+        "silver" => Some(Tier::Silver),
+        "bronze" => Some(Tier::Bronze),
+        "borked" => Some(Tier::Borked),
         _ => None,
     };
     Some(Rating {
         checked,
-        compatibility,
+        tier,
+        total: summary["total"].as_u64(),
     })
 }
 
 #[cfg(test)]
 #[test]
-fn deck_report_distinguishes_unsupported_from_unknown() {
-    for (category, expected) in [
-        (0, None),
-        (1, Some(Compatibility::Unsupported)),
-        (2, Some(Compatibility::Playable)),
-        (3, Some(Compatibility::Verified)),
-        (4, None),
+fn protondb_uses_the_overall_tier_and_leaves_unrated_games_unknown() {
+    use serde_json::json;
+    for (tier, expected) in [
+        ("native", Some(Tier::Native)),
+        ("platinum", Some(Tier::Platinum)),
+        ("gold", Some(Tier::Gold)),
+        ("silver", Some(Tier::Silver)),
+        ("bronze", Some(Tier::Bronze)),
+        ("borked", Some(Tier::Borked)),
+        ("pending", None),
     ] {
-        let report = serde_json::json!({"success":1,"results":{
-            "appid":42,"resolved_category":category,"steamos_resolved_category":3
-        }});
-        assert_eq!(
-            report_rating(&report, 42, 1).unwrap().compatibility,
-            expected
-        );
-        assert!(report_rating(&report, 43, 1).is_none());
+        let summary = json!({"tier": tier, "trendingTier": "platinum"});
+        assert_eq!(report_rating(&summary, 1).unwrap().tier, expected);
     }
+    assert!(report_rating(&json!({"trendingTier": "gold"}), 1).is_none());
 }
 
 #[cfg(test)]

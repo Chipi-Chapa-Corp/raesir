@@ -1,5 +1,5 @@
 use super::*;
-use crate::details::text_button;
+use crate::views::{dialog_actions, modal, text_button};
 
 #[derive(Clone)]
 pub(super) enum Dialog {
@@ -47,7 +47,6 @@ impl ModBrowser {
         if self.loading || self.installing.is_some() {
             return;
         }
-        self.catalog_task = None;
         let name = match &mode {
             Dialog::Rename { name, .. } => name.as_str(),
             _ => "",
@@ -130,7 +129,7 @@ impl ModBrowser {
                                 button(("rename-mod-profile", i), "edit", false)
                                     .tooltip(|_, cx| {
                                         cx.new(|_| {
-                                            crate::library::ActionTooltip("Rename profile".into())
+                                            crate::header::Tooltip("Rename profile".into())
                                         })
                                         .into()
                                     })
@@ -143,7 +142,7 @@ impl ModBrowser {
                                     .opacity(if can_delete { 1. } else { 0.4 })
                                     .tooltip(move |_, cx| {
                                         cx.new(|_| {
-                                            crate::library::ActionTooltip(
+                                            crate::header::Tooltip(
                                                 if can_delete {
                                                     "Delete profile"
                                                 } else {
@@ -228,7 +227,7 @@ impl ModBrowser {
             return self.nexus_dialog(cx);
         }
         if let Dialog::Files { id, files } = mode {
-            return self.modworkshop_files_dialog(id, files, cx);
+            return self.provider_files_dialog(id, files, cx);
         }
         let (heading, note, action, editing, destructive) = match mode {
             Dialog::Nexus { .. } => unreachable!(),
@@ -267,100 +266,81 @@ impl ModBrowser {
                 true,
             ),
         };
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(rgba(0x00000055))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                pill()
-                    .flex_col()
-                    .items_stretch()
-                    .gap(rems(1.))
-                    .w(rems(30.))
-                    .rounded(rems(1.8))
-                    .p(rems(2.))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key == "enter" {
-                            this.submit_dialog(cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .whitespace_normal()
-                            .child(heading),
-                    )
-                    .when(editing, |d| {
-                        d.child(
-                            pill().rounded(rems(0.8)).px(rems(0.8)).py(rems(0.3)).child(
-                                text_input("profile-name")
-                                    .state(self.profile_name.downgrade())
-                                    .placeholder("Profile name")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(rems(1.125))
-                                    .line_height(rems(1.6))
-                                    .py(rems(0.4))
-                                    .caret_color(rgb_to_hsla(rgb(0xf0f8f3)))
-                                    .selection_color(rgb_to_hsla(rgba(0xffffff40)))
-                                    .caret_blink_interval_500ms(),
-                            ),
-                        )
-                    })
-                    .when(!note.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .id("profile-action-note")
-                                .max_h(rems(15.))
-                                .overflow_y_scroll()
+        modal(30., |panel| {
+            panel
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "enter" {
+                        this.submit_dialog(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .whitespace_normal()
+                        .child(heading),
+                )
+                .when(editing, |d| {
+                    d.child(
+                        pill().rounded(rems(0.8)).px(rems(0.8)).py(rems(0.3)).child(
+                            text_input("profile-name")
+                                .state(self.profile_name.downgrade())
+                                .placeholder("Profile name")
+                                .flex_1()
+                                .min_w_0()
                                 .text_size(rems(1.125))
-                                .whitespace_normal()
-                                .child(note),
-                        )
-                    })
-                    .when_some(self.error.clone(), |d, error| {
-                        d.child(
-                            div()
-                                .text_color(rgb(0xffc4ab))
-                                .whitespace_normal()
-                                .child(error),
-                        )
-                    })
-                    .child(
+                                .line_height(rems(1.6))
+                                .py(rems(0.4))
+                                .caret_color(rgb_to_hsla(rgb(0xf0f8f3)))
+                                .selection_color(rgb_to_hsla(rgba(0xffffff40)))
+                                .caret_blink_interval_500ms(),
+                        ),
+                    )
+                })
+                .when(!note.is_empty(), |d| {
+                    d.child(
                         div()
-                            .flex()
-                            .justify_end()
-                            .gap(rems(0.5))
-                            .child(text_button("cancel-profile-action", "Cancel").when(
-                                !self.loading,
-                                |d| {
-                                    d.on_click(cx.listener(|this, _, window, cx| {
-                                        this.dialog = None;
-                                        this.error = None;
-                                        this.restore_focus(window, cx);
-                                        cx.notify();
-                                    }))
-                                },
-                            ))
-                            .child(
-                                text_button("save-profile-action", action)
-                                    .when(destructive, |d| d.bg(rgba(0xff8f8f22)))
-                                    .when(self.loading, |d| {
-                                        d.child(spinner("profile-action-spinner", 1.2))
-                                    })
-                                    .when(!self.loading, |d| {
-                                        d.on_click(
-                                            cx.listener(|this, _, _, cx| this.submit_dialog(cx)),
-                                        )
-                                    }),
-                            ),
-                    ),
-            )
-            .into_any_element()
+                            .id("profile-action-note")
+                            .max_h(rems(15.))
+                            .overflow_y_scroll()
+                            .text_size(rems(1.125))
+                            .whitespace_normal()
+                            .child(note),
+                    )
+                })
+                .when_some(self.error.clone(), |d, error| {
+                    d.child(
+                        div()
+                            .text_color(rgb(0xffc4ab))
+                            .whitespace_normal()
+                            .child(error),
+                    )
+                })
+                .child(
+                    dialog_actions()
+                        .child(text_button("cancel-profile-action", "Cancel").when(
+                            !self.loading,
+                            |d| {
+                                d.on_click(cx.listener(|this, _, window, cx| {
+                                    this.dialog = None;
+                                    this.error = None;
+                                    this.restore_focus(window, cx);
+                                    cx.notify();
+                                }))
+                            },
+                        ))
+                        .child(
+                            text_button("save-profile-action", action)
+                                .when(destructive, |d| d.bg(rgba(0xff8f8f22)))
+                                .when(self.loading, |d| {
+                                    d.child(spinner("profile-action-spinner", 1.2))
+                                })
+                                .when(!self.loading, |d| {
+                                    d.on_click(cx.listener(|this, _, _, cx| this.submit_dialog(cx)))
+                                }),
+                        ),
+                )
+        })
+        .into_any_element()
     }
 }

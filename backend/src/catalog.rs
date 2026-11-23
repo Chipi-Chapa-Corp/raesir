@@ -63,6 +63,33 @@ pub(crate) fn remove_host_mount_aliases(games: &mut [LibraryGame]) {
     }
 }
 
+/// Normalize storefront spelling without stripping sequel or edition names.
+pub fn title_key(title: &str) -> String {
+    title
+        .split_whitespace()
+        .map(|word| {
+            let word = word
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            match word.as_str() {
+                "i" => "1".into(),
+                "ii" => "2".into(),
+                "iii" => "3".into(),
+                "iv" => "4".into(),
+                "v" => "5".into(),
+                "vi" => "6".into(),
+                "vii" => "7".into(),
+                "viii" => "8".into(),
+                "ix" => "9".into(),
+                "x" => "10".into(),
+                _ => word,
+            }
+        })
+        .collect()
+}
+
 /// Also recognize old snapshots that predate Steam's explicit demo metadata.
 pub fn demo_title(title: &str) -> bool {
     let words: Vec<_> = title
@@ -322,6 +349,8 @@ pub fn merge(games: &mut Vec<LibraryGame>, incoming: LibraryGame) {
                 .into_iter()
                 .filter(|i| seen.insert((i.path.clone(), format!("{:?}", i.os)))),
         );
+        existing.xbox_console_only = (existing.xbox_console_only || incoming.xbox_console_only)
+            && existing.installations.is_empty();
         existing.in_library |= incoming.in_library;
         existing.game_pass |= incoming.game_pass;
         existing.game_pass_only |= incoming.game_pass_only;
@@ -422,6 +451,10 @@ pub fn hydrate_os(report: &mut Report) {
 }
 
 pub fn visible(game: &LibraryGame) -> bool {
+    !game.xbox_console_only && valid_listing(game)
+}
+
+pub(crate) fn valid_listing(game: &LibraryGame) -> bool {
     if game.is_game == Some(false) {
         return false;
     }

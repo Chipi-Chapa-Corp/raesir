@@ -18,7 +18,7 @@ mod steam;
 mod ubisoft;
 mod xbox;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerStats {
     pub account: String,
     pub source: String,
@@ -30,7 +30,7 @@ pub struct PlayerStats {
     pub updated: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Achievement {
     pub id: String,
     pub name: String,

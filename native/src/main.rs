@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use raesir_backend::model::{Os, Report};
-use game_activity::PlayButton;
+use game_activity::{PlayButton, game_action_button};
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{
     EditableTextState, StringStorage, TextChanged,
@@ -19,6 +19,7 @@ actions!(raesir, [ClearSearch]);
 mod artwork;
 mod backdrop;
 mod backend;
+mod compatibility;
 mod controller;
 mod details;
 mod downloads;
@@ -27,10 +28,9 @@ mod header;
 mod icons;
 mod library;
 mod nexus_account;
-mod steam_deck;
 mod video;
 mod views;
-use header::{Header, HeaderState, button_shell, pill};
+use header::{Header, HeaderState, action_button, pill};
 use icons::{icon, system_icon};
 
 mod mods;
@@ -67,8 +67,9 @@ struct Launcher {
     _activation: Subscription,
     last_refresh: Instant,
     pending_action: Option<String>,
-    game_activity: HashMap<String, game_activity::Activity>,
+    game_activity: HashMap<String, game_activity::GameSession>,
     game_activity_task: Option<Task<()>>,
+    window: AnyWindowHandle,
     download_operations: HashMap<String, raesir_backend::steam_control::Progress>,
     download_rates: downloads::DownloadRates,
     downloads_watching: bool,
@@ -78,6 +79,7 @@ struct Launcher {
     game_update_notice: Option<String>,
     mod_update_notice: Option<String>,
     downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
+    settings_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     download_rows: ListState,
     downloads_open: bool,
     downloads_visible: HashSet<String>,
@@ -90,7 +92,7 @@ struct Launcher {
     artwork_pending: HashMap<String, artwork::Job>,
     artwork_attempted: HashSet<String>,
     artwork_cache: artwork::Cache,
-    steam_deck: steam_deck::Ratings,
+    compatibility: compatibility::Ratings,
     games: Vec<Game>,
     search: Entity<EditableTextState>,
     _search_subscription: Subscription,
@@ -166,12 +168,14 @@ impl Launcher {
         };
         let owner = cx.weak_entity();
         let downloads_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::default()));
+        let settings_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::default()));
         let header = cx.new(|cx| {
             let search_focus = search.focus_handle(cx);
             Header {
                 state: header_state.clone(),
                 owner,
                 downloads_bounds: downloads_bounds.clone(),
+                settings_bounds: settings_bounds.clone(),
                 search: search.clone(),
                 _focus_subscriptions: [
                     cx.on_focus(&search_focus, window, |_, _, cx| cx.notify()),
@@ -200,6 +204,7 @@ impl Launcher {
             pending_action: None,
             game_activity: HashMap::new(),
             game_activity_task: None,
+            window: window.window_handle(),
             download_operations: HashMap::new(),
             download_rates: downloads::DownloadRates::default(),
             downloads_watching: false,
@@ -209,6 +214,7 @@ impl Launcher {
             game_update_notice: None,
             mod_update_notice: None,
             downloads_bounds,
+            settings_bounds,
             download_rows: ListState::new(0, ListAlignment::Top, px(600.)),
             downloads_open: false,
             downloads_visible: HashSet::new(),
@@ -221,7 +227,7 @@ impl Launcher {
             artwork_pending: HashMap::new(),
             artwork_attempted: HashSet::new(),
             artwork_cache: artwork::Cache::default(),
-            steam_deck: steam_deck::Ratings::default(),
+            compatibility: compatibility::Ratings::default(),
             games: vec![],
             search,
             _search_subscription: search_subscription,
@@ -280,23 +286,36 @@ impl Launcher {
                 .spawn(async move { backend.save_ui() })
                 .detach();
         }
-        let query = self.query.trim().to_lowercase();
-        self.matching_games = self
-            .games
-            .iter()
-            .enumerate()
-            .filter(|(_, g)| {
-                g.matches_access(self.access)
-                    && g.matches(&query, self.store, self.status, self.os, self.host)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        self.visible = self.verified_matches();
-        self.steam_deck.scan_offset = 0;
-        steam_deck::request_filtered(self, cx);
+        self.matching_games = self.matching_games_for_filters();
+        self.visible = self.sorted_matches();
+        self.compatibility.scan_offset = 0;
+        compatibility::request_filtered(self, cx);
         self.reset_rows();
         self.hover_task = None;
         self.hovered = None;
+        cx.notify();
+    }
+
+    fn matching_games_for_filters(&self) -> Vec<usize> {
+        library::matching_games(
+            &self.games,
+            &self.query.trim().to_lowercase(),
+            self.saved_filters,
+            self.host,
+        )
+    }
+
+    fn refresh_title_matches(&mut self, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        let matching_games = self.matching_games_for_filters();
+        if matching_games != self.matching_games {
+            self.matching_games = matching_games;
+            self.compatibility.scan_offset = 0;
+            compatibility::request_filtered(self, cx);
+        }
+        self.update_visible_matches();
         cx.notify();
     }
 
@@ -304,30 +323,31 @@ impl Launcher {
         self.verification.filter(|_| self.host == Os::Linux)
     }
 
-    fn verified_matches(&self) -> Vec<usize> {
-        let Some(selected) = self.active_verification() else {
-            return self.matching_games.clone();
-        };
-        self.matching_games
+    fn sorted_matches(&self) -> Vec<usize> {
+        let selected = self.active_verification();
+        let mut visible: Vec<_> = self
+            .matching_games
             .iter()
             .copied()
             .filter(|&i| {
-                self.steam_deck
-                    .matches_badge(&self.games[i], self.host, selected)
+                selected.is_none_or(|badge| {
+                    self.compatibility.matches_badge(&self.games[i], self.host, badge)
+                })
             })
-            .collect()
+            .collect();
+        library::sort_matches(&mut visible, &self.games, self.host, |game| {
+            self.compatibility.matches_badge(game, self.host, CompatibilityBadge::Tick)
+        });
+        visible
     }
 
-    fn update_verified_matches(&mut self) {
-        if self.active_verification().is_none() {
-            return;
-        }
-        let visible = self.verified_matches();
+    fn update_visible_matches(&mut self) {
+        let visible = self.sorted_matches();
         if visible != self.visible {
             let mut scroll = self.rows.logical_scroll_top();
             if scroll.item_ix > 0
                 && let Some(anchor) = self.visible.get((scroll.item_ix - 1) * self.columns)
-                && let Ok(index) = visible.binary_search(anchor)
+                && let Some(index) = visible.iter().position(|index| index == anchor)
             {
                 scroll.item_ix = 1 + index / self.columns;
             }
@@ -337,7 +357,7 @@ impl Launcher {
             self.wheel_needs_sync = true;
             if self
                 .hovered
-                .is_some_and(|i| self.visible.binary_search(&i).is_err())
+                .is_some_and(|i| !self.visible.contains(&i))
             {
                 self.hover_task = None;
                 self.hovered = None;
@@ -497,16 +517,12 @@ impl Launcher {
         let play_button = (scope != 2)
             .then(|| self.play_button(&g.source.key))
             .flatten();
-        let console_only = g.source.xbox_console_only;
         let unsupported = g.source.ferestre_unsupported_package;
         let action = if playable { "launch" } else { "install" };
         let progress = self.display_progress(&g.source.key);
-        let working = progress.as_ref().filter(|p| {
-            play_button.is_none()
-                && !console_only
-                && !unsupported
-                && downloads::has_primary_action(p)
-        });
+        let working = progress
+            .as_ref()
+            .filter(|p| play_button.is_none() && !unsupported && downloads::has_primary_action(p));
         let can_uninstall = installed_here
             && g.source.uninstall.is_some()
             && !progress.as_ref().is_some_and(|p| p.active())
@@ -516,9 +532,7 @@ impl Launcher {
             .map(|state| state.label().into())
             .or_else(|| {
                 error
-                    .filter(|e| {
-                        *e != raesir_backend::steam_control::Error::XboxSignInRequired
-                    })
+                    .filter(|e| *e != raesir_backend::steam_control::Error::XboxSignInRequired)
                     .map(|e| e.message().to_owned())
             })
             .or_else(|| {
@@ -539,426 +553,168 @@ impl Launcher {
                 }
             });
         let duplicate_systems = g.duplicate_systems(self.host);
-        let xbox_status = self.steam_deck.xbox_status(&g.source, &g.title, self.host);
-        let compatibility_icon = self.steam_deck.card_badge(g, self.host);
+        let compatibility_icon = self.compatibility.card_badge(g, self.host);
         let key = g.key.clone();
         let uninstall_key = key.clone();
         let modded_key = key.clone();
         let menu_key = key.clone();
         let details_key = key.clone();
-        let title = g.title.clone();
-        let has_cover = g.card_poster.is_some();
-
-        div()
-            .id(("card", i))
-            .group("game-card")
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                window.focus(&this.focus, cx);
-                this.open_details(&details_key, cx);
-            }))
-            .w(px(width))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .rounded(rems(0.8))
-            .overflow_hidden()
-            .bg(if has_cover {
-                rgba(0x101010a6)
-            } else {
-                rgba(0x101010e6)
-            })
-            .on_hover(cx.listener(move |this, entered, _, cx| this.hover(i, *entered, cx)))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.game_menu = Some((menu_key.to_string(), event.position));
-                    cx.notify();
-                }),
-            )
+        let has_primary = playable || installable || working.is_some() || play_button.is_some();
+        let show_modded = modded && working.is_none() && play_button.is_none();
+        let badges = div()
+            .absolute()
+            .inset_0()
             .child(
                 div()
-                    .id(("poster", i))
-                    .relative()
-                    .w_full()
-                    .h(px(width * CARD_POSTER_RATIO))
-                    .flex_none()
-                    .rounded_t(rems(0.8))
-                    .overflow_hidden()
-                    .when_some(g.card_poster.clone(), |d, poster| {
-                        let cover = |poster| {
-                            img(poster)
-                                .size_full()
-                                .rounded_t(rems(0.8))
-                                .object_fit(ObjectFit::Cover)
-                        };
-                        d.child(cover(poster.clone()).when(!installed_here, |image| {
-                            image
-                                .grayscale(true)
-                                .group_hover("game-card", |s| s.invisible())
-                        }))
-                        .when(!installed_here, |d| {
-                            d.child(
-                                cover(poster)
-                                    .absolute()
-                                    .inset_0()
-                                    .invisible()
-                                    .group_hover("game-card", |s| s.visible()),
-                            )
-                        })
-                    })
-                    .child(div().absolute().inset_0().rounded_t(rems(0.8)).when(
-                        !installed_here,
-                        |d| {
-                            d.bg(linear_gradient(
-                                180.,
-                                linear_color_stop(rgba(0x020b0755), 0.75),
-                                linear_color_stop(rgba(0x020b0700), 1.),
-                            ))
-                        },
-                    ))
+                    .absolute()
+                    .top(rems(0.5))
+                    .left(rems(0.5))
+                    .flex()
+                    .items_center()
+                    .gap(rems(0.3))
                     .child(
                         div()
-                            .absolute()
-                            .inset_0()
-                            .rounded_t(rems(0.8))
-                            .bg(rgba(0xffffff00))
-                            .group_hover("game-card", |s| {
-                                s.bg(linear_gradient(
-                                    180.,
-                                    linear_color_stop(rgba(0xffffff16), 0.75),
-                                    linear_color_stop(rgba(0xffffff00), 1.),
-                                ))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(rems(0.5))
-                            .left(rems(0.5))
+                            .size(rems(1.9))
+                            .rounded_full()
                             .flex()
                             .items_center()
-                            .gap(rems(0.3))
-                            .child(
-                                div()
-                                    .size(rems(1.9))
-                                    .rounded_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(rgba(0x101010b3))
-                                    .child(icon(STORES[g.store])),
-                            )
-                            .when_some(compatibility_icon, |d, (badge, reason)| {
-                                d.child(
-                                    div()
-                                        .id(("linux-compatibility", i))
-                                        .size(rems(1.9))
-                                        .rounded_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .bg(rgba(0x101010b3))
-                                        .child(badge.icon().size(rems(1.4)))
-                                        .tooltip(move |_, cx| {
-                                            cx.new(|_| crate::library::ActionTooltip(reason.into()))
-                                                .into()
-                                        }),
-                                )
-                            }),
+                            .justify_center()
+                            .bg(rgba(0x101010b3))
+                            .child(icon(STORES[g.store])),
                     )
-                    .when(!duplicate_systems.is_empty(), |d| {
+                    .when_some(compatibility_icon, |d, (badge, reason)| {
                         d.child(
                             div()
-                                .absolute()
-                                .top(rems(0.5))
-                                .right(rems(0.5))
-                                .h(rems(1.9))
-                                .px(rems(0.5))
-                                .gap(rems(0.4))
+                                .id(("linux-compatibility", i))
+                                .size(rems(1.9))
                                 .rounded_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(rgb(0xbc303d))
-                                .child(icon("warning").size(rems(1.1)).text_color(rgb(0xffffff)))
-                                .children(duplicate_systems.into_iter().map(|os| {
-                                    system_icon(if os == Os::Linux { "linux" } else { "windows" })
-                                        .size(rems(1.3))
-                                })),
-                        )
-                    })
-                    .when_some(
-                        xbox_status.filter(|_| !installed_here && (console_only || unsupported)),
-                        |d, status| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .id(("xbox-platform", i))
-                                            .size(rems(2.5))
-                                            .rounded_full()
-                                            .bg(rgba(0x101010b3))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                icon(if console_only {
-                                                    "joystick"
-                                                } else {
-                                                    "windows"
-                                                })
-                                                .size(rems(1.8)),
-                                            )
-                                            .tooltip(move |_, cx| {
-                                                cx.new(|_| {
-                                                    crate::library::ActionTooltip(
-                                                        status.label.into(),
-                                                    )
-                                                })
-                                                .into()
-                                            }),
-                                    ),
-                            )
-                        },
-                    )
-                    .when_some(
-                        (installed == 2
-                            && !(installable && g.source.client == "Ferestre")
-                            && !unsupported)
-                            .then(|| g.other_installed_os(self.host))
-                            .flatten(),
-                        |d, os| {
-                            let (icon, hint) = if os == Os::Linux {
-                                ("linux", "Installed on Linux")
-                            } else {
-                                ("windows", "Installed on Windows")
-                            };
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .id(("foreign-install", i))
-                                            .flex()
-                                            .child(system_icon(icon).size(rems(1.8)))
-                                            .tooltip(move |_, cx| {
-                                                cx.new(|_| {
-                                                    crate::library::ActionTooltip(hint.into())
-                                                })
-                                                .into()
-                                            }),
-                                    ),
-                            )
-                        },
-                    )
-                    .when(!has_cover, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .bottom(rems(
-                                    if playable
-                                        || installable
-                                        || working.is_some()
-                                        || play_button.is_some()
-                                    {
-                                        4.4
-                                    } else {
-                                        2.8
-                                    },
-                                ))
-                                .left(rems(0.85))
-                                .right(rems(0.75))
-                                .text_size(rems(1.2))
-                                .line_height(rems(1.5))
-                                .text_center()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xf2f8f3))
-                                .child(title.clone()),
-                        )
-                    })
-                    .when(installed_here, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .bottom(px(self.zoom * 1.1
-                                    + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
-                                .left(rems(0.8))
-                                .size(rems(0.3))
-                                .rounded_full()
-                                .bg(rgb(0x9ff4bc)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom(px(
-                                self.zoom * 0.55 + width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP
-                            ))
-                            .right(rems(0.55))
-                            .flex()
-                            .items_center()
-                            .gap(rems(0.4))
-                            .when(can_uninstall, |d| {
-                                d.child(
-                                    button_shell(("uninstall", i), false)
-                                        .child(icon("trash").text_color(rgb(0xf0f0f0)))
-                                        .bg(rgba(0x101010b8))
-                                        .hover(|s| s.bg(rgba(0x303030e6)))
-                                        .tooltip(|_, cx| {
-                                            cx.new(|_| {
-                                                crate::library::ActionTooltip("Uninstall".into())
-                                            })
-                                            .into()
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.action(uninstall_key.to_string(), "uninstall", cx);
-                                        })),
-                                )
-                            })
-                            .when(modded && working.is_none() && play_button.is_none(), |d| {
-                                d.child(
-                                    button_shell(("launch-modded", i), false)
-                                        .child(icon("mods").text_color(rgb(0xf0f0f0)))
-                                        .bg(rgba(0x101010b8))
-                                        .hover(|s| s.bg(rgba(0x303030e6)))
-                                        .tooltip(|_, cx| {
-                                            cx.new(|_| {
-                                                crate::library::ActionTooltip(
-                                                    "Launch modded".into(),
-                                                )
-                                            })
-                                            .into()
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.action(
-                                                modded_key.to_string(),
-                                                "launch-modded",
-                                                cx,
-                                            );
-                                        })),
-                                )
-                            })
-                            .when(
-                                playable
-                                    || installable
-                                    || working.is_some()
-                                    || play_button.is_some(),
-                                |d| {
-                                    d.child(
-                                        button_shell(
-                                            (
-                                                play_button
-                                                    .map_or("action", PlayButton::element_id),
-                                                i,
-                                            ),
-                                            false,
-                                        )
-                                        .role(Role::Button)
-                                        .aria_disabled(
-                                            play_button
-                                                .is_some_and(|button| button != PlayButton::Quit),
-                                        )
-                                        .child(if let Some(button) = play_button {
-                                            button.glyph(0x202020)
-                                        } else if let Some(progress) = working {
-                                            icon(downloads::button_icon(progress))
-                                                .text_color(rgb(0x202020))
-                                                .into_any_element()
-                                        } else {
-                                            icon(if playable { "play" } else { "install" })
-                                                .text_color(rgb(0x202020))
-                                                .into_any_element()
-                                        })
-                                        .when_some(
-                                            play_button
-                                                .filter(|button| *button != PlayButton::Quit)
-                                                .map(|button| button.label().to_owned())
-                                                .or_else(|| working.map(downloads::button_label))
-                                                .filter(|s| !s.is_empty()),
-                                            |d, label| {
-                                                d.w_auto()
-                                                    .px(rems(0.7))
-                                                    .gap(rems(0.35))
-                                                    .child(label)
-                                            },
-                                        )
-                                        .text_color(rgb(0x202020))
-                                        .text_size(rems(CARD_TITLE_FONT_SIZE))
-                                        .bg(rgba(0xdcece4f2))
-                                        .hover(|s| s.bg(rgba(0xf0f8f3ff)))
-                                        .when_some(action_tip, |d, tip| {
-                                            d.aria_label(tip.clone()).tooltip(move |_, cx| {
-                                                cx.new(|_| {
-                                                    crate::library::ActionTooltip(tip.clone())
-                                                })
-                                                .into()
-                                            })
-                                        })
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                match play_button {
-                                                    Some(PlayButton::Quit) => {
-                                                        this.action(key.to_string(), "quit", cx)
-                                                    }
-                                                    None if !this
-                                                        .primary_download_action(&key, cx) =>
-                                                    {
-                                                        this.action(key.to_string(), action, cx);
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }),
-                                        ),
-                                    )
-                                },
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .h(rems(CARD_TITLE_HEIGHT))
-                    .mt(px(-width * CARD_POSTER_RATIO * CARD_TITLE_OVERLAP))
-                    .w_full()
-                    .flex_none()
-                    .px(rems(0.65))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    // Keep row geometry stable as artwork loads; coverless
-                    // cards show their title once inside the placeholder.
-                    .when(has_cover, |d| {
-                        d.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .text_center()
-                                .whitespace_normal()
-                                .max_h(rems(2.9))
-                                .overflow_hidden()
-                                .line_height(rems(1.45))
-                                .text_size(rems(1.125))
-                                .text_color(if installed_here {
-                                    rgb(0xe0eae4)
-                                } else {
-                                    rgb(0xa9b5b0)
-                                })
-                                .child(title),
+                                .bg(rgba(0x101010b3))
+                                .child(badge.icon().size(rems(1.4)))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::header::Tooltip(reason.into())).into()
+                                }),
                         )
                     }),
             )
+            .when(!duplicate_systems.is_empty(), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(rems(0.5))
+                        .right(rems(0.5))
+                        .h(rems(1.9))
+                        .px(rems(0.5))
+                        .gap(rems(0.4))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(0xbc303d))
+                        .child(icon("warning").size(rems(1.1)).text_color(rgb(0xffffff)))
+                        .children(duplicate_systems.into_iter().map(|os| {
+                            system_icon(if os == Os::Linux { "linux" } else { "windows" })
+                                .size(rems(1.3))
+                        })),
+                )
+            })
+            .when_some(
+                (installed == 2)
+                    .then(|| g.foreign_install_badge(self.host))
+                    .flatten(),
+                |d, os| {
+                    let (icon, hint) = if os == Os::Linux {
+                        ("linux", "Installed on Linux")
+                    } else {
+                        ("windows", "Installed on Windows")
+                    };
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .id(("foreign-install", i))
+                                    .flex()
+                                    .child(system_icon(icon).size(rems(1.8)))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| crate::header::Tooltip(hint.into())).into()
+                                    }),
+                            ),
+                    )
+                },
+            );
+        let actions = (can_uninstall || show_modded || has_primary).then(|| {
+            div()
+                .when(can_uninstall, |d| {
+                    d.child(
+                        action_button(("uninstall", i), "trash", "Uninstall")
+                            .size(rems(header::BUTTON_WIDTH))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.action(uninstall_key.to_string(), "uninstall", cx);
+                            })),
+                    )
+                })
+                .when(show_modded, |d| {
+                    d.child(
+                        action_button(("launch-modded", i), "mods", "Launch modded")
+                            .size(rems(header::BUTTON_WIDTH))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.action(modded_key.to_string(), "launch-modded", cx);
+                            })),
+                    )
+                })
+                .when(has_primary, |d| {
+                    d.child(
+                        game_action_button(
+                            (play_button.map_or("action", PlayButton::element_id), i),
+                            play_button,
+                            working,
+                            if playable { "play" } else { "install" },
+                            action_tip,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            match play_button {
+                                Some(PlayButton::Quit) => this.action(key.to_string(), "quit", cx),
+                                None if !this.primary_download_action(&key, cx) => {
+                                    this.action(key.to_string(), action, cx);
+                                }
+                                _ => {}
+                            }
+                        })),
+                    )
+                })
+        });
+        views::ArtworkCard {
+            width,
+            ratio: CARD_POSTER_RATIO,
+            title: g.title.clone(),
+            cover: g.card_poster.clone(),
+            dimmed: !installed_here,
+            installed: installed_here,
+        }
+        .render(("poster", i), Some(badges), actions, self.zoom)
+        .id(("card", i))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            window.focus(&this.focus, cx);
+            this.open_details(&details_key, cx);
+        }))
+        .on_hover(cx.listener(move |this, entered, _, cx| this.hover(i, *entered, cx)))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.game_menu = Some((menu_key.to_string(), event.position));
+                cx.notify();
+            }),
+        )
     }
 }
 
@@ -1081,7 +837,7 @@ fn resize_border(window: &Window) -> Div {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        steam_deck::request_details(self, cx);
+        compatibility::request_details(self, cx);
         if !self.downloads_open {
             self.downloads_visible.clear();
         }
@@ -1112,13 +868,11 @@ impl Render for Launcher {
                 cx.notify();
             });
         }
-        let columns = ((viewport - self.zoom * 3.) / (self.zoom * 12.5))
-            .floor()
-            .max(2.) as usize;
-        let width = (viewport - self.zoom * (3. + 1.25 * (columns - 1) as f32)) / columns as f32;
-        let row_height = (width * CARD_POSTER_RATIO * (1. - CARD_TITLE_OVERLAP)
-            + self.zoom * (CARD_TITLE_HEIGHT + 1.15))
-            .ceil();
+        let views::CardGrid {
+            columns,
+            width,
+            row_height,
+        } = views::CardGrid::new(viewport, self.zoom, 12.5, 2, CARD_POSTER_RATIO);
         if self.details.is_none()
             && (columns != self.columns || (row_height - self.row_height).abs() > 0.01)
         {
@@ -1143,7 +897,7 @@ impl Render for Launcher {
                     .copied()
                     .collect();
                 for &i in &indices {
-                    steam_deck::request(this, i, cx);
+                    compatibility::request(this, i, cx);
                     artwork::request(this, i, cx);
                 }
                 div()
@@ -1154,7 +908,10 @@ impl Render for Launcher {
                     .px(rems(1.5))
                     .pb(rems(1.15))
                     .when(this.starting && this.games.is_empty(), |d| {
-                        d.children((0..columns).map(|_| this.skeleton(width)))
+                        d.children(
+                            (0..columns)
+                                .map(|_| views::ArtworkCard::skeleton(width, CARD_POSTER_RATIO)),
+                        )
                     })
                     .children(indices.into_iter().map(|i| this.card(i, width, cx)))
                     .into_any_element()
@@ -1163,7 +920,7 @@ impl Render for Launcher {
         })
         .size_full();
         let checking_verification =
-            self.active_verification().is_some() && self.steam_deck.checking();
+            self.active_verification().is_some() && self.compatibility.checking();
         let this = cx.weak_entity();
         let scroll_input = canvas(
             |_, _, _| (),

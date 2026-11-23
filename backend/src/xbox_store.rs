@@ -1,4 +1,8 @@
-use crate::{game_pass, model::Report, storage};
+use crate::{
+    game_pass,
+    model::{LibraryGame, Os, Report},
+    storage,
+};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -90,8 +94,8 @@ fn cached(dir: &Path) -> BTreeMap<String, Product> {
         .unwrap_or_default()
 }
 
-pub(crate) fn load(dir: &Path, report: &mut Report) {
-    apply(report, &cached(dir));
+pub(crate) fn load(dir: &Path, host: Os, games: &mut [LibraryGame]) {
+    apply(host, games, &cached(dir));
 }
 
 pub(crate) fn refresh(dir: &Path, report: &mut Report) {
@@ -153,20 +157,21 @@ pub(crate) fn refresh(dir: &Path, report: &mut Report) {
     if changed && let Err(error) = storage::write_json(&dir.join(FILE), &cache) {
         report.warnings.push(error);
     }
-    apply(report, &cache);
+    apply(report.host_os, &mut report.catalog, &cache);
 }
 
-fn apply(report: &mut Report, products: &BTreeMap<String, Product>) {
-    let linux = report.host_os == crate::model::Os::Linux;
-    for game in report
-        .catalog
-        .iter_mut()
-        .filter(|game| game.store == "xbox")
-    {
+fn apply(host: Os, games: &mut [LibraryGame], products: &BTreeMap<String, Product>) {
+    for game in games.iter_mut().filter(|game| game.store == "xbox") {
         if let Some(product) = products.get(&game.id.to_ascii_uppercase()) {
-            game.xbox_console_only = game.installations.is_empty() && product.console_only;
-            game.ferestre_unsupported_package = linux && product.ferestre_unsupported == Some(true);
-            game.ferestre_pc_package = product.pc_package;
+            if product.console_only
+                || product.pc_package
+                || product.ferestre_unsupported == Some(true)
+            {
+                game.xbox_console_only = game.installations.is_empty() && product.console_only;
+                game.ferestre_unsupported_package =
+                    host == Os::Linux && product.ferestre_unsupported == Some(true);
+                game.ferestre_pc_package = product.pc_package;
+            }
             if game.title == game.id
                 && let Some(title) = &product.title
             {
@@ -179,7 +184,7 @@ fn apply(report: &mut Report, products: &BTreeMap<String, Product>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{actions, catalog, model::Os};
+    use crate::{actions, catalog};
 
     #[test]
     fn achievement_title_id_comes_from_unambiguous_xbox_catalog_metadata() {
@@ -199,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_console_metadata_disables_an_old_install_action() {
+    fn cached_console_editions_are_excluded_from_the_desktop_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let mut report: Report = serde_json::from_value(serde_json::json!({
             "host_os": Os::host(), "games": [], "libraries": [], "volumes": [],
@@ -207,7 +212,8 @@ mod tests {
         }))
         .unwrap();
         let id = "9NRLQNVKCGWC";
-        for (store, product) in [("xbox", id), ("xbox", "9P5786PJB9RP"), ("steam", id)] {
+        let desktop_id = "9P5786PJB9RP";
+        for (store, product) in [("xbox", id), ("xbox", desktop_id), ("steam", id)] {
             let mut game = catalog::entry(store, product, product, vec![], "fixture");
             game.in_library = true;
             game.client_os.push(Os::host());
@@ -222,7 +228,15 @@ mod tests {
             });
             report.catalog.push(game);
         }
+        let mut legacy = catalog::entry("xbox", "legacy", "Console edition", vec![], "fixture");
+        legacy.xbox_console_only = true;
+        report.catalog.push(legacy);
         storage::write_json(&dir.path().join("inventory.json"), &report).unwrap();
+        storage::write_json(
+            &dir.path().join("game-pass.json"),
+            &serde_json::json!({"updated": 1, "games": [report.catalog[0].clone()]}),
+        )
+        .unwrap();
         storage::write_json(
             &dir.path().join(FILE),
             &BTreeMap::from([(
@@ -239,18 +253,20 @@ mod tests {
         )
         .unwrap();
 
-        let mut report = storage::cached(dir.path()).unwrap();
-        let console = &report.catalog[0];
-        assert_eq!(console.title, "Unrailed!");
-        assert!(console.xbox_console_only && console.install.is_none());
-        let key = console.key.clone();
-        assert!(actions::can_install(&report.catalog[1]));
-        assert!(!actions::can_install(&report.catalog[2]));
-        report.catalog[0].install = report.catalog[1].install.clone();
-        assert!(!actions::can_install(&report.catalog[0]));
+        let report = storage::cached(dir.path()).unwrap();
+        assert_eq!(report.catalog.len(), 2);
+        assert!(
+            report
+                .catalog
+                .iter()
+                .any(|game| game.store == "steam" && game.id == id)
+        );
+        assert!(report.catalog.iter().any(|game| {
+            game.store == "xbox" && game.id == desktop_id && actions::can_install(game)
+        }));
         assert_eq!(
-            actions::resolve(&report, &key, "install").unwrap_err(),
-            crate::ferestre::CONSOLE_ONLY_MESSAGE,
+            actions::resolve(&report, &format!("xbox:{id}"), "install").unwrap_err(),
+            "Game is no longer in the library",
         );
     }
 }

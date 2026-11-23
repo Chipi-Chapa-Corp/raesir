@@ -3,7 +3,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{fs, path::Path};
 
 pub const APP_ID: &str = "com.chipichapa.raesir";
-const PREVIOUS_APP_IDS: [&str; 3] = [
+pub(crate) const PREVIOUS_APP_IDS: [&str; 3] = [
     "com.chipichapa.exposedgames",
     "dev.exposedgames.launcher",
     "dev.raesir.launcher",
@@ -58,11 +58,12 @@ pub fn cached(dir: &Path) -> Option<Report> {
     if report.catalog.is_empty() {
         report.catalog = crate::catalog::from_report(&report);
     }
-    report.catalog.retain(crate::catalog::visible);
+    report.catalog.retain(crate::catalog::valid_listing);
     crate::catalog::remove_host_mount_aliases(&mut report.catalog);
     crate::adapters::hydrate_game_pass(&mut report.catalog);
-    crate::xbox_store::load(dir, &mut report);
+    crate::xbox_store::load(dir, report.host_os, &mut report.catalog);
     crate::game_pass::load(dir, &mut report);
+    report.catalog.retain(crate::catalog::visible);
     crate::catalog::hydrate_os(&mut report);
     crate::catalog::hydrate_install_actions(&mut report);
     Some(report)
@@ -147,6 +148,7 @@ pub fn scan_and_save(dir: &Path, options: &ScanOptions) -> Report {
     if let Err(e) = write_json(&dir.join("inventory.json"), &report) {
         report.warnings.push(e);
     }
+    report.catalog.retain(crate::catalog::visible);
     report
 }
 

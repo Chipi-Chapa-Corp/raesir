@@ -180,7 +180,7 @@ impl Manager {
     }
 
     pub fn vanilla_args(&self, game: &LibraryGame) -> Result<Vec<String>, String> {
-        if recipes::for_game(game).is_some() || stardew::matches(game) {
+        if recipes::for_game(game).is_some() || stardew::matches(game) || deadlock::matches(game) {
             return Ok(Vec::new());
         }
         let Some(slug) = community(game) else {
@@ -458,7 +458,7 @@ impl Manager {
                 return Err("Close the game before changing its modded launch".into());
             }
         }
-        if mode == LaunchMode::Modded {
+        if mode == LaunchMode::Modded && !deadlock::matches(game) {
             self.prepare_selected_for_launch(game)?;
         }
         if game.store == "steam" {

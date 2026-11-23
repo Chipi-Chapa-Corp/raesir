@@ -5,7 +5,7 @@ use modde_games::GameRegistration;
 use std::{collections::HashSet, io};
 
 pub(super) fn registration(game: &LibraryGame) -> Option<&'static GameRegistration> {
-    if !can_browse_nexus(game) {
+    if !can_discover_mods(game) {
         return None;
     }
     let mut matches = modde_games::all_games().iter().filter(|entry| {

@@ -89,7 +89,7 @@ pub fn fetch_cancelable(
     }
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let key = stem(game);
-    let missing = root.join(format!("{key}.lookup-v2.missing"));
+    let missing = root.join(format!("{key}.lookup-v3.missing"));
     if fs::metadata(&missing)
         .and_then(|m| m.modified())
         .ok()
@@ -190,48 +190,61 @@ pub fn fetch_cancelable(
     {
         return save(root, &key, &bytes, None);
     }
-    if game.store == "steam"
-        && let Ok(data) = json(
-            http,
-            &format!(
-                "https://store.steampowered.com/api/appdetails?appids={}",
-                catalog::encode(&game.id)
-            ),
-        )
-        && let Some(url) = data
-            .get(&game.id)
-            .and_then(|v| v.pointer("/data/header_image"))
-            .and_then(Value::as_str)
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Artwork request superseded".into());
+    }
+    let product = (game.store == "steam")
+        .then(|| crate::details::steam_product(http, &game.id).ok())
+        .flatten();
+    if let Some(url) = product
+        .as_ref()
+        .and_then(|data| data["header_image"].as_str())
         && let Ok(bytes) = image(url, cancel)
     {
         return save(root, &key, &bytes, None);
     }
-    // Exact title matches only: never give a card another edition's artwork.
-    if game.store != "steam"
-        && let Ok(data) = json(
-            http,
-            &format!(
-                "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
-                catalog::encode(&game.title)
-            ),
-        )
-        && let Some(item) = data
-            .get("items")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .find(|v| {
-                v.get("name")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| normalize(s) == normalize(&game.title))
-            })
-        && let Some(id) = item.get("id").and_then(|v| v.as_u64())
-    {
-        let url =
+
+    let parent = if game.store == "steam" {
+        crate::details::steam_parent(&game.id, product.as_ref())
+    } else if game.store != "media" {
+        crate::details::matching_steam_app(http, &game.title)
+    } else {
+        None
+    };
+    if let Some(id) = &parent {
+        let base = catalog::entry("steam", id, &game.title, Vec::new(), "steam");
+        if let Some(art) = cached(&base, root) {
+            return Ok(art);
+        }
+        let legacy =
             format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg");
-        if let Ok(bytes) = image(&url, cancel) {
+        if let Some(bytes) = steam_portrait(http, id)
+            .and_then(|url| image(&url, cancel).ok())
+            .or_else(|| image(&legacy, cancel).ok())
+        {
             return save(root, &key, &bytes, None);
         }
+    }
+    let steam_screenshot = |data: &Value| {
+        data["screenshots"].as_array()?.first()?["path_full"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let screenshot = if game.store == "steam" {
+        product.as_ref().and_then(steam_screenshot)
+    } else if game.store != "media" {
+        crate::details::store_screenshot(http, game)
+    } else {
+        None
+    };
+    let screenshot = screenshot.or_else(|| {
+        let data = crate::details::steam_product(http, parent.as_deref()?).ok()?;
+        steam_screenshot(&data)
+    });
+    if let Some(url) = screenshot
+        && let Ok(bytes) = image(&url, cancel)
+    {
+        return save(root, &key, &bytes, None);
     }
     if cancel.load(Ordering::Relaxed) {
         return Err("Artwork request superseded".into());

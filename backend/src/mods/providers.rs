@@ -2,6 +2,61 @@ use super::*;
 use serde_json::Value;
 use std::io::Read;
 
+pub(super) fn plain_text(html: &str) -> String {
+    if !html.contains('<') && html.contains('&') {
+        return scraper::Html::parse_fragment(html)
+            .root_element()
+            .text()
+            .collect::<String>()
+            .trim()
+            .to_owned();
+    }
+    crate::details::rich::parse(html, "https://example.invalid/")
+        .into_iter()
+        .filter_map(|block| match block {
+            crate::details::rich::Block::Text(text) => Some(
+                text.spans
+                    .into_iter()
+                    .map(|span| span.text)
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn html(url: &str) -> Result<String, String> {
+    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        return Err("Mod networking is disabled".into());
+    }
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    let response = http()?
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| error.to_string())?;
+    let mut html = String::new();
+    response
+        .take(LIMIT + 1)
+        .read_to_string(&mut html)
+        .map_err(|error| error.to_string())?;
+    if html.len() as u64 > LIMIT {
+        return Err("Provider response is too large".into());
+    }
+    Ok(html)
+}
+
+pub(super) fn normalized_title(title: &str) -> String {
+    title
+        .replace(['™', '®'], "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 pub(super) fn http() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .user_agent("Raesir/0.1")

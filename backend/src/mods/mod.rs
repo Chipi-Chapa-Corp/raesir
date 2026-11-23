@@ -13,15 +13,18 @@ use thunderstore_engine::{
 };
 
 mod archive;
+mod deadlock;
 mod dependencies;
 mod details;
+mod gamebanana;
 mod install;
 mod launch;
 mod modde;
+mod modworkshop;
 mod nexus;
-mod nexus_details;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod nexus_account;
+mod nexus_details;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod nexus_install;
 mod noita;
@@ -31,8 +34,9 @@ pub mod recipes;
 mod stardew;
 mod steam;
 mod updates;
+mod workshop;
 pub use launch::LaunchTask;
-pub use nexus::{NexusPage, can_browse_nexus, has_managed_nexus};
+pub use nexus::has_managed_nexus;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use nexus_install::NexusInstall;
 pub use steam::helper as steam_helper;
@@ -160,6 +164,50 @@ fn thunderstore_source() -> String {
     "Thunderstore".into()
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CatalogOrder {
+    #[default]
+    All,
+    Trending,
+    Downloads,
+}
+
+#[derive(Default)]
+pub struct CatalogPage {
+    pub packages: Vec<Package>,
+    pub next: Option<u32>,
+    pub warnings: Vec<String>,
+}
+
+pub fn can_discover_mods(game: &LibraryGame) -> bool {
+    !game.xbox_console_only
+        && !game.is_demo
+        && game.is_game != Some(false)
+        && matches!(
+            game.store.as_str(),
+            "steam" | "epic" | "xbox" | "ea" | "ubisoft" | "wargaming" | "gog"
+        )
+}
+
+pub fn local_game_folder(game: &LibraryGame) -> Option<PathBuf> {
+    game.installations
+        .iter()
+        .filter(|install| {
+            install.os == crate::model::Os::host()
+                && matches!(install.state.as_str(), "installed" | "external")
+        })
+        .map(|install| PathBuf::from(&install.path))
+        .find(|path| path.is_absolute() && path.is_dir())
+}
+
+pub fn can_install_gamebanana(game: &LibraryGame) -> bool {
+    deadlock::matches(game) && crate::catalog::local(&game.installations)
+}
+
+pub fn can_browse_mods(game: &LibraryGame) -> bool {
+    game.mods.is_some() || can_discover_mods(game)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModFile {
     pub id: u64,
@@ -202,6 +250,9 @@ pub struct Manager {
 pub fn community(game: &LibraryGame) -> Option<&'static str> {
     if game.xbox_console_only && game.store == "xbox" {
         return None;
+    }
+    if deadlock::matches(game) {
+        return Some(deadlock::DOMAIN);
     }
     if let Some(recipe) = recipes::for_game(game) {
         return Some(&recipe.id);
@@ -454,8 +505,17 @@ impl Manager {
             )
         } else if stardew::matches(game) {
             (self.stardew_profile_packages()?, Vec::new(), None)
+        } else if deadlock::matches(game) {
+            (Arc::default(), Vec::new(), None)
         } else {
-            (self.catalog(community, refresh)?.1, Vec::new(), None)
+            match self.catalog(community, refresh) {
+                Ok((_, packages)) => (packages, Vec::new(), None),
+                Err(error) => (
+                    Arc::default(),
+                    vec![format!("Thunderstore could not load: {error}")],
+                    None,
+                ),
+            }
         };
         warnings.extend(self.update_warnings(game));
         let profiles = self.profiles(community);

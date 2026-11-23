@@ -100,6 +100,9 @@ impl Manager {
     fn update_games(&self, games: &[LibraryGame]) -> BTreeMap<String, LibraryGame> {
         let mut result = BTreeMap::new();
         for game in games {
+            if deadlock::matches(game) {
+                continue;
+            }
             let Some(slug) = community(game) else {
                 continue;
             };
@@ -115,7 +118,10 @@ impl Manager {
         // catalog. Reconstruct only known games from our own profile directory.
         for entry in fs::read_dir(&self.data).into_iter().flatten().flatten() {
             let slug = entry.file_name().to_string_lossy().into_owned();
-            if result.contains_key(&slug) || !entry.file_type().is_ok_and(|k| k.is_dir()) {
+            if slug == deadlock::DOMAIN
+                || result.contains_key(&slug)
+                || !entry.file_type().is_ok_and(|k| k.is_dir())
+            {
                 continue;
             }
             let identity = recipes::by_id(&slug)

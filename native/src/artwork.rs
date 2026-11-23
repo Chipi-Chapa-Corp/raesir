@@ -14,12 +14,20 @@ use std::{
     },
 };
 
-const CARD_CACHE_VERSION: &str = "finished-card-v7-footer-256";
+const CARD_CACHE_VERSION: &str = "finished-card-v8-blurred-fill";
 const DOWNLOADS: usize = 12;
 const PREFETCH_DOWNLOADS: usize = 6;
 const MAX_DOWNLOADS: usize = 24;
 const DISK_LOADS: usize = 8;
 const HOT_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const LANDSCAPE_CARD_SIZE: (u32, u32) = (256, 144);
+
+#[derive(Clone, Copy, Hash)]
+pub(crate) enum CardShape {
+    Source,
+    Portrait,
+    Landscape,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -117,9 +125,10 @@ impl Cache {
 pub(crate) fn load_cancelable(
     backend: &Backend,
     game: &LibraryGame,
+    shape: CardShape,
     cancel: &AtomicBool,
 ) -> Result<Ready, String> {
-    let (ready, persist) = prepare(backend, game, cancel)?;
+    let (ready, persist) = prepare(backend, game, shape, cancel)?;
     if let Some(persist) = persist {
         queue_persist(persist);
     }
@@ -293,7 +302,7 @@ fn request_prioritized(
     {
         return;
     }
-    let cache_key = key(&game.source);
+    let cache_key = key(&game.source, CardShape::Source);
     if let Some(ready) = this.artwork_cache.get(&cache_key) {
         apply(this, index, ready, cx);
         return;
@@ -372,9 +381,10 @@ fn request_prioritized(
         .name("raesir-artwork".into())
         .spawn(move || {
             let result = if lane == Lane::Disk {
-                load_cached(&backend.cache, &worker_source).map(|ready| (ready, None))
+                load_cached(&backend.cache, &worker_source, CardShape::Source)
+                    .map(|ready| (ready, None))
             } else {
-                prepare(&backend, &worker_source, &worker_cancel)
+                prepare(&backend, &worker_source, CardShape::Source, &worker_cancel)
             };
             match result {
                 Ok((ready, persist)) => {
@@ -436,8 +446,15 @@ fn apply(this: &mut Launcher, index: usize, ready: Ready, cx: &mut Context<Launc
     }
     if game.title == game.source.id
         && let Some(title) = ready.title
+        && title != game.title
     {
         game.title = title;
+        let launcher = cx.weak_entity();
+        cx.defer(move |cx| {
+            launcher
+                .update(cx, |launcher, cx| launcher.refresh_title_matches(cx))
+                .ok();
+        });
     }
     if let Some(page) = &this.details {
         page.update(cx, |page, cx| {
@@ -446,9 +463,12 @@ fn apply(this: &mut Launcher, index: usize, ready: Ready, cx: &mut Context<Launc
     }
 }
 
-fn key(game: &LibraryGame) -> String {
+fn key(game: &LibraryGame, shape: CardShape) -> String {
     let mut hash = DefaultHasher::new();
     (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
+    if !matches!(shape, CardShape::Source) {
+        (shape, "fit").hash(&mut hash);
+    }
     if let Some(tag) = raesir_backend::artwork::cache_tag(game) {
         tag.hash(&mut hash);
     }
@@ -497,8 +517,8 @@ fn ready(
         title,
     }
 }
-fn load_cached(cache: &Path, game: &LibraryGame) -> Result<Ready, String> {
-    let key = key(game);
+fn load_cached(cache: &Path, game: &LibraryGame, shape: CardShape) -> Result<Ready, String> {
+    let key = key(game, shape);
     if !prepared(
         cache,
         &key,
@@ -584,12 +604,13 @@ fn queue_persist(job: Persist) {
 fn prepare(
     backend: &Backend,
     game: &LibraryGame,
+    shape: CardShape,
     cancel: &AtomicBool,
 ) -> Result<(Ready, Option<Persist>), String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("Artwork request superseded".into());
     }
-    if let Ok(ready) = load_cached(&backend.cache, game) {
+    if let Ok(ready) = load_cached(&backend.cache, game, shape) {
         return Ok((ready, None));
     }
     let art = backend.artwork_cancelable(game, cancel)?;
@@ -606,8 +627,9 @@ fn prepare(
     if cancel.load(Ordering::Relaxed) {
         return Err("Artwork request superseded".into());
     }
-    let card = card_pixels(&image.to_rgba8());
-    let (poster, card_path) = paths(&backend.cache, &key(game));
+    // Apply the fade to the visible crop so the card never clips it.
+    let card = card_pixels(&fit_card_image(&image, shape));
+    let (poster, card_path) = paths(&backend.cache, &key(game, shape));
     let ready = ready(image.clone(), card.clone(), art.title.clone());
     Ok((
         ready,
@@ -622,11 +644,63 @@ fn prepare(
 }
 #[cfg(any(test, feature = "benchmark"))]
 pub(crate) fn load(backend: &Backend, game: &LibraryGame) -> Result<Ready, String> {
-    let (ready, persist) = prepare(backend, game, &AtomicBool::new(false))?;
+    let (ready, persist) = prepare(backend, game, CardShape::Source, &AtomicBool::new(false))?;
     if let Some(persist) = persist {
         persist.write();
     }
     Ok(ready)
+}
+
+fn blurred_pixels(image: &image_codec::RgbaImage) -> image_codec::RgbaImage {
+    let tiny =
+        image_codec::imageops::resize(image, 48, 48, image_codec::imageops::FilterType::Triangle);
+    image_codec::imageops::fast_blur(&tiny, 8.)
+}
+
+pub(crate) fn blurred_render(image: &RenderImage) -> Option<Arc<RenderImage>> {
+    let size = image.size(0);
+    // RenderImage stores BGRA. Resize and blur keep channels in the same order.
+    let pixels = image_codec::RgbaImage::from_raw(
+        size.width.0 as u32,
+        size.height.0 as u32,
+        image.as_bytes(0)?.to_vec(),
+    )?;
+    let blurred = image_codec::imageops::resize(
+        &blurred_pixels(&pixels),
+        96,
+        96,
+        image_codec::imageops::FilterType::Triangle,
+    );
+    Some(Arc::new(RenderImage::new(vec![image_codec::Frame::new(
+        blurred,
+    )])))
+}
+
+fn fit_card_image(image: &image_codec::DynamicImage, shape: CardShape) -> image_codec::RgbaImage {
+    let (width, height) = match shape {
+        CardShape::Source | CardShape::Portrait => (256, 384),
+        CardShape::Landscape => LANDSCAPE_CARD_SIZE,
+    };
+    let fitted = image
+        .resize(width, height, image_codec::imageops::FilterType::Triangle)
+        .into_rgba8();
+    if fitted.dimensions() == (width, height) && fitted.pixels().all(|pixel| pixel[3] == 255) {
+        return fitted;
+    }
+    let backdrop = blurred_pixels(&image.to_rgba8());
+    let mut frame = image_codec::imageops::resize(
+        &backdrop,
+        width,
+        height,
+        image_codec::imageops::FilterType::Triangle,
+    );
+    image_codec::imageops::overlay(
+        &mut frame,
+        &fitted,
+        i64::from((width - fitted.width()) / 2),
+        i64::from((height - fitted.height()) / 2),
+    );
+    frame
 }
 
 fn card_pixels(source: &image_codec::RgbaImage) -> image_codec::RgbaImage {
@@ -688,6 +762,29 @@ mod tests {
     }
 
     #[test]
+    fn mod_cards_fit_portrait_art_without_cutting_off_the_top() {
+        let source = image_codec::DynamicImage::ImageRgba8(image_codec::RgbaImage::from_fn(
+            96, 160, |_, y| image_codec::Rgba([y as u8, 0, 0, 255]),
+        ));
+        let game = raesir_backend::catalog::entry("media", "mod", "", vec![], "fixture");
+        let original = key(&game, CardShape::Source);
+        let portrait = key(&game, CardShape::Portrait);
+        let landscape = key(&game, CardShape::Landscape);
+        assert_ne!(original, portrait);
+        assert_ne!(original, landscape);
+        assert_ne!(portrait, landscape);
+
+        for (shape, height) in [(CardShape::Portrait, 384), (CardShape::Landscape, 144)] {
+            let card = card_pixels(&fit_card_image(&source, shape));
+            assert_eq!(card.dimensions(), (256, height));
+            assert_eq!(card.get_pixel(0, 0)[3], 255);
+            assert!(card.get_pixel(128, 0)[0] < 2);
+            assert_eq!(card.get_pixel(128, 0)[3], 255);
+            assert_eq!(card.get_pixel(128, height - 1)[3], 0);
+        }
+    }
+
+    #[test]
     fn finished_card_disk_cache_preserves_faded_blur_and_loads_without_original_or_network() {
         let dir = tempfile::tempdir().unwrap();
         let mut game =
@@ -698,7 +795,8 @@ mod tests {
         let card = card_pixels(&pixels);
         assert_eq!(card.get_pixel(0, 0)[3], 255);
         assert_eq!(card.get_pixel(0, card.height() - 1)[3], 0);
-        let (poster, card_path) = paths(dir.path(), &key(&game));
+        let key = key(&game, CardShape::Source);
+        let (poster, card_path) = paths(dir.path(), &key);
         atomic_image(
             &poster,
             &image_codec::DynamicImage::ImageRgb8(
@@ -714,13 +812,13 @@ mod tests {
         )
         .unwrap();
         let modified = fs::metadata(&card_path).unwrap().modified().unwrap();
-        let cached = load_cached(dir.path(), &game).unwrap();
+        let cached = load_cached(dir.path(), &game, CardShape::Source).unwrap();
         assert_eq!(cached.card.as_bytes(0), render(card).as_bytes(0));
         assert_eq!(
             fs::metadata(card_path).unwrap().modified().unwrap(),
             modified
         );
-        assert!(prepared(dir.path(), &key(&game), false));
+        assert!(prepared(dir.path(), &key, false));
     }
 
     #[test]
@@ -731,7 +829,7 @@ mod tests {
         let mut hash = DefaultHasher::new();
         (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
         let old_key = format!("{:016x}", hash.finish());
-        let new_key = key(&game);
+        let new_key = key(&game, CardShape::Source);
         assert_ne!(old_key, new_key);
         let (poster, card) = paths(dir.path(), &new_key);
         fs::create_dir_all(poster.parent().unwrap()).unwrap();

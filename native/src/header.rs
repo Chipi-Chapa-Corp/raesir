@@ -3,6 +3,7 @@ use crate::library::CompatibilityBadge;
 use crate::{Launcher, STORE_NAMES, STORES};
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{EditableTextState, text_input};
+use std::{cell::Cell, rc::Rc};
 
 #[derive(Clone, PartialEq)]
 pub struct HeaderState {
@@ -26,7 +27,7 @@ const BAR_MARGIN: f32 = 1.1;
 const BAR_HEIGHT: f32 = 2.9;
 const PILL_PADDING: f32 = 0.25;
 const BUTTON_GAP: f32 = 0.15;
-const BUTTON_WIDTH: f32 = 2.25;
+pub(crate) const BUTTON_WIDTH: f32 = 2.25;
 const PILL_GAP: f32 = 0.6;
 const ROW_GAP: f32 = 0.5;
 const MAX_SEARCH_WIDTH: f32 = 28.;
@@ -115,6 +116,7 @@ pub struct Header {
     pub state: HeaderState,
     pub owner: WeakEntity<Launcher>,
     pub downloads_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
+    pub settings_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub search: Entity<EditableTextState>,
     pub _focus_subscriptions: [Subscription; 2],
 }
@@ -144,6 +146,16 @@ pub fn bar() -> Div {
         .flex()
         .items_start()
         .justify_between()
+}
+
+pub(crate) fn back_button(id: &'static str) -> Stateful<Div> {
+    pill()
+        .id(id)
+        .h(rems(BAR_HEIGHT))
+        .gap(rems(0.4))
+        .px(rems(0.65))
+        .cursor_pointer()
+        .child(icon("back"))
 }
 
 pub fn spinner(id: &'static str, size: f32) -> AnyElement {
@@ -187,6 +199,61 @@ fn sync_icon(syncing: bool, width: f32) -> AnyElement {
     }
 }
 
+pub(crate) fn refresh_button(
+    id: &'static str,
+    label: &'static str,
+    width: f32,
+    syncing: bool,
+) -> Stateful<Div> {
+    button_tooltip(
+        button_shell(id, syncing)
+            .w(rems(width))
+            .hover(|s| s.bg(rgba(0xffffff29)))
+            .child(sync_icon(syncing, width)),
+        label,
+    )
+}
+
+pub(crate) fn settings_button(
+    owner: WeakEntity<Launcher>,
+    width: f32,
+    open: bool,
+    bounds: Option<Rc<Cell<Bounds<Pixels>>>>,
+) -> Stateful<Div> {
+    sized_button("menu", "menu", open, width)
+        .aria_label("Settings")
+        .on_prepaint(move |paint, _, _| {
+            if let Some(bounds) = &bounds {
+                bounds.set(paint.bounds);
+            }
+        })
+        .on_click(move |_, _, cx| {
+            owner
+                .update(cx, |this, cx| {
+                    this.menu = !this.menu;
+                    cx.notify();
+                })
+                .ok();
+        })
+}
+
+pub(crate) fn window_controls(owner: WeakEntity<Launcher>, width: f32) -> Div {
+    pill()
+        .child(
+            sized_button("min", "minimize", false, width)
+                .on_click(|_, window, _| window.minimize_window()),
+        )
+        .child(
+            sized_button("max", "maximize", false, width)
+                .on_click(|_, window, _| window.zoom_window()),
+        )
+        .child(
+            sized_button("close", "close", false, width).on_click(move |_, window, cx| {
+                owner.update(cx, |this, cx| this.close(window, cx)).ok();
+            }),
+        )
+}
+
 pub fn button(id: impl Into<ElementId>, name: &'static str, selected: bool) -> Stateful<Div> {
     sized_button(id, name, selected, BUTTON_WIDTH)
 }
@@ -208,27 +275,52 @@ pub fn action_button(
     name: &'static str,
     label: &'static str,
 ) -> Stateful<Div> {
-    button_shell(id, false)
-        .size(rems(2.6))
-        .bg(rgba(0x101010b8))
-        .hover(|s| s.bg(rgba(0x303030b3)))
-        .child(icon(name).text_color(rgb(0xf0f0f0)))
-        .tooltip_show_delay(millis(400))
-        .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
+    button_tooltip(
+        item_action(id, false)
+            .size(rems(2.6))
+            .child(icon(name).text_color(rgb(0xf0f0f0))),
+        label,
+    )
 }
 
-struct FilterTooltip(&'static str);
+pub(crate) fn item_action(id: impl Into<ElementId>, primary: bool) -> Stateful<Div> {
+    button_shell(id, false)
+        .role(Role::Button)
+        .when(primary, |d| {
+            d.text_color(rgb(0x202020))
+                .text_size(rems(crate::CARD_TITLE_FONT_SIZE))
+                .bg(rgba(0xdcece4f2))
+                .hover(|s| s.bg(rgba(0xf0f8f3ff)))
+        })
+        .when(!primary, |d| {
+            d.text_color(rgb(0xf0f0f0))
+                .bg(rgba(0x101010b8))
+                .hover(|s| s.bg(rgba(0x303030e6)))
+        })
+}
 
-impl Render for FilterTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+pub(crate) struct Tooltip(pub String);
+
+impl Render for Tooltip {
+    fn render(
+        &mut self,
+        window: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        let rem = window.rem_size();
+        let max_width = (rem * 26.)
+            .min(window.viewport_size().width - rem)
+            .max(Pixels::ZERO);
         pill()
+            .block()
+            .rounded(rems(0.8))
             .px(rems(0.85))
-            .py(rems(0.45))
-            .bg(rgba(0x101010e6))
-            .text_size(rems(1.125))
-            .whitespace_nowrap()
-            .shadow_sm()
-            .child(self.0)
+            .py(rems(0.55))
+            .max_w(max_width)
+            .whitespace_normal()
+            .text_size(rems(crate::CARD_TITLE_FONT_SIZE))
+            .line_height(rems(1.45))
+            .child(div().min_w_0().child(self.0.clone()))
     }
 }
 
@@ -238,14 +330,15 @@ pub(crate) fn filter_button(
     selected: bool,
     label: &'static str,
 ) -> Stateful<Div> {
-    filter_tooltip(button(id, name, selected), label)
+    button_tooltip(button(id, name, selected), label)
 }
 
-fn filter_tooltip(button: Stateful<Div>, label: &'static str) -> Stateful<Div> {
+pub(crate) fn button_tooltip(button: Stateful<Div>, label: impl Into<String>) -> Stateful<Div> {
+    let label = label.into();
     button
-        .aria_label(label)
+        .aria_label(label.clone())
         .tooltip_show_delay(millis(400))
-        .tooltip(move |_, cx| cx.new(|_| FilterTooltip(label)).into())
+        .tooltip(move |_, cx| cx.new(|_| Tooltip(label.clone())).into())
 }
 
 pub fn button_shell(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
@@ -282,7 +375,7 @@ impl Header {
 
 impl Header {
     fn stores(&self, width: f32) -> Div {
-        let all = filter_tooltip(
+        let all = button_tooltip(
             sized_button("all-stores", "all", self.state.store.is_none(), width),
             "All platforms",
         )
@@ -293,7 +386,7 @@ impl Header {
         pill()
             .child(all)
             .children(STORES.iter().enumerate().map(|(i, name)| {
-                filter_tooltip(
+                button_tooltip(
                     sized_button(("store", i), name, self.state.store == Some(i), width),
                     STORE_NAMES[i],
                 )
@@ -366,7 +459,7 @@ impl Header {
                 })),
             )
             .children(CompatibilityBadge::ALL.into_iter().map(|badge| {
-                filter_tooltip(
+                button_tooltip(
                     button_shell(badge.key(), self.state.verification == Some(badge))
                         .hover(|s| s.bg(rgba(0xffffff29)))
                         .child(badge.icon()),
@@ -398,50 +491,77 @@ impl Header {
             }),
         )
     }
+}
 
-    fn search(&self, layout: &HeaderLayout, window: &Window, cx: &App) -> Stateful<Div> {
-        let search_focus = self.search.focus_handle(cx);
-        let search_active = search_focus.is_focused(window);
-        pill()
-            .id("search-pill")
-            .flex_1()
-            .min_w_0()
-            .max_w(rems(MAX_SEARCH_WIDTH))
-            .h(rems(BAR_HEIGHT))
-            .px(rems(0.8))
-            .gap(rems(0.65))
-            .when(layout.search_width < 9., |d| {
-                d.px(rems(0.5)).gap(rems(0.45))
-            })
-            .when(search_active, |d| d.bg(rgba(0x242424b3)))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.focus(&search_focus, cx);
-            })
-            .child(icon("search"))
-            .child(
-                text_input("search-games")
-                    .state(self.search.downgrade())
-                    .placeholder(if layout.search_width < 12. {
-                        "Search"
-                    } else {
-                        "Search games"
-                    })
-                    .placeholder_color(rgb(0xacbdb5))
-                    .caret_color(rgb_to_hsla(rgb(0xf0f8f3)))
-                    .selection_color(rgb_to_hsla(rgba(0xffffff40)))
-                    .caret_blink_interval_500ms()
-                    .flex_1()
-                    .min_w_0()
-                    .whitespace_nowrap()
-                    .overflow_x_scroll()
-                    .text_size(rems(1.125))
-                    .line_height(rems(1.6))
-                    .text_color(rgb(0xf0f8f3))
-                    .px(rems(0.3))
-                    .py(rems(0.25))
-                    .rounded_full(),
-            )
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchSize {
+    Compact,
+    Short,
+    Full,
+}
+
+impl SearchSize {
+    pub fn for_width(width: f32) -> Self {
+        if width < 9. {
+            Self::Compact
+        } else if width < 12. {
+            Self::Short
+        } else {
+            Self::Full
+        }
     }
+}
+
+pub(crate) fn search_field(
+    id: &'static str,
+    input_id: &'static str,
+    search: &Entity<EditableTextState>,
+    size: SearchSize,
+    placeholder: &'static str,
+    window: &Window,
+    cx: &App,
+) -> Stateful<Div> {
+    let search_focus = search.focus_handle(cx);
+    let search_active = search_focus.is_focused(window);
+    pill()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .max_w(rems(MAX_SEARCH_WIDTH))
+        .h(rems(BAR_HEIGHT))
+        .px(rems(0.8))
+        .gap(rems(0.65))
+        .when(size == SearchSize::Compact, |d| {
+            d.px(rems(0.5)).gap(rems(0.45))
+        })
+        .when(search_active, |d| d.bg(rgba(0x242424b3)))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.focus(&search_focus, cx);
+        })
+        .child(icon("search"))
+        .child(
+            text_input(input_id)
+                .state(search.downgrade())
+                .placeholder(if size != SearchSize::Full {
+                    "Search"
+                } else {
+                    placeholder
+                })
+                .placeholder_color(rgb(0xacbdb5))
+                .caret_color(rgb_to_hsla(rgb(0xf0f8f3)))
+                .selection_color(rgb_to_hsla(rgba(0xffffff40)))
+                .caret_blink_interval_500ms()
+                .flex_1()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_x_scroll()
+                .text_size(rems(1.125))
+                .line_height(rems(1.6))
+                .text_color(rgb(0xf0f8f3))
+                .px(rems(0.3))
+                .py(rems(0.25))
+                .rounded_full(),
+        )
 }
 
 impl Render for Header {
@@ -472,7 +592,15 @@ impl Render for Header {
                             .child(self.stores(top_button_width))
                             .when(wide, |d| d.child(self.access())),
                     )
-                    .child(self.search(&layout, window, cx))
+                    .child(search_field(
+                        "search-pill",
+                        "search-games",
+                        &self.search,
+                        SearchSize::for_width(layout.search_width),
+                        "Search games",
+                        window,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -502,57 +630,23 @@ impl Render for Header {
                             .child(
                                 pill()
                                     .child(
-                                        button_shell("sync", self.state.syncing)
-                                            .w(rems(top_button_width))
-                                            .hover(|s| s.bg(rgba(0xffffff29)))
-                                            .child(sync_icon(self.state.syncing, top_button_width))
-                                            .on_click(
-                                                self.listener(|this, _, _, cx| this.sync(cx)),
-                                            ),
-                                    )
-                                    .child(
-                                        sized_button(
-                                            "menu",
-                                            "menu",
-                                            self.state.menu,
+                                        refresh_button(
+                                            "sync",
+                                            "Refresh games",
                                             top_button_width,
+                                            self.state.syncing,
                                         )
-                                        .on_click(
-                                            self.listener(|this, _, _, cx| {
-                                                this.menu = !this.menu;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    ),
+                                        .on_click(self.listener(|this, _, _, cx| this.sync(cx))),
+                                    )
+                                    .child(settings_button(
+                                        self.owner.clone(),
+                                        top_button_width,
+                                        self.state.menu,
+                                        Some(self.settings_bounds.clone()),
+                                    )),
                             )
                             .when(show_controls, |d| {
-                                d.child(
-                                    pill()
-                                        .child(
-                                            sized_button(
-                                                "min",
-                                                "minimize",
-                                                false,
-                                                top_button_width,
-                                            )
-                                            .on_click(|_, window, _| window.minimize_window()),
-                                        )
-                                        .child(
-                                            sized_button(
-                                                "max",
-                                                "maximize",
-                                                false,
-                                                top_button_width,
-                                            )
-                                            .on_click(|_, window, _| window.zoom_window()),
-                                        )
-                                        .child(
-                                            sized_button("close", "close", false, top_button_width)
-                                                .on_click(self.listener(|this, _, window, cx| {
-                                                    this.close(window, cx)
-                                                })),
-                                        ),
-                                )
+                                d.child(window_controls(self.owner.clone(), top_button_width))
                             }),
                     ),
             )

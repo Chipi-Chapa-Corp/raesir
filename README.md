@@ -18,6 +18,11 @@ Raesir brings Steam, Epic Games, EA, Ubisoft Connect, Xbox, and Wargaming games 
 
 Keep your game clients installed and signed in. Raesir uses their existing libraries and launch tools.
 
+On Linux, Steam cards show the overall tier from [ProtonDB](https://www.protondb.com/)
+community reports. Hover over the badge to see the tier. Raesir caches these
+ratings for offline use. ProtonDB publishes its reports under the [Open Database
+License](https://github.com/bdefore/protondb-data).
+
 The selector beside the launcher filters switches between All, Purchased (the default),
 and Game Pass. Game Pass includes Microsoft's full PC catalog across Game Pass tiers for the US market,
 including uninstalled games, and is cached for offline browsing. Refresh updates the
@@ -117,16 +122,25 @@ the budget can temporarily be exceeded. Preview maintenance with
 
 ## Mods
 
-Open **Nexus Mods** from a PC game's details page to search its public Nexus
-catalog inside Raesir. **All mods** is the default view. Use the **Trending**
-filter for Nexus's trending list. More results load as you scroll.
-Selecting a mod opens its description in Raesir. The store button on that
-description opens the Nexus website.
+Open **Mods** from a PC game's details page to browse and search the available
+catalogs together. Results include their source. Raesir checks Nexus Mods,
+GameBanana, ModWorkshop, Steam Workshop for Steam games, and Thunderstore where
+its registry lists the game. Open a card for details and a link to the source.
+
+For **Deadlock**, Raesir installs supported GameBanana VPK packages into the
+selected profile. Use **Import VPK or archive** for local packages. **Launch modded**
+loads the profile and restores the game's original configuration when Deadlock
+closes. **Dota 2** and **Counter-Strike 2**
+show public Steam Workshop listings alongside GameBanana. Source 2 mods target
+the specific game they were made for.
+
+On a mod's details page, **Open game folder** helps with author instructions
+that refer to files in the local installation.
 
 Public search and mod details work while signed out. In a registered build, **Sign in to
 Nexus Mods** opens browser approval and the banner disappears when Raesir is
 connected. **Settings** lets you disconnect the account. Builds awaiting
-registration show that status on Nexus tabs.
+registration show that status for games with Nexus installation support.
 
 Signed-in accounts can install mods where Raesir has an installer. Raesir uses
 [Modde](https://github.com/caniko/modde-rs)'s game registry to identify supported
@@ -141,12 +155,10 @@ Raesir downloads the main file when Nexus permits a direct download. If several
 files are suitable, Raesir asks which one to use. When Nexus requires a website
 download, choose **Import archive** with the downloaded file.
 
-Supported games have a **Mods** bubble on their details page. Browse a virtualized
-card grid with cached mod icons. The header switches to mod search, profile selection,
-and All / Installed / Not installed filters. Click a card to open its details inside
-Raesir and install it with its dependencies. This uses public, key-free Thunderstore APIs and
-[thunderstore-engine](https://github.com/endoze/thunderstore-engine); games match the
-upstream store identifiers rather than title guesses.
+Games with managed mod profiles have profile selection and installation filters
+in the Mods header. Thunderstore mods can be installed with their dependencies
+through [thunderstore-engine](https://github.com/endoze/thunderstore-engine), which
+matches the game by its store identifier.
 
 Noita also has ModWorkshop browsing, Nexus browser-download imports, and bundled
 recipes from [`backend/data/mod-recipes.json`](backend/data/mod-recipes.json).
@@ -154,16 +166,14 @@ Entangled Worlds is the first recipe. It downloads the mod and the native proxy
 from the same public GitHub release; arbitrary GitHub URLs are not accepted.
 The **Install Mod** card imports an archive downloaded from a Noita Nexus page.
 
-On Steam, open **Nexus Mods** to install Stardew Valley mods through Modde.
+On Steam, Stardew Valley Nexus mods can be installed through Modde from **Mods**.
 Set up [SMAPI](https://smapi.io/) to load them. Existing Raesir SMAPI profiles
 are still accessible from **Mods**. On native Steam, **Launch modded** can
-continue using those profiles. On Xbox PC, the Nexus tab supports browsing
+continue using those profiles. On Xbox PC, the Mods view supports browsing
 and **Show profile mods** can reveal files from an existing profile.
 
-Installed mods are checked automatically at startup and hourly while Raesir is
-open, across all Raesir profiles, including inactive profiles and games currently
-uninstalled. Thunderstore, ModWorkshop and bundled recipes update in the
-background. ModWorkshop retains the chosen file variant; old installs with an
+Raesir checks Thunderstore, ModWorkshop, and bundled recipes for updates at
+startup and hourly while open, including inactive profiles and uninstalled games. ModWorkshop retains the chosen file variant; old installs with an
 ambiguous variant ask you to choose their file once. Nexus imports continue to
 require a browser download and re-import, and are reported as manual updates.
 
