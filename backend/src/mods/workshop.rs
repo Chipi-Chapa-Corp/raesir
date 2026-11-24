@@ -1,7 +1,6 @@
 use super::*;
 use scraper::{Html, Selector};
 use serde_json::Value;
-use std::io::Read;
 
 const SOURCE: &str = "Steam Workshop";
 
@@ -33,7 +32,7 @@ impl Manager {
             crate::catalog::encode(query)
         );
         let fetch = || {
-            if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+            if crate::http::network_disabled() {
                 return Err("Mod networking is disabled".into());
             }
             let http = providers::http()?;
@@ -60,14 +59,9 @@ impl Manager {
                         return Ok(Value::Null);
                     }
                     const LIMIT: u64 = 8 * 1024 * 1024;
-                    let mut body = String::new();
-                    response
-                        .take(LIMIT + 1)
-                        .read_to_string(&mut body)
-                        .map_err(|error| error.to_string())?;
-                    if body.len() as u64 > LIMIT {
-                        return Err("Steam Workshop response is too large".into());
-                    }
+                    let body = crate::util::read_limited_text(response, LIMIT)
+                        .map_err(|error| error.to_string())?
+                        .ok_or("Steam Workshop response is too large")?;
                     workshop_results(&body, page)
                 },
                 std::thread::sleep,
@@ -163,111 +157,6 @@ fn package(row: &Value, app: u64) -> Option<Package> {
         categories: Vec::new(),
         source: SOURCE.into(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn catalog_retries_wait_between_failures_and_stop_on_success() {
-        for (succeed_at, expected_delays) in [(1, &[][..]), (3, &[1, 2][..]), (5, &[1, 2, 3][..])] {
-            let mut attempts = 0;
-            let mut delays = Vec::new();
-            let result = retry_catalog(
-                || {
-                    attempts += 1;
-                    if attempts == succeed_at {
-                        Ok(json!("catalog"))
-                    } else {
-                        Err(format!("attempt {attempts} failed"))
-                    }
-                },
-                |delay| delays.push(delay.as_secs()),
-            );
-            assert_eq!(delays, expected_delays);
-            assert_eq!(attempts, expected_delays.len() + 1);
-            if succeed_at == 5 {
-                assert_eq!(result.unwrap_err(), "attempt 4 failed");
-            } else {
-                assert_eq!(result.unwrap(), json!("catalog"));
-            }
-        }
-    }
-
-    #[test]
-    fn decodes_public_workshop_page_and_ignores_other_apps() {
-        let queries = json!({
-            "queries": [{"state": {"data": {
-                "current_page": 2, "total_pages": 3,
-                "results": [
-                    {"consumer_appid": 730, "publishedfileid": "90", "title": "Test map"},
-                    {"consumer_appid": 570, "publishedfileid": "91", "title": "Other game"}
-                ]
-            }}}]
-        });
-        let ssr = json!({"renderContext": {"queryData": queries.to_string()}});
-        let html = format!(r#"<script type="application/json" id="valve-ssr-data">{ssr}</script>"#);
-        let page = workshop_results(&html, 2).unwrap();
-        let packages = page["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|row| package(row, 730))
-            .collect::<Vec<_>>();
-        assert_eq!(packages.len(), 1);
-        assert_eq!(
-            packages[0].page,
-            "https://steamcommunity.com/sharedfiles/filedetails/?id=90"
-        );
-        assert!(workshop_results(&html, 1).is_err());
-    }
-
-    #[test]
-    fn reads_public_workshop_details_and_preserves_original_images() {
-        let html = r#"
-            <meta property="og:image" content="https://images.steamusercontent.com/example?crop=1">
-            <a data-appid="730" href="https://store.steampowered.com/app/730/"></a>
-            <div class="workshopItemTitle">Test map</div>
-            <div class="workshopItemDescription" id="highlightContent">Map <b>description</b></div>
-            <div class="creatorsBlock"><div class="friendBlockContent">Creator<br>Offline</div></div>
-            <div class="detailsStatLeft">Posted</div><div class="detailsStatRight">Aug 12</div>
-            <div class="detailsStatLeft">Updated</div><div class="detailsStatRight">Aug 13</div>
-            <table class="stats_table">
-                <tr><td>1,234</td><td>Unique Visitors</td></tr>
-                <tr><td>42</td><td>Current Subscribers</td></tr>
-            </table>
-            <div class="highlight_strip_screenshot"><img src="https://images.steamusercontent.com/example?w=64"></div>
-            <div class="commentthread_comment">
-                <a class="commentthread_author_link">A player</a>
-                <div class="commentthread_comment_text">Nice map!</div>
-            </div>"#;
-        let page = "https://steamcommunity.com/sharedfiles/filedetails/?id=90";
-        assert!(workshop_detail_page(html, page, 570, 90).is_err());
-        let details = workshop_detail_page(html, page, 730, 90).unwrap();
-        assert_eq!(details.description, "Map description");
-        assert_eq!(details.developers, ["Creator"]);
-        assert_eq!(details.media.len(), 1);
-        assert_eq!(
-            details.media[0].url,
-            "https://images.steamusercontent.com/example"
-        );
-        let metadata = details.mod_metadata.unwrap();
-        assert_eq!(metadata.last_updated, "Aug 13");
-        assert_eq!(metadata.views, Some(1234));
-        assert_eq!(metadata.downloads, None);
-        assert_eq!(metadata.comments[0].author, "A player");
-        assert_eq!(metadata.comments[0].text, "Nice map!");
-
-        let changelog = workshop_changelog(
-            r#"<div class="changeLogCtn"><div class="changelog author"><a>Creator</a></div>
-            <p id="1711026000">Fixed a wall &amp; a door.</p></div>"#,
-        );
-        assert_eq!(changelog[0].text, "Fixed a wall & a door.");
-        assert_eq!(changelog[0].author, "Creator");
-        assert!(!changelog[0].date.is_empty());
-    }
 }
 
 impl Manager {
@@ -482,4 +371,109 @@ fn workshop_changelog(html: &str) -> Vec<crate::details::ModPost> {
         })
         .take(10)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn catalog_retries_wait_between_failures_and_stop_on_success() {
+        for (succeed_at, expected_delays) in [(1, &[][..]), (3, &[1, 2][..]), (5, &[1, 2, 3][..])] {
+            let mut attempts = 0;
+            let mut delays = Vec::new();
+            let result = retry_catalog(
+                || {
+                    attempts += 1;
+                    if attempts == succeed_at {
+                        Ok(json!("catalog"))
+                    } else {
+                        Err(format!("attempt {attempts} failed"))
+                    }
+                },
+                |delay| delays.push(delay.as_secs()),
+            );
+            assert_eq!(delays, expected_delays);
+            assert_eq!(attempts, expected_delays.len() + 1);
+            if succeed_at == 5 {
+                assert_eq!(result.unwrap_err(), "attempt 4 failed");
+            } else {
+                assert_eq!(result.unwrap(), json!("catalog"));
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_public_workshop_page_and_ignores_other_apps() {
+        let queries = json!({
+            "queries": [{"state": {"data": {
+                "current_page": 2, "total_pages": 3,
+                "results": [
+                    {"consumer_appid": 730, "publishedfileid": "90", "title": "Test map"},
+                    {"consumer_appid": 570, "publishedfileid": "91", "title": "Other game"}
+                ]
+            }}}]
+        });
+        let ssr = json!({"renderContext": {"queryData": queries.to_string()}});
+        let html = format!(r#"<script type="application/json" id="valve-ssr-data">{ssr}</script>"#);
+        let page = workshop_results(&html, 2).unwrap();
+        let packages = page["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| package(row, 730))
+            .collect::<Vec<_>>();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(
+            packages[0].page,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=90"
+        );
+        assert!(workshop_results(&html, 1).is_err());
+    }
+
+    #[test]
+    fn reads_public_workshop_details_and_preserves_original_images() {
+        let html = r#"
+            <meta property="og:image" content="https://images.steamusercontent.com/example?crop=1">
+            <a data-appid="730" href="https://store.steampowered.com/app/730/"></a>
+            <div class="workshopItemTitle">Test map</div>
+            <div class="workshopItemDescription" id="highlightContent">Map <b>description</b></div>
+            <div class="creatorsBlock"><div class="friendBlockContent">Creator<br>Offline</div></div>
+            <div class="detailsStatLeft">Posted</div><div class="detailsStatRight">Aug 12</div>
+            <div class="detailsStatLeft">Updated</div><div class="detailsStatRight">Aug 13</div>
+            <table class="stats_table">
+                <tr><td>1,234</td><td>Unique Visitors</td></tr>
+                <tr><td>42</td><td>Current Subscribers</td></tr>
+            </table>
+            <div class="highlight_strip_screenshot"><img src="https://images.steamusercontent.com/example?w=64"></div>
+            <div class="commentthread_comment">
+                <a class="commentthread_author_link">A player</a>
+                <div class="commentthread_comment_text">Nice map!</div>
+            </div>"#;
+        let page = "https://steamcommunity.com/sharedfiles/filedetails/?id=90";
+        assert!(workshop_detail_page(html, page, 570, 90).is_err());
+        let details = workshop_detail_page(html, page, 730, 90).unwrap();
+        assert_eq!(details.description, "Map description");
+        assert_eq!(details.developers, ["Creator"]);
+        assert_eq!(details.media.len(), 1);
+        assert_eq!(
+            details.media[0].url,
+            "https://images.steamusercontent.com/example"
+        );
+        let metadata = details.mod_metadata.unwrap();
+        assert_eq!(metadata.last_updated, "Aug 13");
+        assert_eq!(metadata.views, Some(1234));
+        assert_eq!(metadata.downloads, None);
+        assert_eq!(metadata.comments[0].author, "A player");
+        assert_eq!(metadata.comments[0].text, "Nice map!");
+
+        let changelog = workshop_changelog(
+            r#"<div class="changeLogCtn"><div class="changelog author"><a>Creator</a></div>
+            <p id="1711026000">Fixed a wall &amp; a door.</p></div>"#,
+        );
+        assert_eq!(changelog[0].text, "Fixed a wall & a door.");
+        assert_eq!(changelog[0].author, "Creator");
+        assert!(!changelog[0].date.is_empty());
+    }
 }

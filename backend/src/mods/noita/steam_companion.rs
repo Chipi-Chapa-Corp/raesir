@@ -136,21 +136,18 @@ fn proton(root: &Path, compat_data: &Path) -> Result<PathBuf, String> {
         // Steam's official tools need not ship compatibilitytool.vdf. Read the
         // installed appinfo's internal tool name, never guess a folder/version.
         let cache = root.join("appcache/appinfo.vdf");
-        if let Ok(file) = fs::File::open(cache) {
-            let mut bytes = Vec::new();
-            file.take(64 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
-            if bytes.len() <= 64 * 1024 * 1024 {
-                bytes.resize(bytes.len() + 68, 0);
-                if let Ok(apps) = steam_vdf_parser::parse_appinfo(&bytes)
-                    && let Some(apps) = apps.as_obj()
-                    && let Some(id) = official_tool_id(apps, &name)
-                {
-                    let path = app_dir(root, id)?;
-                    if path.join("proton").is_file() {
-                        return Ok(path);
-                    }
+        if let Ok(file) = fs::File::open(cache)
+            && let Some(mut bytes) =
+                crate::util::read_limited(file, 64 * 1024 * 1024).map_err(|e| e.to_string())?
+        {
+            bytes.resize(bytes.len() + 68, 0);
+            if let Ok(apps) = steam_vdf_parser::parse_appinfo(&bytes)
+                && let Some(apps) = apps.as_obj()
+                && let Some(id) = official_tool_id(apps, &name)
+            {
+                let path = app_dir(root, id)?;
+                if path.join("proton").is_file() {
+                    return Ok(path);
                 }
             }
         }

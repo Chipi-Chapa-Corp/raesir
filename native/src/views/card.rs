@@ -249,7 +249,7 @@ fn title_breaks(title: &str) -> String {
                     || prev.is_uppercase() && chars.peek().is_some_and(|next| next.is_lowercase())
             })
         {
-            result.push('​');
+            result.push('\u{200B}');
         }
         result.push(ch);
         previous = Some(ch);

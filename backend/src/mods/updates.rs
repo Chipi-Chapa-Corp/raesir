@@ -4,7 +4,7 @@ use super::*;
 use std::{
     collections::{BTreeMap, HashSet},
     sync::atomic::{AtomicBool, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 use thunderstore_engine::profile;
 
@@ -54,13 +54,6 @@ impl Drop for Lease {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// Metadata catches edits made by a player or another manager without a pointer
@@ -182,7 +175,7 @@ impl Manager {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
             Err(e) => return Err(e.to_string()),
         };
-        let timestamp = now();
+        let timestamp = crate::util::unix_now();
         let mut result = UpdateReport {
             checked_at: timestamp,
             ..Default::default()
@@ -446,13 +439,13 @@ impl Manager {
         }
         let mut reasons = dependencies::Reasons::read(pending)?;
         let batch =
-            profile::plan_install_batch(pending, &desired, &[]).map_err(|e| e.to_string())?;
+            profile::plan_install_batch(pending, desired, &[]).map_err(|e| e.to_string())?;
         let result = runtime()
             .block_on(profile::install_batch(
                 pending,
                 &self.cache,
                 &ECOSYSTEM,
-                &index,
+                index,
                 &self.client(slug)?,
                 slug,
                 &batch,

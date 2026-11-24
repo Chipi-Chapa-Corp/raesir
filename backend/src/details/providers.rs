@@ -31,14 +31,13 @@ pub(super) fn wargaming(
 fn parse_wargaming(html: &str, base: &str, out: &mut Details) {
     let document = Html::parse_document(html);
     parse_schema(&document, out);
-    if out.description.is_empty() {
-        if let Some(description) = document
+    if out.description.is_empty()
+        && let Some(description) = document
             .select(&selector("meta[property='og:description']"))
             .next()
             .and_then(|n| n.value().attr("content"))
-        {
-            out.set_description(description.into());
-        }
+    {
+        out.set_description(description.into());
     }
     collect_html_media(&document, base, out);
     if let Some(image) = document
@@ -165,10 +164,10 @@ fn parse_steam(data: &Value, out: &mut Details) {
             break;
         }
     }
-    if out.age_rating.is_empty() {
-        if let Some(age) = data["required_age"].as_u64().filter(|n| *n > 0) {
-            out.age_rating = format!("{age}+");
-        }
+    if out.age_rating.is_empty()
+        && let Some(age) = data["required_age"].as_u64().filter(|n| *n > 0)
+    {
+        out.age_rating = format!("{age}+");
     }
     for movie in array(data, "movies") {
         let url = [
@@ -528,22 +527,20 @@ pub(super) fn epic(client: &Client, game: &LibraryGame, out: &mut Details) -> Re
                     client,
                     "https://store.epicgames.com/graphql",
                     json!({"query":query}),
-                ) {
-                    if let Some(url) = array(&value["data"]["Media"]["getMediaRef"], "outputs")
-                        .iter()
-                        .map(|v| text(v, "url"))
-                        .find(|s| safe_url(s))
-                    {
-                        out.media.insert(
-                            0,
-                            Media {
-                                url,
-                                preview: text(&item["image"], "src"),
-                                title: text(video, "title"),
-                                video: true,
-                            },
-                        );
-                    }
+                ) && let Some(url) = array(&value["data"]["Media"]["getMediaRef"], "outputs")
+                    .iter()
+                    .map(|v| text(v, "url"))
+                    .find(|s| safe_url(s))
+                {
+                    out.media.insert(
+                        0,
+                        Media {
+                            url,
+                            preview: text(&item["image"], "src"),
+                            title: text(video, "title"),
+                            video: true,
+                        },
+                    );
                 }
             }
         }
@@ -557,12 +554,10 @@ pub(super) fn epic(client: &Client, game: &LibraryGame, out: &mut Details) -> Re
             client,
             "https://store.epicgames.com/graphql",
             json!({"query":query}),
-        ) {
-            if let Some(score) =
-                v["data"]["RatingsPolls"]["getProductResult"]["averageRating"].as_f64()
-            {
-                out.scores.push(format!("Epic players {score:.1}/5"));
-            }
+        ) && let Some(score) =
+            v["data"]["RatingsPolls"]["getProductResult"]["averageRating"].as_f64()
+        {
+            out.scores.push(format!("Epic players {score:.1}/5"));
         }
     }
     out.sources.push("Epic Games Store".into());
@@ -619,7 +614,10 @@ fn ea_product(client: &Client, game: &LibraryGame) -> Result<Value, String> {
     let bytes = response(
         client
             .post("https://store.ea.com/commerce/api/catalog/search")
-            .header("request-id", format!("raesir-details-{}", now()))
+            .header(
+                "request-id",
+                format!("raesir-details-{}", crate::util::unix_now()),
+            )
             .header("ucp-agent", "Raesir/0.1")
             .json(&body),
     )?;

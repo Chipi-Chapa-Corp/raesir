@@ -165,10 +165,7 @@ impl Progress {
         if self.phase == Phase::Available
             && let Some(scheduled) = self.scheduled_at
         {
-            let now = std::time::UNIX_EPOCH
-                .elapsed()
-                .unwrap_or_default()
-                .as_secs();
+            let now = crate::util::unix_now();
             return schedule_label(scheduled.saturating_sub(now));
         }
         match self.phase {
@@ -330,10 +327,7 @@ fn manifest_progress(app: &vdf::Value, operation: Operation) -> Progress {
         number("BytesToDownload"),
         operation,
     );
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::util::unix_now();
     let scheduled = number("ScheduledAutoUpdate");
     if progress.phase == Phase::Available && scheduled > now {
         progress.scheduled_at = Some(scheduled);

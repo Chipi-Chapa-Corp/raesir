@@ -240,8 +240,13 @@ impl Manager {
         }
         let mut state = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         Self::discover(&mut state, report);
-        let mut candidates = state.contexts.iter().filter(|context| context.owns(game, report));
-        let Some(context) = candidates.next() else { return Ok(false) };
+        let mut candidates = state
+            .contexts
+            .iter()
+            .filter(|context| context.owns(game, report));
+        let Some(context) = candidates.next() else {
+            return Ok(false);
+        };
         if candidates.next().is_some() || context.verified(port(context.client)) {
             return Ok(false);
         }
@@ -502,7 +507,7 @@ fn progress(client: Client, row: &Value, operation: Operation, paused: bool) -> 
                     }
                 }
                 3 => Phase::Paused,
-                4 | 5 | 6 => Phase::Failed,
+                4..=6 => Phase::Failed,
                 7 => Phase::Installing,
                 8 => Phase::Installing,
                 _ => return None,
@@ -531,12 +536,10 @@ fn progress(client: Client, row: &Value, operation: Operation, paused: bool) -> 
         }
     };
     let (percent, downloaded_bytes) = match (row["downloaded"].as_u64(), row["total"].as_u64()) {
-        (Some(done), Some(total)) if total > 0 && done <= total => {
-            (
-                Some(((u128::from(done) * 100) / u128::from(total)) as u8),
-                (phase == Phase::Downloading).then_some(done),
-            )
-        }
+        (Some(done), Some(total)) if total > 0 && done <= total => (
+            Some(((u128::from(done) * 100) / u128::from(total)) as u8),
+            (phase == Phase::Downloading).then_some(done),
+        ),
         _ => (None, None),
     };
     Some(Progress {
@@ -549,6 +552,40 @@ fn progress(client: Client, row: &Value, operation: Operation, paused: bool) -> 
         downloaded_bytes,
         scheduled_at: None,
     })
+}
+
+fn update_leases(report: &Report, key: &str) -> Result<Vec<std::fs::File>, String> {
+    let game = report
+        .catalog
+        .iter()
+        .find(|g| g.key == key)
+        .ok_or("This game is no longer in the library")?;
+    let mut leases = vec![];
+    for install in game
+        .installations
+        .iter()
+        .filter(|i| i.os == crate::model::Os::host() && Path::new(&i.path).is_dir())
+    {
+        let dir = Path::new(&install.path);
+        if crate::mods::download_game_running(dir) {
+            return Err("Close this game before updating it".into());
+        }
+        let path = crate::mods::download_lock_path(dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| e.to_string())?;
+        file.try_lock()
+            .map_err(|_| "This game's mods or installation are busy; update later")?;
+        leases.push(file);
+    }
+    Ok(leases)
 }
 
 #[cfg(test)]
@@ -744,38 +781,4 @@ mod tests {
         assert_eq!(adopted.snapshot()["ubisoft:42"].phase, Phase::Downloading);
         assert!(!adopted.snapshot()["ubisoft:42"].controllable);
     }
-}
-
-fn update_leases(report: &Report, key: &str) -> Result<Vec<std::fs::File>, String> {
-    let game = report
-        .catalog
-        .iter()
-        .find(|g| g.key == key)
-        .ok_or("This game is no longer in the library")?;
-    let mut leases = vec![];
-    for install in game
-        .installations
-        .iter()
-        .filter(|i| i.os == crate::model::Os::host() && Path::new(&i.path).is_dir())
-    {
-        let dir = Path::new(&install.path);
-        if crate::mods::download_game_running(dir) {
-            return Err("Close this game before updating it".into());
-        }
-        let path = crate::mods::download_lock_path(dir);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|e| e.to_string())?;
-        file.try_lock()
-            .map_err(|_| "This game's mods or installation are busy; update later")?;
-        leases.push(file);
-    }
-    Ok(leases)
 }

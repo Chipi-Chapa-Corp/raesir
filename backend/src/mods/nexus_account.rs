@@ -88,14 +88,11 @@ pub fn sign_out() -> Result<(), String> {
 }
 
 fn validate(key: &str) -> Result<Option<String>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(HANDSHAKE_TIMEOUT)
-        .user_agent(concat!("Raesir/", env!("CARGO_PKG_VERSION")))
-        .build()
+    let client = crate::http::credentials()
         .map_err(|_| "Could not prepare Nexus Mods account validation")?;
     let response = client
         .get("https://api.nexusmods.com/v1/users/validate.json")
+        .timeout(HANDSHAKE_TIMEOUT)
         .header("Application-Name", "Raesir")
         .header("Application-Version", env!("CARGO_PKG_VERSION"))
         .header("apikey", key)

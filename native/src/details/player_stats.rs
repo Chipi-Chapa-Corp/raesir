@@ -106,7 +106,7 @@ fn paint_achievement_glare(bounds: Bounds<Pixels>, progress: f32, window: &mut W
         return;
     }
     let center = (progress / 0.32) * 2.1 - 0.55;
-    let radius = f32::from(window.rem_size() * 0.6 / bounds.size.width).min(0.5);
+    let radius = (window.rem_size() * 0.6 / bounds.size.width).min(0.5);
     let mut outline = Vec::with_capacity(36);
     for (x, y, angle) in [
         (radius, radius, std::f32::consts::PI),
@@ -387,8 +387,15 @@ impl DetailsPage {
                 stats.achievements.len()
             )));
         }
-        let mut icons = div().flex().flex_1().min_w_0().h(rems(2.7))
-            .flex_wrap().items_start().gap(rems(0.4)).overflow_hidden();
+        let mut icons = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h(rems(2.7))
+            .flex_wrap()
+            .items_start()
+            .gap(rems(0.4))
+            .overflow_hidden();
         for index in stats
             .highlights()
             .into_iter()
@@ -449,7 +456,10 @@ impl DetailsPage {
         let a = a.clone();
         let image = self.images.get(&a.icon).cloned();
         div()
-            .id(SharedString::from(format!("achievement-{position}-{}", a.id)))
+            .id(SharedString::from(format!(
+                "achievement-{position}-{}",
+                a.id
+            )))
             .flex()
             .items_start()
             .min_w_0()

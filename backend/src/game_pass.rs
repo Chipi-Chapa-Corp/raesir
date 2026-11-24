@@ -6,9 +6,8 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 pub(crate) const SOURCE: &str = "game-pass:pc";
@@ -28,13 +27,6 @@ struct Catalog {
     compatibility_version: u8,
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn cached(dir: &Path) -> Option<Catalog> {
     serde_json::from_slice(&fs::read(dir.join("game-pass.json")).ok()?).ok()
 }
@@ -48,7 +40,7 @@ pub fn load(dir: &Path, report: &mut Report) {
 
 /// Refresh off the UI thread; keep the last complete catalog on failure.
 pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return Ok(false);
     }
     if !force
@@ -56,23 +48,18 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
             c.bundle_products.is_some()
                 && c.ferestre_bundles.is_some()
                 && c.compatibility_version == COMPATIBILITY_VERSION
-                && now().saturating_sub(c.updated) < 24 * 60 * 60
+                && crate::util::unix_now().saturating_sub(c.updated) < 24 * 60 * 60
         })
     {
         return Ok(false);
     }
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
-        .user_agent("Raesir/0.1")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let ids = product_ids(&json(&client, LIST)?)?;
+    let client = crate::http::client()?;
+    let ids = product_ids(&json(client, LIST)?)?;
     let mut games = Vec::with_capacity(ids.len());
     let mut bundle_products = BTreeMap::new();
     let mut unmarked_bundles = BTreeMap::new();
     for batch in ids.chunks(50) {
-        for value in products(&client, batch)? {
+        for value in products(client, batch)? {
             if let Some(game) = product(&value) {
                 let members = bundle_members(&value);
                 let mut primary = members.iter().filter(|(_, marked)| **marked);
@@ -108,7 +95,7 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
         .collect();
     let mut primary_games = Vec::new();
     for batch in primary_ids.chunks(50) {
-        primary_games.extend(products(&client, batch)?.iter().filter_map(product));
+        primary_games.extend(products(client, batch)?.iter().filter_map(product));
     }
     let products_by_id: BTreeMap<_, _> = games
         .iter()
@@ -128,7 +115,7 @@ pub fn refresh(dir: &Path, report: &mut Report, force: bool) -> Result<bool, Str
     let ferestre_bundles =
         ferestre_bundles(&games, &bundle_products, products_by_id.values().copied());
     let mut catalog = Catalog {
-        updated: now(),
+        updated: crate::util::unix_now(),
         games,
         bundle_products: Some(bundle_products),
         ferestre_bundles: Some(ferestre_bundles),
@@ -151,18 +138,15 @@ fn products(client: &Client, ids: &[String]) -> Result<Vec<Value>, String> {
 }
 
 fn json(client: &Client, url: &str) -> Result<Value, String> {
-    let mut bytes = Vec::new();
-    client
+    let response = client
         .get(url)
+        .timeout(Duration::from_secs(15))
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Game Pass catalog could not be refreshed: {e}"))?
-        .take(32 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err("Game Pass catalog response is too large".into());
-    }
+        .map_err(|e| format!("Game Pass catalog could not be refreshed: {e}"))?;
+    let bytes = crate::util::read_limited(response, 32 * 1024 * 1024)
+        .map_err(|e| e.to_string())?
+        .ok_or("Game Pass catalog response is too large")?;
     serde_json::from_slice(&bytes).map_err(|_| "Invalid Game Pass catalog response".into())
 }
 

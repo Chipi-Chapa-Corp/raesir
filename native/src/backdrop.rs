@@ -1,6 +1,6 @@
 use crate::backend::Backend;
-use raesir_backend::{details::Details, model::LibraryGame};
 use gpui::{prelude::*, *};
+use raesir_backend::{details::Details, model::LibraryGame};
 use std::{
     cell::Cell,
     fs,
@@ -215,7 +215,7 @@ fn color_mesh(image: &image_codec::DynamicImage) -> image_codec::RgbaImage {
 }
 
 fn render_image(mut image: image_codec::RgbaImage) -> Arc<RenderImage> {
-    for pixel in image.chunks_exact_mut(4) {
+    for pixel in image.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Arc::new(RenderImage::new(vec![image_codec::Frame::new(image)]))

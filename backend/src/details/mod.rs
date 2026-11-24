@@ -9,7 +9,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::LazyLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 pub mod media;
 mod providers;
@@ -221,11 +221,11 @@ impl Details {
             review.text = review_text(&review.text);
             review.title = review.title.trim().into();
             // Older caches combined hours and platform with the author/date.
-            if let Some((author, hours)) = review.author.split_once(" · ") {
-                if let Some(hours) = hours.strip_suffix(" hours").and_then(|s| s.parse().ok()) {
-                    review.hours = Some(hours);
-                    review.author = author.into();
-                }
+            if let Some((author, hours)) = review.author.split_once(" · ")
+                && let Some(hours) = hours.strip_suffix(" hours").and_then(|s| s.parse().ok())
+            {
+                review.hours = Some(hours);
+                review.author = author.into();
             }
             if let Some((date, platform)) = review.date.split_once(" · ") {
                 review.platform = platform.into();
@@ -269,7 +269,11 @@ pub fn review_cutoff(days: u32) -> String {
     if days == 0 {
         return String::new();
     }
-    display_date(&now().saturating_sub(days as u64 * 86400).to_string())
+    display_date(
+        &crate::util::unix_now()
+            .saturating_sub(days as u64 * 86400)
+            .to_string(),
+    )
 }
 
 fn review_platform(value: &str) -> String {
@@ -308,12 +312,6 @@ pub fn display_date(value: &str) -> String {
     String::new()
 }
 
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 fn path(game: &LibraryGame, root: &Path) -> PathBuf {
     let mut hash = DefaultHasher::new();
     (4, &game.key, &game.title, "en-US").hash(&mut hash);
@@ -330,7 +328,7 @@ pub fn cached(game: &LibraryGame, root: &Path) -> Option<Details> {
 }
 
 pub fn refresh_cached_review_authors(game: &LibraryGame, root: &Path) -> Option<Details> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return None;
     }
     let mut details = cached(game, root)?;
@@ -449,7 +447,7 @@ pub(crate) fn store_screenshot(client: &Client, game: &LibraryGame) -> Option<St
 }
 
 pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return Err("Game details are offline. Cached information is still available.".into());
     }
     let client = http()?;
@@ -525,7 +523,7 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
         }
     }
     details.normalize();
-    details.updated = now();
+    details.updated = crate::util::unix_now();
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     crate::storage::write_json(&path(game, root), &details)?;
     Ok(details)
@@ -535,15 +533,9 @@ fn direct_video(media: &Media) -> bool {
 }
 
 fn http() -> Result<&'static Client, String> {
-    static HTTP: LazyLock<Result<Client, String>> = LazyLock::new(|| {
-        Client::builder()
-            .user_agent("Raesir/0.1")
-            .timeout(Duration::from_secs(12))
-            .connect_timeout(Duration::from_secs(4))
-            .build()
-            .map_err(|e| e.to_string())
-    });
-    HTTP.as_ref().map_err(Clone::clone)
+    static HTTP: crate::http::Shared =
+        LazyLock::new(|| crate::http::build(Client::builder(), Duration::from_secs(12)));
+    crate::http::shared(&HTTP)
 }
 fn response(request: RequestBuilder) -> Result<Vec<u8>, String> {
     let response = request
@@ -557,15 +549,9 @@ fn response(request: RequestBuilder) -> Result<Vec<u8>, String> {
                     .unwrap_or_else(|| "connection error".into())
             )
         })?;
-    let mut bytes = Vec::new();
-    response
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err("Store response is too large".into());
-    }
-    Ok(bytes)
+    crate::util::read_limited(response, 8 * 1024 * 1024)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Store response is too large".into())
 }
 fn get_json(client: &Client, url: &str) -> Result<Value, String> {
     serde_json::from_slice(&response(client.get(url))?)

@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs::File,
-    io::Read,
     process::Stdio,
     sync::Mutex,
     thread,
@@ -40,7 +39,10 @@ fn roles_path(config: &Path) -> PathBuf {
 fn roles(config: &Path) -> Result<Option<Roles>, String> {
     let path = roles_path(config);
     if !path.try_exists().map_err(|error| {
-        format!("Could not read Xbox account settings at {} ({error})", path.display())
+        format!(
+            "Could not read Xbox account settings at {} ({error})",
+            path.display()
+        )
     })? {
         return Ok(None);
     }
@@ -49,11 +51,16 @@ fn roles(config: &Path) -> Result<Option<Roles>, String> {
     let roles: Roles = serde_json::from_str(&text).map_err(|error| {
         format!(
             "Invalid Xbox account settings at {} (line {}, column {})",
-            path.display(), error.line(), error.column(),
+            path.display(),
+            error.line(),
+            error.column(),
         )
     })?;
     if !profile_id(&roles.store) || !profile_id(&roles.player) {
-        return Err(format!("Invalid Xbox profile selection at {}", path.display()));
+        return Err(format!(
+            "Invalid Xbox profile selection at {}",
+            path.display()
+        ));
     }
     Ok(Some(roles))
 }
@@ -420,15 +427,9 @@ fn successful_output(
     }
     use std::io::{Seek, SeekFrom};
     output.seek(SeekFrom::Start(0)).map_err(|_| error)?;
-    let mut bytes = Vec::new();
-    const LIMIT: usize = 8 * 1024 * 1024;
-    output
-        .take(LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| error)?;
-    if bytes.len() > LIMIT {
-        return Err(error.into());
-    }
+    let bytes = crate::util::read_limited(output, 8 * 1024 * 1024)
+        .map_err(|_| error)?
+        .ok_or(error)?;
     String::from_utf8(bytes).map_err(|_| error.into())
 }
 

@@ -1,6 +1,5 @@
 use super::*;
 use crate::details::{Details, ModMetadata, ModPost, display_date};
-use std::io::Read;
 
 impl Manager {
     pub fn details(&self, game: &LibraryGame, id: &str) -> Result<Details, String> {
@@ -51,28 +50,19 @@ impl Manager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok());
         let readme = cached.or_else(|| {
-            if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+            if crate::http::network_disabled() {
                 return None;
             }
             let fetch = || -> Result<serde_json::Value, String> {
-                let client = reqwest::blocking::Client::builder()
-                    .user_agent("Raesir/0.1")
-                    .connect_timeout(Duration::from_secs(3))
-                    .timeout(Duration::from_secs(10))
-                    .build()
-                    .map_err(|e| e.to_string())?;
-                let mut bytes = Vec::new();
-                client
+                let response = crate::http::client()?
                     .get(&url)
+                    .timeout(Duration::from_secs(10))
                     .send()
                     .and_then(|r| r.error_for_status())
-                    .map_err(|e| e.to_string())?
-                    .take(2 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
                     .map_err(|e| e.to_string())?;
-                if bytes.len() > 2 * 1024 * 1024 {
-                    return Err("Mod description is too large".into());
-                }
+                let bytes = crate::util::read_limited(response, 2 * 1024 * 1024)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Mod description is too large")?;
                 let value: serde_json::Value =
                     serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 if !value["markdown"].is_string() {
@@ -139,7 +129,7 @@ impl Manager {
                 changelog,
                 ..Default::default()
             }),
-            updated: crate::details::now(),
+            updated: crate::util::unix_now(),
             ..Default::default()
         })
     }

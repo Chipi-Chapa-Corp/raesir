@@ -403,16 +403,14 @@ impl Backend {
                 .iter()
                 .find(|g| g.key == key)
                 .ok_or("Game is no longer in the library")?;
-            let test_args = if self.fixture.is_some()
-                && raesir_backend::mods::diagnostic_launch_enabled()
-            {
-                mod_test_args()?
-            } else {
-                Vec::new()
-            };
+            let test_args =
+                if self.fixture.is_some() && raesir_backend::mods::diagnostic_launch_enabled() {
+                    mod_test_args()?
+                } else {
+                    Vec::new()
+                };
             if kind == "launch-modded"
-                || self.fixture.is_some()
-                    && raesir_backend::mods::diagnostic_launch_enabled()
+                || self.fixture.is_some() && raesir_backend::mods::diagnostic_launch_enabled()
             {
                 let launch = if kind == "launch-modded" {
                     self.mod_manager.launch_modded(&report, game, &test_args)?
@@ -985,10 +983,9 @@ impl Backend {
                     && progress.controllable
                     && (!key.starts_with("steam:")
                         || (steam_running && progress.scheduled_at.is_none()))
+                    && let Err(error) = self.control_download_with_steam_start(&key, true, false)
                 {
-                    if let Err(error) = self.control_download_with_steam_start(&key, true, false) {
-                        errors.push(error);
-                    }
+                    errors.push(error);
                 }
             }
         }
@@ -1093,13 +1090,7 @@ impl Backend {
     pub fn auto_update_mods(
         &self,
         startup: bool,
-    ) -> Result<
-        Option<(
-            raesir_backend::mods::UpdateReport,
-            Option<Arc<Report>>,
-        )>,
-        String,
-    > {
+    ) -> Result<Option<(raesir_backend::mods::UpdateReport, Option<Arc<Report>>)>, String> {
         self.ready()?;
         if !self.mod_auto_updates_enabled() {
             return Ok(None);
@@ -1364,10 +1355,7 @@ impl Backend {
         raesir_backend::ferestre::refresh_library()
     }
 
-    pub fn cached_details(
-        &self,
-        game: &LibraryGame,
-    ) -> Option<raesir_backend::details::Details> {
+    pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_backend::details::Details> {
         raesir_backend::details::cached(game, &self.cache.join("details"))
     }
 
@@ -1402,24 +1390,13 @@ impl Backend {
             return Default::default();
         };
         if refresh {
-            raesir_backend::player_stats::refresh(
-                game,
-                &report,
-                &self.cache.join("player-stats"),
-            )
+            raesir_backend::player_stats::refresh(game, &report, &self.cache.join("player-stats"))
         } else {
-            raesir_backend::player_stats::cached(
-                game,
-                &report,
-                &self.cache.join("player-stats"),
-            )
+            raesir_backend::player_stats::cached(game, &report, &self.cache.join("player-stats"))
         }
     }
 
-    pub fn details(
-        &self,
-        game: &LibraryGame,
-    ) -> Result<raesir_backend::details::Details, String> {
+    pub fn details(&self, game: &LibraryGame) -> Result<raesir_backend::details::Details, String> {
         self.ready()?;
         if self.fixture.is_some() {
             return self
@@ -1525,7 +1502,7 @@ impl Backend {
             .map_err(|e| e.to_string())?
             .thumbnail(128, 128)
             .into_rgba8();
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         let image = Arc::new(gpui::RenderImage::new(vec![image_codec::Frame::new(
@@ -1538,10 +1515,10 @@ impl Backend {
         if let Some(existing) = icons.get(url) {
             return Ok(existing.clone());
         }
-        if icons.len() >= 512 {
-            if let Some(key) = icons.keys().next().cloned() {
-                icons.remove(&key);
-            }
+        if icons.len() >= 512
+            && let Some(key) = icons.keys().next().cloned()
+        {
+            icons.remove(&key);
         }
         icons.insert(url.to_owned(), image.clone());
         Ok(image)
@@ -1766,11 +1743,9 @@ mod tests {
         let mut backend = Arc::try_unwrap(Backend::new()).ok().unwrap();
         backend.data = dir.join("data");
         backend.cache = dir.join("cache");
-        backend.mod_manager =
-            raesir_backend::mods::Manager::new(&backend.data, &backend.cache);
+        backend.mod_manager = raesir_backend::mods::Manager::new(&backend.data, &backend.cache);
         backend.downloads = raesir_backend::downloads::Manager::new(&backend.data);
-        backend.client_downloads =
-            raesir_backend::client_downloads::Manager::new(&backend.data);
+        backend.client_downloads = raesir_backend::client_downloads::Manager::new(&backend.data);
         let path = dir.join("library.json");
         std::fs::write(
             &path,

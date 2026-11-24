@@ -13,6 +13,7 @@ pub mod epic_online;
 pub mod ferestre;
 pub mod game_pass;
 pub mod game_sessions;
+mod http;
 pub mod inventory;
 pub mod linux_support;
 pub mod model;
@@ -27,6 +28,7 @@ pub mod steam;
 pub mod steam_control;
 pub mod steam_ipc;
 pub mod storage;
+pub mod util;
 mod vdf;
 mod xbox_store;
 

@@ -1,6 +1,5 @@
 use super::*;
 use serde_json::Value;
-use std::io::Read;
 
 pub(super) fn plain_text(html: &str) -> String {
     if !html.contains('<') && html.contains('&') {
@@ -27,7 +26,7 @@ pub(super) fn plain_text(html: &str) -> String {
 }
 
 pub(super) fn html(url: &str) -> Result<String, String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return Err("Mod networking is disabled".into());
     }
     const LIMIT: u64 = 8 * 1024 * 1024;
@@ -37,15 +36,9 @@ pub(super) fn html(url: &str) -> Result<String, String> {
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| error.to_string())?;
-    let mut html = String::new();
-    response
-        .take(LIMIT + 1)
-        .read_to_string(&mut html)
-        .map_err(|error| error.to_string())?;
-    if html.len() as u64 > LIMIT {
-        return Err("Provider response is too large".into());
-    }
-    Ok(html)
+    crate::util::read_limited_text(response, LIMIT)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Provider response is too large".into())
 }
 
 pub(super) fn normalized_title(title: &str) -> String {
@@ -57,13 +50,15 @@ pub(super) fn normalized_title(title: &str) -> String {
         .to_lowercase()
 }
 
-pub(super) fn http() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent("Raesir/0.1")
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(45))
-        .build()
-        .map_err(|e| e.to_string())
+/// Catalogs and downloads may be large; metadata requests set shorter timeouts.
+pub(super) fn http() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: crate::http::Shared = std::sync::LazyLock::new(|| {
+        crate::http::build(
+            reqwest::blocking::Client::builder(),
+            Duration::from_secs(45),
+        )
+    });
+    crate::http::shared(&CLIENT)
 }
 
 impl Manager {
@@ -120,20 +115,16 @@ impl Manager {
 pub(super) fn read_json(
     request: impl FnOnce() -> Result<reqwest::blocking::RequestBuilder, String>,
 ) -> Result<Value, String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return Err("Mod networking is disabled".into());
     }
     const LIMIT: u64 = 16 * 1024 * 1024;
-    let mut data = Vec::new();
-    request()?
+    let response = request()?
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| e.to_string())?
-        .take(LIMIT + 1)
-        .read_to_end(&mut data)
         .map_err(|e| e.to_string())?;
-    if data.len() as u64 > LIMIT {
-        return Err("Provider response is too large".into());
-    }
+    let data = crate::util::read_limited(response, LIMIT)
+        .map_err(|e| e.to_string())?
+        .ok_or("Provider response is too large")?;
     serde_json::from_slice(&data).map_err(|e| e.to_string())
 }

@@ -7,8 +7,8 @@ use crate::{
     smooth_scroll::SmoothWheel,
     views::pill_button as text_button,
 };
-use raesir_backend::{details::Details, model::LibraryGame};
 use gpui::{prelude::*, *};
+use raesir_backend::{details::Details, model::LibraryGame};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -222,8 +222,6 @@ impl DetailsPage {
             .ok();
         }));
     }
-
-
 }
 
 fn header_frame() -> Div {
@@ -545,11 +543,7 @@ impl DetailsPage {
         &self.game
     }
 
-    pub(crate) fn update_compatibility(
-        &mut self,
-        launcher: &Launcher,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn update_compatibility(&mut self, launcher: &Launcher, cx: &mut Context<Self>) {
         let status = launcher
             .compatibility
             .status(&self.game, &self.game.title, launcher.host);
@@ -639,7 +633,7 @@ impl DetailsPage {
                 })
                 .await;
             let fresh = cached.as_ref().is_some_and(|v| {
-                raesir_backend::details::now().saturating_sub(v.updated) < 21600
+                raesir_backend::util::unix_now().saturating_sub(v.updated) < 21600
                     && (v.description.is_empty() || v.description_html.is_some())
                     && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft")
                         || v.store_url.is_some())
@@ -794,7 +788,7 @@ impl DetailsPage {
                     if pixels.pixels().all(|p| p[3] == 0) {
                         return Err("Empty media placeholder".into());
                     }
-                    for p in pixels.chunks_exact_mut(4) {
+                    for p in pixels.as_chunks_mut::<4>().0 {
                         p.swap(0, 2);
                     }
                     let image = Arc::new(RenderImage::new(vec![image_codec::Frame::new(pixels)]));
@@ -1107,11 +1101,7 @@ impl DetailsPage {
     }
 }
 impl DetailsPage {
-    fn game_header(
-        &mut self,
-        info: Option<&Details>,
-        cx: &mut Context<Self>,
-    ) -> HeaderArt {
+    fn game_header(&mut self, info: Option<&Details>, cx: &mut Context<Self>) -> HeaderArt {
         let action_owner = self.owner.clone();
         let store_owner = self.owner.clone();
         let library_owner = self.owner.clone();
@@ -1269,47 +1259,48 @@ impl DetailsPage {
         }
         let show_primary =
             installable || self.game.launch.is_some() || working.is_some() || play_button.is_some();
-        actions = actions.when(
-            show_primary,
-            |d| {
-                d.child(
-                    game_action_button(
-                        play_button.map_or("details-primary-action", PlayButton::element_id),
-                        play_button,
-                        working,
-                        if installable { "install" } else { "play" },
-                        Some(primary_tip),
-                    )
-                    .h(rems(3.3))
-                    .min_w(rems(3.3))
-                    .on_click(move |_, _, cx| {
-                        action_owner
-                            .update(cx, |this, cx| match play_button {
-                                Some(PlayButton::Quit) => this.action(key.clone(), "quit", cx),
-                                None if !this.primary_download_action(&key, cx) => {
-                                    this.action(key.clone(), primary_action, cx);
-                                }
-                                _ => {}
-                            })
-                            .ok();
-                    }),
+        actions = actions.when(show_primary, |d| {
+            d.child(
+                game_action_button(
+                    play_button.map_or("details-primary-action", PlayButton::element_id),
+                    play_button,
+                    working,
+                    if installable { "install" } else { "play" },
+                    Some(primary_tip),
                 )
-            },
-        );
+                .h(rems(3.3))
+                .min_w(rems(3.3))
+                .on_click(move |_, _, cx| {
+                    action_owner
+                        .update(cx, |this, cx| match play_button {
+                            Some(PlayButton::Quit) => this.action(key.clone(), "quit", cx),
+                            None if !this.primary_download_action(&key, cx) => {
+                                this.action(key.clone(), primary_action, cx);
+                            }
+                            _ => {}
+                        })
+                        .ok();
+                }),
+            )
+        });
         let game_folder = raesir_backend::mods::local_game_folder(&self.game);
         let show_folder = game_folder.is_some();
         if let Some(path) = game_folder {
             actions = actions.child(
-                action_button("details-game-folder", "document-open-symbolic", "Open game folder")
-                    .size(rems(3.3))
-                    .on_click(move |_, _, cx| {
-                        if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
-                            #[cfg(windows)]
-                            cx.open_url(&path.to_string_lossy());
-                            #[cfg(not(windows))]
-                            cx.reveal_path(&path);
-                        }
-                    }),
+                action_button(
+                    "details-game-folder",
+                    "document-open-symbolic",
+                    "Open game folder",
+                )
+                .size(rems(3.3))
+                .on_click(move |_, _, cx| {
+                    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
+                        #[cfg(windows)]
+                        cx.open_url(&path.to_string_lossy());
+                        #[cfg(not(windows))]
+                        cx.reveal_path(&path);
+                    }
+                }),
             );
         }
         if play_button.is_none()
@@ -1373,7 +1364,9 @@ impl DetailsPage {
         }
         meta = meta
             .child(title)
-            .when(show_mods || show_primary || show_folder, |d| d.child(actions))
+            .when(show_mods || show_primary || show_folder, |d| {
+                d.child(actions)
+            })
             .when_some(action_error, |d, error| {
                 d.child(
                     div()
@@ -1439,7 +1432,13 @@ impl Render for DetailsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.cleanup_registered {
             cx.on_release_in(window, |this, window, _| {
-                for image in this.images.drain().chain(this.image_blurs.drain()).map(|(_, image)| image).chain(this.poster_blur.take()) {
+                for image in this
+                    .images
+                    .drain()
+                    .chain(this.image_blurs.drain())
+                    .map(|(_, image)| image)
+                    .chain(this.poster_blur.take())
+                {
                     let _ = window.drop_image(image);
                 }
             })

@@ -1,6 +1,6 @@
 use crate::{Launcher, backend::PartitionChoice, library::Game};
-use raesir_backend::{model::Report, steam_control::Operation};
 use gpui::*;
+use raesir_backend::{model::Report, steam_control::Operation};
 use std::{collections::HashMap, sync::Arc};
 
 impl Launcher {
@@ -559,7 +559,7 @@ impl Launcher {
         }
         self.game_update_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                if this
+                if !this
                     .update(cx, |this, cx| {
                         if this.closing {
                             return false;
@@ -568,7 +568,6 @@ impl Launcher {
                         true
                     })
                     .unwrap_or(false)
-                    == false
                 {
                     break;
                 }
@@ -709,10 +708,7 @@ impl Launcher {
         self.downloads_watching = true;
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let mut last_poll = std::time::UNIX_EPOCH
-                .elapsed()
-                .unwrap_or_default()
-                .as_secs();
+            let mut last_poll = raesir_backend::util::unix_now();
             loop {
                 cx.background_executor().timer(millis(1000)).await;
                 let poll = backend.clone();
@@ -723,10 +719,7 @@ impl Launcher {
                 let complete = progress
                     .values()
                     .any(|p| p.phase == raesir_backend::steam_control::Phase::Complete);
-                let now = std::time::UNIX_EPOCH
-                    .elapsed()
-                    .unwrap_or_default()
-                    .as_secs();
+                let now = raesir_backend::util::unix_now();
                 let stop = this
                     .update(cx, |this, cx| {
                         if this.closing {
@@ -736,17 +729,18 @@ impl Launcher {
                         let previous_speed = this.download_rates.label(&this.download_operations);
                         this.download_rates
                             .record(&progress, std::time::Instant::now());
-                        if this.set_download_progress(progress, cx) {
-                            cx.notify();
-                        } else if this.downloads_open
-                            && (previous_speed
-                                != this.download_rates.label(&this.download_operations)
-                                || this.download_operations.values().any(|job| {
-                                    job.scheduled_at.is_some_and(|time| {
-                                        time.saturating_sub(last_poll).div_ceil(60)
-                                            != time.saturating_sub(now).div_ceil(60)
-                                    })
-                                }))
+                        // Progress changes always repaint; otherwise repaint only visible
+                        // speed or countdown label changes.
+                        if this.set_download_progress(progress, cx)
+                            || this.downloads_open
+                                && (previous_speed
+                                    != this.download_rates.label(&this.download_operations)
+                                    || this.download_operations.values().any(|job| {
+                                        job.scheduled_at.is_some_and(|time| {
+                                            time.saturating_sub(last_poll).div_ceil(60)
+                                                != time.saturating_sub(now).div_ceil(60)
+                                        })
+                                    }))
                         {
                             cx.notify();
                         }

@@ -4,9 +4,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::Read,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Debug)]
@@ -282,15 +280,10 @@ pub fn scan(
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let bytes = crate::util::read_limited(file, 8 * 1024 * 1024)
         .map_err(|e| e.to_string())?
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err("EA metadata is too large".into());
-    }
+        .ok_or("EA metadata is too large")?;
     let big_endian = bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(b"\0<\0?");
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(b"<\0?\0") || big_endian {
         let start = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
@@ -519,10 +512,7 @@ fn scan_sources(
     mounts: &[PathBuf],
     previous: Option<&EaReport>,
 ) -> (EaReport, Vec<String>) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::util::unix_now();
     let mut games = Vec::new();
     let mut warnings = Vec::new();
     let mut verified = BTreeSet::new();

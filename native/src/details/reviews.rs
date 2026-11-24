@@ -155,7 +155,8 @@ impl State {
 
 impl DetailsPage {
     pub(super) fn apply_review_author_names(&mut self, details: &Details) {
-        if let (Some(source), Some(target)) = (&details.steam_reviews, &mut self.review_state.pages) {
+        if let (Some(source), Some(target)) = (&details.steam_reviews, &mut self.review_state.pages)
+        {
             raesir_backend::details::reviews::copy_author_names(source, &mut target.main.reviews);
             raesir_backend::details::reviews::copy_author_names(source, &mut target.recent.reviews);
         }
@@ -300,7 +301,7 @@ impl DetailsPage {
             Ok(if days == 0 {
                 (0, 0)
             } else {
-                let end = raesir_backend::details::now().min(u32::MAX as u64) as u32;
+                let end = raesir_backend::util::unix_now().min(u32::MAX as u64) as u32;
                 (end.saturating_sub(days * 86400), end)
             })
         };
@@ -843,9 +844,11 @@ impl DetailsPage {
         let index = usize::from(recent);
         ReviewColumn {
             reviews: page.reviews.iter().collect(),
-            summary: (!recent)
-                .then(|| compact_steam_summary(&page.summary))
-                .unwrap_or_default(),
+            summary: if !recent {
+                compact_steam_summary(&page.summary)
+            } else {
+                Default::default()
+            },
             loading: self.review_state.loading[index],
             error: self.review_state.errors[index]
                 .as_deref()
@@ -913,10 +916,11 @@ impl DetailsPage {
         (
             column(
                 matching.into_iter().map(|report| &report.review).collect(),
-                state
-                    .loaded
-                    .then(|| format!("{} reviews", compact_count(state.page.total)))
-                    .unwrap_or_default(),
+                if state.loaded {
+                    format!("{} reviews", compact_count(state.page.total))
+                } else {
+                    Default::default()
+                },
             ),
             column(recent, String::new()),
         )
@@ -1209,6 +1213,20 @@ fn compact_steam_summary(summary: &str) -> String {
     }
 }
 
+fn page_is_empty(this: &DetailsPage, recent: bool) -> bool {
+    this.review_state
+        .pages
+        .as_ref()
+        .or_else(|| this.data.as_ref()?.steam_reviews.as_ref())
+        .is_none_or(|p| {
+            if recent {
+                p.recent.reviews.is_empty()
+            } else {
+                p.main.reviews.is_empty()
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::compact_steam_summary;
@@ -1229,18 +1247,4 @@ mod tests {
             "Mixed · 20 reviews"
         );
     }
-}
-
-fn page_is_empty(this: &DetailsPage, recent: bool) -> bool {
-    this.review_state
-        .pages
-        .as_ref()
-        .or_else(|| this.data.as_ref()?.steam_reviews.as_ref())
-        .is_none_or(|p| {
-            if recent {
-                p.recent.reviews.is_empty()
-            } else {
-                p.main.reviews.is_empty()
-            }
-        })
 }

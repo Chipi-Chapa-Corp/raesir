@@ -1,5 +1,6 @@
 //! Key-free replacement covers for Steam's generated portrait placeholders.
 use super::*;
+use crate::util::unix_now;
 use scraper::{Html, Selector};
 
 mod launchbox;
@@ -35,13 +36,6 @@ struct Lookup {
     revision: u8,
     retry_after: u64,
     portrait: Option<String>,
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 pub(super) fn fetch(game: &LibraryGame, root: &Path, cancel: &AtomicBool) -> Option<Artwork> {
@@ -114,7 +108,7 @@ fn fetch_using(
             title: None,
         });
     }
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return None;
     }
     fs::create_dir_all(&dir).ok()?;
@@ -123,7 +117,8 @@ fn fetch_using(
         .ok()
         .and_then(|b| serde_json::from_slice::<Lookup>(&b).ok());
     let lookup = match old.filter(|lookup| {
-        lookup.retry_after > now() && (lookup.portrait.is_some() || lookup.revision == REVISION)
+        lookup.retry_after > unix_now()
+            && (lookup.portrait.is_some() || lookup.revision == REVISION)
     }) {
         Some(lookup) => lookup,
         None => {
@@ -135,12 +130,12 @@ fn fetch_using(
                 Ok((portrait, lifetime)) => Lookup {
                     revision: REVISION,
                     portrait,
-                    retry_after: now() + lifetime,
+                    retry_after: unix_now() + lifetime,
                 },
                 Err(_) => Lookup {
                     revision: REVISION,
                     portrait: None,
-                    retry_after: now() + 3600,
+                    retry_after: unix_now() + 3600,
                 },
             };
             let _ = crate::storage::write_json(&lookup_path, &lookup);
@@ -157,7 +152,7 @@ fn fetch_using(
                     &Lookup {
                         revision: REVISION,
                         portrait: None,
-                        retry_after: now() + 3600,
+                        retry_after: unix_now() + 3600,
                     },
                 );
             }
@@ -456,7 +451,7 @@ mod tests {
             serde_json::to_vec(&Lookup {
                 revision: 0,
                 portrait: None,
-                retry_after: now() + DAY,
+                retry_after: unix_now() + DAY,
             })
             .unwrap(),
         )
@@ -505,7 +500,7 @@ mod tests {
         fs::write(
             dir.join("729720-portrait-v2.json"),
             serde_json::to_vec(&serde_json::json!({
-                "retry_after": now() + DAY, "portrait": null
+                "retry_after": unix_now() + DAY, "portrait": null
             }))
             .unwrap(),
         )

@@ -57,15 +57,14 @@ pub fn run(dir: &Path) {
     if lease.try_lock().is_err() {
         return;
     }
-    if let Err(message) = run_inner(dir) {
-        if let Some(request) = read_json(&dir.join("request.json"))
+    if let Err(message) = run_inner(dir)
+        && let Some(request) = read_json(&dir.join("request.json"))
             .and_then(|v| serde_json::from_value::<Request>(v).ok())
-        {
-            let mut progress = Progress::starting(request.operation);
-            progress.phase = Phase::Failed;
-            progress.detail = Some(message);
-            let _ = storage::write_json(&dir.join("progress.json"), &progress);
-        }
+    {
+        let mut progress = Progress::starting(request.operation);
+        progress.phase = Phase::Failed;
+        progress.detail = Some(message);
+        let _ = storage::write_json(&dir.join("progress.json"), &progress);
     }
 }
 

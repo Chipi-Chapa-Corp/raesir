@@ -127,23 +127,22 @@ fn hidden_ids(data: &[u8]) -> BTreeSet<String> {
         let Some(object) = value.as_obj() else {
             return;
         };
-        if let Some(name) = object.get("name").and_then(|v| v.as_str()) {
-            if let Some(hidden) = object.get("display").and_then(|v| v.get("hidden")) {
-                if hidden.as_str() == Some("1") || hidden.as_i32() == Some(1) {
-                    ids.insert(name.to_ascii_lowercase());
-                }
-            }
+        if let Some(name) = object.get("name").and_then(|v| v.as_str())
+            && let Some(hidden) = object.get("display").and_then(|v| v.get("hidden"))
+            && (hidden.as_str() == Some("1") || hidden.as_i32() == Some(1))
+        {
+            ids.insert(name.to_ascii_lowercase());
         }
         for (_, child) in object.iter() {
             visit(child, ids, depth + 1);
         }
     }
     let mut ids = BTreeSet::new();
-    if let Ok(schema) = steam_vdf_parser::parse_shortcuts(data) {
-        if let Some(root) = schema.as_obj() {
-            for (_, value) in root.iter() {
-                visit(value, &mut ids, 0);
-            }
+    if let Ok(schema) = steam_vdf_parser::parse_shortcuts(data)
+        && let Some(root) = schema.as_obj()
+    {
+        for (_, value) in root.iter() {
+            visit(value, &mut ids, 0);
         }
     }
     ids
@@ -218,16 +217,9 @@ pub(super) fn refresh(game: &LibraryGame, stats: &mut PlayerStats) -> bool {
     else {
         return false;
     };
-    let mut bytes = String::new();
-    if response
-        .by_ref()
-        .take(4 * 1024 * 1024 + 1)
-        .read_to_string(&mut bytes)
-        .is_err()
-        || bytes.len() > 4 * 1024 * 1024
-    {
+    let Ok(Some(bytes)) = crate::util::read_limited_text(&mut response, 4 * 1024 * 1024) else {
         return false;
-    }
+    };
     let Some(mut achievements) = parse_xml(&bytes) else {
         return false;
     };
@@ -346,7 +338,7 @@ mod tests {
         assert_eq!(stats.playtime_seconds, Some(5400));
         let saved = PlayerStats {
             account: id.into(),
-            updated: details::now(),
+            updated: crate::util::unix_now(),
             total: Some(1),
             achievements: vec![Achievement {
                 id: "biome_excavation_site".into(),

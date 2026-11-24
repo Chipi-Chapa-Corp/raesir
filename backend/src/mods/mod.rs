@@ -316,7 +316,7 @@ impl Manager {
         {
             return Ok((catalog.index.clone(), catalog.packages.clone()));
         }
-        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        if crate::http::network_disabled() {
             return Err("Mod networking is disabled in this diagnostic profile".into());
         }
         let client = self.client(community)?;
@@ -470,7 +470,7 @@ impl Manager {
             }
             .join("revisions"));
         }
-        Ok(self.profile_root(slug, &id).join("revisions"))
+        Ok(self.profile_root(slug, id).join("revisions"))
     }
 
     pub fn summary(&self, game: &LibraryGame) -> Option<Summary> {

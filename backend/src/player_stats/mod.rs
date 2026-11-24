@@ -1,7 +1,4 @@
-use crate::{
-    details,
-    model::{LibraryGame, Report},
-};
+use crate::model::{LibraryGame, Report};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -141,33 +138,21 @@ fn json(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_slice(&read(path, 8 * 1024 * 1024)?).ok()
 }
 fn read(path: &Path, limit: u64) -> Option<Vec<u8>> {
-    let mut data = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(limit + 1)
-        .read_to_end(&mut data)
-        .ok()?;
-    (data.len() as u64 <= limit).then_some(data)
+    crate::util::read_limited(fs::File::open(path).ok()?, limit).ok()?
 }
-fn client() -> Option<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .user_agent("Raesir/0.1")
-        .connect_timeout(Duration::from_secs(4))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()
+fn client() -> Option<&'static reqwest::blocking::Client> {
+    static CLIENT: crate::http::Shared = std::sync::LazyLock::new(|| {
+        crate::http::build(
+            reqwest::blocking::Client::builder(),
+            Duration::from_secs(10),
+        )
+    });
+    crate::http::shared(&CLIENT).ok()
 }
 fn response(response: reqwest::blocking::Response) -> Option<serde_json::Value> {
-    let mut data = Vec::new();
-    response
-        .error_for_status()
-        .ok()?
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_end(&mut data)
-        .ok()?;
-    (data.len() <= 8 * 1024 * 1024)
-        .then(|| serde_json::from_slice(&data).ok())
-        .flatten()
+    let data =
+        crate::util::read_limited(response.error_for_status().ok()?, 8 * 1024 * 1024).ok()??;
+    serde_json::from_slice(&data).ok()
 }
 
 fn number(value: &serde_json::Value) -> Option<f64> {
@@ -251,8 +236,8 @@ pub fn cached(game: &LibraryGame, report: &Report, root: &Path) -> PlayerStats {
 
 pub fn refresh(game: &LibraryGame, report: &Report, root: &Path) -> PlayerStats {
     let mut stats = cached(game, report, root);
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
-        || (stats.updated > 0 && details::now().saturating_sub(stats.updated) < 900)
+    if crate::http::network_disabled()
+        || (stats.updated > 0 && crate::util::unix_now().saturating_sub(stats.updated) < 900)
     {
         return stats;
     }
@@ -263,7 +248,7 @@ pub fn refresh(game: &LibraryGame, report: &Report, root: &Path) -> PlayerStats 
         _ => false,
     };
     if refreshed && !stats.account.is_empty() {
-        stats.updated = details::now();
+        stats.updated = crate::util::unix_now();
         if fs::create_dir_all(root).is_ok()
             && let Ok(mut file) = tempfile::NamedTempFile::new_in(root)
             && serde_json::to_writer(&mut file, &stats).is_ok()

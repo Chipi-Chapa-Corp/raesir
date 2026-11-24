@@ -84,7 +84,7 @@ pub fn fetch_cancelable(
     if let Some(value) = cached(game, root) {
         return Ok(value);
     }
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return Err("Artwork networking disabled for diagnostics".into());
     }
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
@@ -98,16 +98,11 @@ pub fn fetch_cancelable(
     {
         return Err("Artwork is not available yet".into());
     }
-    static HTTP: std::sync::LazyLock<Result<reqwest::blocking::Client, String>> =
-        std::sync::LazyLock::new(|| {
-            reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(7))
-                .connect_timeout(Duration::from_secs(3))
-                .user_agent("Raesir/0.1")
-                .build()
-                .map_err(|e| e.to_string())
-        });
-    let http = HTTP.as_ref().map_err(Clone::clone)?;
+    // Artwork fails fast; details helpers called below inherit this timeout.
+    static HTTP: crate::http::Shared = std::sync::LazyLock::new(|| {
+        crate::http::build(reqwest::blocking::Client::builder(), Duration::from_secs(7))
+    });
+    let http = crate::http::shared(&HTTP)?;
     let mut title = None;
     let mut candidates = game.cover.iter().cloned().collect::<Vec<_>>();
     if game.store == "ubisoft"
@@ -298,11 +293,9 @@ fn json(http: &reqwest::blocking::Client, url: &str) -> Result<Value, String> {
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|_| "Artwork metadata unavailable")?;
-    let mut bytes = Vec::new();
-    response
-        .take(4 * 1024 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Artwork metadata could not be read")?;
+    let bytes = crate::util::read_limited(response, 4 * 1024 * 1024)
+        .map_err(|_| "Artwork metadata could not be read")?
+        .ok_or("Artwork metadata is too large")?;
     serde_json::from_slice(&bytes).map_err(|_| "Artwork metadata is invalid".into())
 }
 fn thumbnail_url(url: &str) -> Result<reqwest::Url, String> {
@@ -349,7 +342,7 @@ pub fn xbox_viewer_image(
         if path.is_file() {
             return Ok(path.to_string_lossy().into());
         }
-        if !allow_download || std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        if !allow_download || crate::http::network_disabled() {
             return Err("The full-size Xbox image is not cached".into());
         }
         let bytes = validated_image(remote_image(url, &AtomicBool::new(false))?)?;
@@ -424,7 +417,7 @@ fn remote_bytes(url: reqwest::Url, cancel: &AtomicBool, limit: usize) -> Result<
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(7))
                 .connect_timeout(Duration::from_secs(3))
-                .user_agent("Raesir/0.1")
+                .user_agent(crate::http::USER_AGENT)
                 .build()
                 .map_err(|e| e.to_string())?,
         })
@@ -518,7 +511,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 2048];
-            stream.read(&mut buffer).unwrap();
+            // Any request bytes prove the client is waiting for headers.
+            let _ = stream.read(&mut buffer).unwrap();
             received.send(()).unwrap();
             let _ = wait_release.recv_timeout(Duration::from_secs(5));
         });

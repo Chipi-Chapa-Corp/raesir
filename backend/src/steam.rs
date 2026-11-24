@@ -2,21 +2,14 @@ use crate::{model::*, platform, vdf};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub fn read_text(path: &Path) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut data = String::new();
-    file.take(8 * 1024 * 1024 + 1)
-        .read_to_string(&mut data)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    if data.len() > 8 * 1024 * 1024 {
-        return Err(format!("{} is too large to scan", path.display()));
-    }
-    Ok(data)
+    crate::util::read_limited_text(file, 8 * 1024 * 1024)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .ok_or_else(|| format!("{} is too large to scan", path.display()))
 }
 
 fn path_key(path: &Path) -> String {
@@ -168,10 +161,7 @@ pub fn scan_sources(
     volumes: Vec<Volume>,
     mut warnings: Vec<String>,
 ) -> Report {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::util::unix_now();
     let mut games = BTreeMap::<u32, Game>::new();
     for game in &owned.games {
         games.insert(

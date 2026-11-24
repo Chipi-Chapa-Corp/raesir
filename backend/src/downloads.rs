@@ -142,15 +142,8 @@ pub struct Manager {
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() <= 8 * 1024 * 1024)
-        .then(|| serde_json::from_slice(&bytes).ok())
-        .flatten()
+    let bytes = crate::util::read_limited(fs::File::open(path).ok()?, 8 * 1024 * 1024).ok()??;
+    serde_json::from_slice(&bytes).ok()
 }
 
 impl Manager {

@@ -509,10 +509,7 @@ pub fn install(source: &str, path: String, os: Os, complete: bool) -> Installati
         path,
         os,
         state: state.into(),
-        last_seen: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        last_seen: crate::util::unix_now(),
     }
 }
 

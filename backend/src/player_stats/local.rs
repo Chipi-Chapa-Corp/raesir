@@ -25,14 +25,13 @@ pub(super) fn playtime(game: &LibraryGame, report: &Report) -> Option<u64> {
             if game.store != "epic" {
                 continue;
             }
-            if let Some(v) = json(&home.path.join(suffix).join("store/timestamp.json")) {
-                if let Some(minutes) = v
+            if let Some(v) = json(&home.path.join(suffix).join("store/timestamp.json"))
+                && let Some(minutes) = v
                     .get(&game.id)
                     .and_then(|v| v["totalPlayed"].as_f64())
                     .filter(|n| n.is_finite() && *n >= 0.)
-                {
-                    best = Some(best.unwrap_or(0).max((minutes * 60.) as u64));
-                }
+            {
+                best = Some(best.unwrap_or(0).max((minutes * 60.) as u64));
             }
         }
         for suffix in [
@@ -47,10 +46,9 @@ pub(super) fn playtime(game: &LibraryGame, report: &Report) -> Option<u64> {
                 path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ) {
-                if let Some(seconds) = lutris(&db, game) {
-                    best = Some(best.unwrap_or(0).max(seconds));
-                }
+            ) && let Some(seconds) = lutris(&db, game)
+            {
+                best = Some(best.unwrap_or(0).max(seconds));
             }
         }
     }
@@ -232,14 +230,14 @@ fn ea_xml(text: &str, offer: &str) -> Vec<Achievement> {
 fn ea_content_ids(value: &Value, offer: &str, ids: &mut std::collections::BTreeSet<String>) {
     match value {
         Value::Object(map) => {
-            if map.get("offerId").and_then(Value::as_str) == Some(offer) {
-                if let Some(id) = map.get("masterTitleId").and_then(|v| {
+            if map.get("offerId").and_then(Value::as_str) == Some(offer)
+                && let Some(id) = map.get("masterTitleId").and_then(|v| {
                     v.as_str()
                         .map(str::to_owned)
                         .or_else(|| v.as_u64().map(|n| n.to_string()))
-                }) {
-                    ids.insert(id);
-                }
+                })
+            {
+                ids.insert(id);
             }
             for value in map.values() {
                 ea_content_ids(value, offer, ids);

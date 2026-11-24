@@ -30,7 +30,7 @@ impl Manager {
         if path.is_file() {
             return Ok(path);
         }
-        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        if crate::http::network_disabled() {
             return Err("Mod networking is disabled".into());
         }
         let response = http()?
@@ -318,7 +318,7 @@ impl Manager {
                 vec![p.owner]
             },
             genres: p.categories,
-            updated: crate::details::now(),
+            updated: crate::util::unix_now(),
             ..Default::default()
         })
     }

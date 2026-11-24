@@ -2,24 +2,13 @@ use crate::{details, storage};
 use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    io::Read as _,
-    path::Path,
-    sync::LazyLock,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::{collections::HashMap, io::Read as _, path::Path, sync::LazyLock, time::Duration};
 
 pub mod reviews;
 
-static CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
-    Client::builder()
-        .https_only(true)
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
-        .user_agent("Raesir/0.1")
-        .build()
-        .ok()
+// Ratings are optional; store-search helpers called with this client inherit its timeout.
+static CLIENT: crate::http::Shared = LazyLock::new(|| {
+    crate::http::build(Client::builder().https_only(true), Duration::from_secs(5))
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -71,13 +60,13 @@ pub fn xbox_edition(cache: &Path, product_id: &str, title: &str) -> Option<Steam
         .and_then(|path| std::fs::read(path).ok())
         .and_then(|bytes| serde_json::from_slice::<EditionMatch>(&bytes).ok())
         .filter(|previous| previous.title == title);
-    let now = UNIX_EPOCH.elapsed().unwrap_or_default().as_secs();
+    let now = crate::util::unix_now();
     let mut result = previous.as_ref().map(|previous| previous.result);
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_none()
+    if !crate::http::network_disabled()
         && previous
             .as_ref()
             .is_none_or(|previous| now.saturating_sub(previous.checked) >= 86400)
-        && let Some(client) = CLIENT.as_ref()
+        && let Ok(client) = CLIENT.as_ref()
     {
         let query = xbox_base_title(title);
         if let Ok(response) = details::steam_store_search(client, query)
@@ -178,8 +167,8 @@ fn read_rating(path: &Path) -> Option<Rating> {
 fn load_rating(cache: &Path, app_id: u32, require_count: bool) -> Option<Rating> {
     let path = cache.join("protondb").join(format!("{app_id}.json"));
     let previous = read_rating(&path);
-    let now = UNIX_EPOCH.elapsed().unwrap_or_default().as_secs();
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
+    let now = crate::util::unix_now();
+    if crate::http::network_disabled()
         || previous.as_ref().is_some_and(|rating| {
             now.saturating_sub(rating.checked) < 86400 && (!require_count || rating.total.is_some())
         })
@@ -197,7 +186,8 @@ fn load_rating(cache: &Path, app_id: u32, require_count: bool) -> Option<Rating>
 
 fn fetch(app_id: u32, now: u64) -> Option<Rating> {
     let response = CLIENT
-        .as_ref()?
+        .as_ref()
+        .ok()?
         .get(format!(
             "https://www.protondb.com/api/v1/reports/summaries/{app_id}.json"
         ))

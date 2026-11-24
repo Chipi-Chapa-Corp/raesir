@@ -121,16 +121,9 @@ pub(super) fn cdp(port: u16, allowed: impl Fn(&str) -> bool) -> Result<Socket, S
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|_| UNAVAILABLE)?;
-    let mut bytes = Vec::new();
-    use std::io::Read;
-    response
-        .by_ref()
-        .take(LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| UNAVAILABLE)?;
-    if bytes.len() > LIMIT {
-        return Err(UNAVAILABLE.into());
-    }
+    let bytes = crate::util::read_limited(&mut response, LIMIT as u64)
+        .map_err(|_| UNAVAILABLE)?
+        .ok_or(UNAVAILABLE)?;
     let pages: Value = serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE)?;
     for page in pages.as_array().ok_or(UNAVAILABLE)? {
         if page["type"] == "page"

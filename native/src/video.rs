@@ -593,15 +593,14 @@ fn run(
                         if let Some(position) = position {
                             state.position = position.max(0.);
                         }
-                        if let Some(f) = &seeking {
-                            if f.failed
+                        if let Some(f) = &seeking
+                            && (f.failed
                                 || (ready
-                                    && position.is_some_and(|p| (p - f.change.value).abs() < 0.75))
-                            {
-                                state.seek.finish(f.change.revision);
-                                seeking = None;
-                                seek_settled = true;
-                            }
+                                    && position.is_some_and(|p| (p - f.change.value).abs() < 0.75)))
+                        {
+                            state.seek.finish(f.change.revision);
+                            seeking = None;
+                            seek_settled = true;
                         }
                     }
                     let mut volume_settled = false;
@@ -615,16 +614,15 @@ fn run(
                         if let Some(muted) = muted {
                             state.muted = muted;
                         }
-                        if let Some(f) = &volume {
-                            if f.failed
+                        if let Some(f) = &volume
+                            && (f.failed
                                 || (f.replied
                                     && value.is_some_and(|v| (v - f.change.value).abs() < 0.05)
-                                    && (f.change.value == 0. || muted == Some(false)))
-                            {
-                                state.volume_edit.finish(f.change.revision);
-                                volume = None;
-                                volume_settled = true;
-                            }
+                                    && (f.change.value == 0. || muted == Some(false))))
+                        {
+                            state.volume_edit.finish(f.change.revision);
+                            volume = None;
+                            volume_settled = true;
                         }
                     }
                     for args in commands.try_iter() {

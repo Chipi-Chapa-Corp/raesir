@@ -51,7 +51,10 @@ fn modworkshop_keeps_the_selected_variant_and_handles_old_ambiguous_imports_cons
     assert_eq!(select_file(&old, &files).unwrap()["id"], 3);
     old.source_file = None;
     assert!(select_file(&old, &files).is_err());
-    assert_eq!(select_file(&old, &[b.clone()]).unwrap()["id"], 2);
+    assert_eq!(
+        select_file(&old, std::slice::from_ref(&b)).unwrap()["id"],
+        2
+    );
     old.source_file = Some(identity(&a).unwrap());
     assert!(select_file(&old, &[b]).is_err());
 }

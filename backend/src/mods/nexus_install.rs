@@ -71,7 +71,7 @@ impl Manager {
         cancelled: impl Fn() -> bool,
     ) -> Result<NexusInstall, String> {
         install::changes_allowed()?;
-        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() || cancelled() {
+        if crate::http::network_disabled() || cancelled() {
             return Err("Nexus downloads are disabled in this session".into());
         }
         let recipe = recipes::for_game(game);
@@ -88,16 +88,12 @@ impl Manager {
         };
         let id = nexus::package_id(package)?;
         let key = nexus_account::api_key()?;
-        let api = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("Raesir/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| "Could not prepare the Nexus Mods request")?;
+        let api =
+            crate::http::credentials().map_err(|_| "Could not prepare the Nexus Mods request")?;
         let request = |suffix: &str| {
             nexus::nexus_headers(api.get(format!("{API}/games/{domain}/mods/{id}/{suffix}")))
                 .header("apikey", &key)
+                .timeout(Duration::from_secs(20))
         };
         let file = match file {
             Some(file) if file > 0 => file,

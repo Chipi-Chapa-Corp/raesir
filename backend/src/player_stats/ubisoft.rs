@@ -137,13 +137,9 @@ fn archive(path: &Path, spool: &Spool, root: &Path, id: &str) -> Option<Vec<Achi
                 let path = icons.join(format!("{id}.png"));
                 if !path.is_file()
                     && let Ok(file) = zip.by_name(&format!("{id}.png"))
+                    && let Ok(Some(bytes)) = crate::util::read_limited(file, 1024 * 1024)
                 {
-                    let mut bytes = Vec::new();
-                    if file.take(1024 * 1024 + 1).read_to_end(&mut bytes).is_ok()
-                        && bytes.len() <= 1024 * 1024
-                    {
-                        let _ = fs::write(&path, bytes);
-                    }
+                    let _ = fs::write(&path, bytes);
                 }
                 let unlocked_at = spool
                     .records

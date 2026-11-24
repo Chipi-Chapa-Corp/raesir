@@ -4,9 +4,8 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::Read,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 pub fn key(path: &Path) -> String {
@@ -283,15 +282,10 @@ pub fn scan(
 }
 
 fn json(path: &Path) -> Result<Value, String> {
-    let mut bytes = String::new();
-    fs::File::open(path)
+    let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = crate::util::read_limited_text(file, 32 * 1024 * 1024)
         .map_err(|e| format!("{}: {e}", path.display()))?
-        .take(32 * 1024 * 1024 + 1)
-        .read_to_string(&mut bytes)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err(format!("{} is too large to scan", path.display()));
-    }
+        .ok_or_else(|| format!("{} is too large to scan", path.display()))?;
     serde_json::from_str(bytes.trim_start_matches('\u{feff}')).map_err(|_| {
         format!(
             "Cannot parse Epic metadata {}. Previous records were kept.",
@@ -551,10 +545,7 @@ pub fn scan_sources(
     online: &[EpicOnlineLibrary],
     previous: Option<&EpicReport>,
 ) -> (EpicReport, Vec<String>) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::util::unix_now();
     let mut games = BTreeMap::new();
     let mut warnings = Vec::new();
     let mut verified_installs = BTreeSet::new();
@@ -949,16 +940,27 @@ mod tests {
         let (epic, warnings) = run(&[source(&manifests, "egl_manifests", Os::Windows)], None);
         assert!(warnings.is_empty(), "{warnings:?}");
         let mut report = crate::steam::scan_sources(
-            &[], &[], &[], &OwnedLibrary::default(), None, vec![], vec![],
+            &[],
+            &[],
+            &[],
+            &OwnedLibrary::default(),
+            None,
+            vec![],
+            vec![],
         );
         report.epic = epic;
         let games = crate::catalog::from_report(&report);
         let game = games.iter().find(|g| g.key == "epic:artifact").unwrap();
-        for (action, operation) in [(game.launch.as_ref(), "launch"), (game.uninstall.as_ref(), "uninstall")] {
+        for (action, operation) in [
+            (game.launch.as_ref(), "launch"),
+            (game.uninstall.as_ref(), "uninstall"),
+        ] {
             let expected = format!(
                 "com.epicgames.launcher://apps/namespace%3Acatalog%3Aartifact?action={operation}&silent=true"
             );
-            assert!(matches!(&action.unwrap().target, ActionTarget::Url { url } if url == &expected));
+            assert!(
+                matches!(&action.unwrap().target, ActionTarget::Url { url } if url == &expected)
+            );
         }
     }
 

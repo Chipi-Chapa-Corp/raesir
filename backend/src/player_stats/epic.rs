@@ -59,17 +59,15 @@ pub(super) fn refresh(game: &LibraryGame, report: &Report, stats: &mut PlayerSta
         .send()
         .ok()
         .and_then(response)
-    {
-        if let Some(time) = v
+        && let Some(time) = v
             .as_array()
             .into_iter()
             .flatten()
             .find(|a| a["artifactId"] == game.id)
             .and_then(|a| a["totalTime"].as_u64())
-        {
-            stats.playtime_seconds = Some(time);
-            success = true;
-        }
+    {
+        stats.playtime_seconds = Some(time);
+        success = true;
     }
     let Some(meta) = super::json(&path.join(format!("metadata/{}.json", game.id))) else {
         return success;

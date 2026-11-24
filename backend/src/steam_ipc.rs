@@ -1,18 +1,13 @@
 //! Experimental read-only client IPC. Called only in a disposable helper process.
 //! The client ABI is versioned but not a general-purpose launcher API contract.
 use crate::model::{OwnedGame, OwnedLibrary};
-use std::{fs, io::Read, path::Path};
+use std::{fs, path::Path};
 
 pub fn catalog(path: &Path) -> Result<Vec<OwnedGame>, String> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .map_err(|_| "Steam's appinfo cache is not available yet")?
-        .take(64 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read Steam's appinfo cache")?;
-    if bytes.len() > 64 * 1024 * 1024 {
-        return Err("Steam appinfo cache is too large".into());
-    }
+    let file = fs::File::open(path).map_err(|_| "Steam's appinfo cache is not available yet")?;
+    let mut bytes = crate::util::read_limited(file, 64 * 1024 * 1024)
+        .map_err(|_| "Cannot read Steam's appinfo cache")?
+        .ok_or("Steam appinfo cache is too large")?;
     // The parser expects an entry-sized lookahead even at the four-byte EOF
     // marker. Padding our private snapshot handles short catalogs/v40 safely.
     bytes.resize(bytes.len() + 68, 0);

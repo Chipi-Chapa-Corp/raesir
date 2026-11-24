@@ -71,17 +71,16 @@ pub fn scan(scan: &mut Scan<'_>) {
                     }
                     let mut game = xbox(id, id, vec![install], &epic::key(&installed));
                     game.client = "Ferestre".into();
-                    if home.local {
-                        if let Some(client) = &client
-                            && catalog::local(&game.installations)
-                        {
-                            game.launch = Some(client.action(vec!["run".into(), id.into()]));
-                            game.uninstall = Some(client.action(vec![
-                                "uninstall".into(),
-                                id.into(),
-                                "--yes".into(),
-                            ]));
-                        }
+                    if home.local
+                        && let Some(client) = &client
+                        && catalog::local(&game.installations)
+                    {
+                        game.launch = Some(client.action(vec!["run".into(), id.into()]));
+                        game.uninstall = Some(client.action(vec![
+                            "uninstall".into(),
+                            id.into(),
+                            "--yes".into(),
+                        ]));
                     }
                     if let Some(path) = config(Path::new(&game.installations[0].path))
                         && let Ok(title) = config_title(&path)

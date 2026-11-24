@@ -574,8 +574,7 @@ pub fn install_managed(maintenance: bool) -> Result<(), String> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         let data = managed_data_dir().ok_or("Could not find a user data directory for Ferestre")?;
-        let path = find_managed_cli(&data)
-            .unwrap_or_else(|| cli_directory(&data, storage::APP_ID));
+        let path = find_managed_cli(&data).unwrap_or_else(|| cli_directory(&data, storage::APP_ID));
         install::run(&path, maintenance)
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
@@ -586,9 +585,7 @@ pub fn install_managed(maintenance: bool) -> Result<(), String> {
 }
 
 fn check_setup_enabled() -> Result<(), String> {
-    if env::var_os("RAESIR_DISABLE_ACTIONS").is_some()
-        || env::var_os("RAESIR_DISABLE_NETWORK").is_some()
-    {
+    if env::var_os("RAESIR_DISABLE_ACTIONS").is_some() || crate::http::network_disabled() {
         return Err("Ferestre setup is disabled in this diagnostic profile".into());
     }
     Ok(())
@@ -637,15 +634,9 @@ mod install {
             return Ok(());
         }
 
-        let http = Client::builder()
-            .https_only(true)
-            .user_agent("Raesir/0.1")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(180))
-            .build()
-            .map_err(|err| err.to_string())?;
+        let http = crate::http::https_only()?;
         let release: serde_json::Value =
-            serde_json::from_str(&read_text(&http, RELEASE_API, 128 * 1024)?)
+            serde_json::from_str(&read_text(http, RELEASE_API, 128 * 1024)?)
                 .map_err(|_| "Ferestre returned invalid release metadata")?;
         let tag = release["tag_name"].as_str().unwrap_or_default();
         let version = release_version(tag).ok_or("Ferestre returned an unsupported release tag")?;
@@ -657,9 +648,9 @@ mod install {
         let package = format!("ferestre-{version}");
         let name = format!("{package}-x86_64.tar.zst");
         let url = format!("https://github.com/icex/ferestre/releases/download/{tag}/{name}");
-        let signature = read_text(&http, &format!("{url}.minisig"), 4096)?;
+        let signature = read_text(http, &format!("{url}.minisig"), 4096)?;
         let signature = release_signature(&signature, &name, version)?;
-        let response = download(&http, &url)?;
+        let response = download(http, &url)?;
         let mut archive = tempfile::NamedTempFile::new_in(dir)
             .map_err(|err| format!("Could not stage Ferestre: {err}"))?;
         let size = io::copy(&mut response.take(ARCHIVE_LIMIT + 1), archive.as_file_mut())
@@ -774,21 +765,16 @@ mod install {
 
     fn download(http: &Client, url: &str) -> Result<Response, String> {
         http.get(url)
+            .timeout(Duration::from_secs(180))
             .send()
             .and_then(Response::error_for_status)
             .map_err(|err| format!("Could not fetch the Ferestre release: {err}"))
     }
 
     fn read_text(http: &Client, url: &str, limit: u64) -> Result<String, String> {
-        let mut text = String::new();
-        download(http, url)?
-            .take(limit + 1)
-            .read_to_string(&mut text)
-            .map_err(|err| format!("Could not read Ferestre release metadata: {err}"))?;
-        if text.len() as u64 > limit {
-            return Err("Ferestre release metadata exceeds the download size limit".into());
-        }
-        Ok(text)
+        crate::util::read_limited_text(download(http, url)?, limit)
+            .map_err(|err| format!("Could not read Ferestre release metadata: {err}"))?
+            .ok_or_else(|| "Ferestre release metadata exceeds the download size limit".into())
     }
 
     fn release_signature(text: &str, name: &str, version: &str) -> Result<Signature, String> {

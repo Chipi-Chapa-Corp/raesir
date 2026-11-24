@@ -337,7 +337,7 @@ fn hourly_schedule_persists_manual_sources_and_catalog_missing_games_without_tou
     assert_eq!(result.issues[0].kind, "manual");
     assert!(result.updated.is_empty());
     let again = m
-        .auto_update(&[game.clone()], false, &AtomicBool::new(false))
+        .auto_update(std::slice::from_ref(&game), false, &AtomicBool::new(false))
         .unwrap();
     assert_eq!(again.checked_profiles, 0);
     assert!(!m.update_warnings(&game).is_empty());
@@ -576,12 +576,7 @@ fn automatic_dependency_updates_cannot_overwrite_a_local_mod() {
     let game = crate::catalog::entry("steam", "3527290", "Peak", vec![], "fixture");
     let mut local = entry("Local", "1.0.0");
     local.online_source = false;
-    let original = source(
-        &m,
-        "peak",
-        "raesir",
-        &[entry("Root", "1.0.0"), local],
-    );
+    let original = source(&m, "peak", "raesir", &[entry("Root", "1.0.0"), local]);
     let latest = index(&[
         ("Root", "2.0.0", vec!["Owner-Local-2.0.0"]),
         ("Local", "2.0.0", vec![]),

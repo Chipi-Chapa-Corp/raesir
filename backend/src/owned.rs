@@ -1,6 +1,6 @@
 use crate::model::{OwnedGame, OwnedLibrary};
 use serde::Deserialize;
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct Response {
@@ -34,14 +34,12 @@ pub fn fetch(steamid: &str, api_key: &str) -> Result<OwnedLibrary, String> {
     if api_key.len() != 32 || !api_key.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("Enter a 32-character Steam Web API key.".into());
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Could not create the Steam API connection")?;
+    let client =
+        crate::http::credentials().map_err(|_| "Could not create the Steam API connection")?;
     // Never format reqwest errors: their URL would include the API key.
     let response = client
         .get("https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/")
+        .timeout(Duration::from_secs(20))
         .query(&[
             ("key", api_key),
             ("steamid", steamid),
@@ -56,14 +54,9 @@ pub fn fetch(steamid: &str, api_key: &str) -> Result<OwnedLibrary, String> {
             response.status().as_u16()
         ));
     }
-    let mut body = String::new();
-    response
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_string(&mut body)
-        .map_err(|_| "Could not read the Steam response")?;
-    if body.len() > 8 * 1024 * 1024 {
-        return Err("Steam response exceeded the size limit".into());
-    }
+    let body = crate::util::read_limited_text(response, 8 * 1024 * 1024)
+        .map_err(|_| "Could not read the Steam response")?
+        .ok_or("Steam response exceeded the size limit")?;
     parse_response(&body, steamid)
 }
 

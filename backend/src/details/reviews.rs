@@ -151,7 +151,7 @@ pub(super) fn fetch_page(
     recent: bool,
     cursor: &str,
 ) -> Result<Page, String> {
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+    if crate::http::network_disabled() {
         return Err("Reviews are offline. Try again when connected.".into());
     }
     let id = appid
@@ -184,7 +184,7 @@ pub(super) fn resolve_page_authors(client: &Client, pages: &mut [&mut Page]) -> 
         .collect::<Vec<_>>();
     {
         let mut cache = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-        let now = now();
+        let now = crate::util::unix_now();
         let fresh = |(updated, name): &(u64, Option<String>)| {
             let ttl = if name.is_some() {
                 AUTHOR_NAME_TTL
@@ -246,7 +246,7 @@ pub(super) fn resolve_page_authors(client: &Client, pages: &mut [&mut Page]) -> 
         }
     }
     let mut cache = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let now = now();
+    let now = crate::util::unix_now();
     for (id, name) in names {
         let already_resolved = cache.get(id).is_some_and(|(updated, name)| {
             name.is_some() && now.saturating_sub(*updated) < AUTHOR_NAME_TTL

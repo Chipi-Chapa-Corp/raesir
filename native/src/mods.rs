@@ -7,8 +7,15 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use gpui_ce_elements::editable_text::{EditableTextState, StringStorage, TextChanged, text_input};
-use raesir_backend::{model::LibraryGame, mods::{CatalogOrder, Profile, Snapshot}};
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
+use raesir_backend::{
+    model::LibraryGame,
+    mods::{CatalogOrder, Profile, Snapshot},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 mod discovery;
 mod nexus_ui;
@@ -68,10 +75,9 @@ impl ModAction {
         } else {
             icon(glyph).text_color(rgb(color)).into_any_element()
         })
-        .when(
-            !busy && !compact,
-            |d| d.w_auto().px(rems(0.7)).gap(rems(0.35)).child(label),
-        )
+        .when(!busy && !compact, |d| {
+            d.w_auto().px(rems(0.7)).gap(rems(0.35)).child(label)
+        })
     }
 }
 
@@ -720,13 +726,12 @@ impl ModBrowser {
         if self.installing.is_some() || self.loading {
             return;
         }
-        let package = if !uninstall
-            && (id.starts_with("gamebanana:") || id.starts_with("modworkshop:"))
-        {
-            id.rsplit_once(':').map_or(id.as_str(), |(id, _)| id)
-        } else {
-            &id
-        };
+        let package =
+            if !uninstall && (id.starts_with("gamebanana:") || id.starts_with("modworkshop:")) {
+                id.rsplit_once(':').map_or(id.as_str(), |(id, _)| id)
+            } else {
+                &id
+            };
         self.installing = Some(package.to_owned());
         self.error = None;
         let backend = self.backend.clone();
@@ -781,9 +786,11 @@ impl ModBrowser {
         cx.spawn(async move |this, cx| {
             let result = match selection.await {
                 Ok(Ok(Some(paths))) => match paths.into_iter().next() {
-                    Some(path) => cx.background_executor().spawn(async move {
-                        backend.import_deadlock_mod(&game, &path)
-                    }).await.map(Some),
+                    Some(path) => cx
+                        .background_executor()
+                        .spawn(async move { backend.import_deadlock_mod(&game, &path) })
+                        .await
+                        .map(Some),
                     None => Ok(None),
                 },
                 Ok(Ok(None)) => Ok(None),
@@ -791,7 +798,9 @@ impl ModBrowser {
                 Err(error) => Err(error.to_string()),
             };
             if let Ok(Some((_, report))) = &result {
-                owner.update(cx, |owner, cx| owner.apply_report(report.clone(), cx)).ok();
+                owner
+                    .update(cx, |owner, cx| owner.apply_report(report.clone(), cx))
+                    .ok();
             }
             this.update(cx, |this, cx| {
                 this.loading = false;
@@ -804,8 +813,10 @@ impl ModBrowser {
                     Err(error) => this.error = Some(error),
                 }
                 cx.notify();
-            }).ok();
-        }).detach();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -826,7 +837,11 @@ impl ModBrowser {
         let Some(row) = self.rows.get(i).and_then(|&i| self.all_rows.get(i)) else {
             return div().into_any_element();
         };
-        let cover = self.thumbnails.cache.get(row.artwork_key()).map(|ready| ready.card);
+        let cover = self
+            .thumbnails
+            .cache
+            .get(row.artwork_key())
+            .map(|ready| ready.card);
         let installed = row.installed;
         let busy = self.installing.as_deref() == Some(&row.id);
         let id = row.id.clone();
@@ -1070,7 +1085,7 @@ impl ModBrowser {
                 )
                 .on_prepaint(cx.listener(
                     |this, paint: &InteractivityPrepaint, window, cx| {
-                        let width = f32::from(paint.bounds.size.width / window.rem_size());
+                        let width = paint.bounds.size.width / window.rem_size();
                         let size = SearchSize::for_width(width);
                         if this.search_size != size {
                             this.search_size = size;
@@ -1102,10 +1117,9 @@ impl ModBrowser {
                             }),
                         )
                     })
-                    .when(
-                        !self.compact_profile_header(viewport),
-                        |d| d.child(self.filters(cx)).child(self.source_filters(cx)),
-                    )
+                    .when(!self.compact_profile_header(viewport), |d| {
+                        d.child(self.filters(cx)).child(self.source_filters(cx))
+                    })
                     .child(
                         pill()
                             .child(
@@ -1254,7 +1268,9 @@ impl Render for ModBrowser {
             .chain(&self.discovery.warnings)
             .cloned()
             .collect::<Vec<_>>();
-        let workshop_warning = warnings.iter().any(|warning| warning.starts_with("Steam Workshop:"));
+        let workshop_warning = warnings
+            .iter()
+            .any(|warning| warning.starts_with("Steam Workshop:"));
         let empty = self.rows.is_empty() && !add_card;
         let waiting = empty && (self.loading || self.catalog_task.is_some());
         div()
@@ -1290,13 +1306,21 @@ impl Render for ModBrowser {
                         .when(compact && self.manages_profiles(), |d| {
                             d.child(self.profile_controls(viewport, cx))
                         })
-                        .when(compact, |d| d.child(self.filters(cx)).child(self.source_filters(cx)))
+                        .when(compact, |d| {
+                            d.child(self.filters(cx)).child(self.source_filters(cx))
+                        })
                         .when(import, |d| d.child(self.nexus_import_button(cx)))
                         .when(import_deadlock, |d| {
-                            d.child(crate::views::pill_button("import-deadlock", "Import VPK or archive")
-                                .on_click(cx.listener(|this, _, _, cx| this.import_deadlock_archive(cx))))
+                            d.child(
+                                crate::views::pill_button(
+                                    "import-deadlock",
+                                    "Import VPK or archive",
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.import_deadlock_archive(cx)),
+                                ),
+                            )
                         }),
-
                 )
             })
             .when_some(

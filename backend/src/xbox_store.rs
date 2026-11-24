@@ -3,7 +3,6 @@ use crate::{
     model::{LibraryGame, Os, Report},
     storage,
 };
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -11,7 +10,7 @@ use std::{
     fs,
     io::Read,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 const FILE: &str = "xbox-store.json";
@@ -62,19 +61,13 @@ fn xbox_title_id(product: &Value) -> Option<u32> {
 }
 
 pub(crate) fn products(ids: &[&str], market: &str) -> Option<Vec<Value>> {
-    if ids.is_empty()
-        || ids.iter().any(|id| !product_id(id))
-        || std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
-    {
+    if ids.is_empty() || ids.iter().any(|id| !product_id(id)) || crate::http::network_disabled() {
         return None;
     }
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .https_only(true)
-        .build()
-        .ok()?;
-    let response = client
+    let response = crate::http::https_only()
+        .ok()?
         .get("https://displaycatalog.mp.microsoft.com/v7.0/products")
+        .timeout(Duration::from_secs(5))
         .query(&[
             ("bigIds", ids.join(",")),
             ("market", market.into()),
@@ -100,10 +93,7 @@ pub(crate) fn load(dir: &Path, host: Os, games: &mut [LibraryGame]) {
 
 pub(crate) fn refresh(dir: &Path, report: &mut Report) {
     let mut cache = cached(dir);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::util::unix_now();
     let ids: BTreeSet<_> = report
         .catalog
         .iter()

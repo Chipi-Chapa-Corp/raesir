@@ -60,8 +60,8 @@ pub fn fetch(cache: &Path, app_id: u32, page: u32) -> Result<Page, String> {
     let previous = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CachedPage>(&bytes).ok());
-    let now = details::now();
-    if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some()
+    let now = crate::util::unix_now();
+    if crate::http::network_disabled()
         || previous
             .as_ref()
             .is_some_and(|cached| now.saturating_sub(cached.checked) < 21600)
@@ -125,7 +125,7 @@ fn fetch_page(app_id: u32, page: u32) -> Result<Page, String> {
 }
 
 fn get_json<T: DeserializeOwned>(url: &str, limit: u64) -> Result<T, String> {
-    let client = CLIENT.as_ref().ok_or("ProtonDB is unavailable.")?;
+    let client = CLIENT.as_ref().map_err(|_| "ProtonDB is unavailable.")?;
     let response = client
         .get(url)
         .send()

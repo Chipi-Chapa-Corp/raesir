@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 pub fn binary() -> Option<PathBuf> {
@@ -172,10 +172,7 @@ impl Manager {
         let games = epic::parse_library(&value)?;
         Ok(EpicOnlineLibrary {
             profile: profile.into(),
-            checked_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            checked_at: crate::util::unix_now(),
             games,
         })
     }

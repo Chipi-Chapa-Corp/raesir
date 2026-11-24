@@ -1,6 +1,6 @@
 use crate::{Launcher, backend::Backend};
-use raesir_backend::model::LibraryGame;
 use gpui::{Context, RenderImage, Window};
+use raesir_backend::model::LibraryGame;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
@@ -499,7 +499,7 @@ fn prepared(cache: &Path, key: &str, community: bool) -> bool {
                 .is_some_and(|age| age < std::time::Duration::from_secs(86_400)))
 }
 fn render(mut pixels: image_codec::RgbaImage) -> Arc<RenderImage> {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Arc::new(RenderImage::new(vec![image_codec::Frame::new(pixels)]))
@@ -519,11 +519,7 @@ fn ready(
 }
 fn load_cached(cache: &Path, game: &LibraryGame, shape: CardShape) -> Result<Ready, String> {
     let key = key(game, shape);
-    if !prepared(
-        cache,
-        &key,
-        raesir_backend::artwork::fallback_applies(game),
-    ) {
+    if !prepared(cache, &key, raesir_backend::artwork::fallback_applies(game)) {
         return Err("Thumbnail needs refreshing".into());
     }
     let (poster, card) = paths(cache, &key);
@@ -573,10 +569,8 @@ impl Persist {
             &image_codec::DynamicImage::ImageRgba8(self.card),
             image_codec::ImageFormat::Png,
         );
-        let _ = raesir_backend::storage::write_json(
-            &self.poster.with_extension("json"),
-            &self.title,
-        );
+        let _ =
+            raesir_backend::storage::write_json(&self.poster.with_extension("json"), &self.title);
     }
 }
 fn queue_persist(job: Persist) {
@@ -764,7 +758,9 @@ mod tests {
     #[test]
     fn mod_cards_fit_portrait_art_without_cutting_off_the_top() {
         let source = image_codec::DynamicImage::ImageRgba8(image_codec::RgbaImage::from_fn(
-            96, 160, |_, y| image_codec::Rgba([y as u8, 0, 0, 255]),
+            96,
+            160,
+            |_, y| image_codec::Rgba([y as u8, 0, 0, 255]),
         ));
         let game = raesir_backend::catalog::entry("media", "mod", "", vec![], "fixture");
         let original = key(&game, CardShape::Source);
@@ -787,8 +783,7 @@ mod tests {
     #[test]
     fn finished_card_disk_cache_preserves_faded_blur_and_loads_without_original_or_network() {
         let dir = tempfile::tempdir().unwrap();
-        let mut game =
-            raesir_backend::catalog::entry("steam", "42", "Fixture", vec![], "fixture");
+        let mut game = raesir_backend::catalog::entry("steam", "42", "Fixture", vec![], "fixture");
         game.cover = Some("https://unreachable.invalid/portrait.jpg".into());
         let pixels =
             image_codec::RgbaImage::from_pixel(64, 96, image_codec::Rgba([15, 60, 130, 255]));
@@ -824,8 +819,7 @@ mod tests {
     #[test]
     fn community_art_invalidates_old_thumbnails_and_retries_fallbacks_after_a_day() {
         let dir = tempfile::tempdir().unwrap();
-        let game =
-            raesir_backend::catalog::entry("steam", "319510", "FNAF", vec![], "fixture");
+        let game = raesir_backend::catalog::entry("steam", "319510", "FNAF", vec![], "fixture");
         let mut hash = DefaultHasher::new();
         (CARD_CACHE_VERSION, &game.key, &game.cover).hash(&mut hash);
         let old_key = format!("{:016x}", hash.finish());

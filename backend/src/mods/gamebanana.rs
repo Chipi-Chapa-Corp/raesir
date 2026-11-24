@@ -296,11 +296,11 @@ impl Manager {
         if !listing_files(&data).iter().any(|option| option.id == file) {
             return Err("This file is unavailable for the selected Deadlock mod".into());
         }
-        if std::env::var_os("RAESIR_DISABLE_NETWORK").is_some() {
+        if crate::http::network_disabled() {
             return Err("Mod networking is disabled".into());
         }
         let client = reqwest::blocking::Client::builder()
-            .user_agent("Raesir/0.1")
+            .user_agent(crate::http::USER_AGENT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() < 5
                     && attempt.url().scheme() == "https"
