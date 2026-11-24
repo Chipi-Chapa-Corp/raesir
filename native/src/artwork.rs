@@ -651,6 +651,8 @@ fn blurred_pixels(image: &image_codec::RgbaImage) -> image_codec::RgbaImage {
     image_codec::imageops::fast_blur(&tiny, 8.)
 }
 
+/// A small blurred copy that keeps the image's proportions, so drawing it with
+/// `ObjectFit::Cover` behind a letterboxed image continues its colors and shapes.
 pub(crate) fn blurred_render(image: &RenderImage) -> Option<Arc<RenderImage>> {
     let size = image.size(0);
     // RenderImage stores BGRA. Resize and blur keep channels in the same order.
@@ -659,12 +661,10 @@ pub(crate) fn blurred_render(image: &RenderImage) -> Option<Arc<RenderImage>> {
         size.height.0 as u32,
         image.as_bytes(0)?.to_vec(),
     )?;
-    let blurred = image_codec::imageops::resize(
-        &blurred_pixels(&pixels),
-        96,
-        96,
-        image_codec::imageops::FilterType::Triangle,
-    );
+    let small = image_codec::DynamicImage::ImageRgba8(pixels)
+        .resize(64, 64, image_codec::imageops::FilterType::Triangle)
+        .into_rgba8();
+    let blurred = image_codec::imageops::fast_blur(&small, 3.);
     Some(Arc::new(RenderImage::new(vec![image_codec::Frame::new(
         blurred,
     )])))

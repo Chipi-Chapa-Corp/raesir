@@ -55,9 +55,14 @@ pub fn parse(source: &str, base: &str) -> Vec<Block> {
             })
             .collect();
     }
+    parse_html(source, base, false)
+}
+
+pub(super) fn parse_html(source: &str, base: &str, comment: bool) -> Vec<Block> {
     let document = Html::parse_fragment(source);
     let mut parser = Parser {
         base,
+        comment,
         blocks: Vec::new(),
         current: TextBlock::default(),
         lists: Vec::new(),
@@ -69,6 +74,7 @@ pub fn parse(source: &str, base: &str) -> Vec<Block> {
 
 struct Parser<'a> {
     base: &'a str,
+    comment: bool,
     blocks: Vec<Block>,
     current: TextBlock,
     lists: Vec<Option<u32>>,
@@ -264,7 +270,15 @@ impl Parser<'_> {
             "b" | "strong" => style.bold = true,
             "i" | "em" => style.italic = true,
             "s" | "del" | "strike" => style.strike = true,
-            "a" => style.link = element.value().attr("href").and_then(|s| self.url(s)),
+            "a" => {
+                style.link = element.value().attr("href").and_then(|href| {
+                    if self.comment {
+                        super::comments::web_url(href, Some(self.base))
+                    } else {
+                        self.url(href)
+                    }
+                });
+            }
             _ => {}
         }
         for child in element.children() {

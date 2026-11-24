@@ -252,7 +252,7 @@ fn header_frame() -> Div {
 
 fn cover_contents(frame: Div, poster: Option<Poster>) -> Div {
     match poster {
-        Some((image, blurred)) => image_layers(frame, image, blurred, 1.4),
+        Some((image, blurred)) => frame.child(image_layers(image, blurred, 1.4)),
         None => frame
             .flex()
             .items_center()
@@ -261,33 +261,56 @@ fn cover_contents(frame: Div, poster: Option<Poster>) -> Div {
     }
 }
 
+/// Fills nearly matching frames and letterboxes other images over a blurred copy.
 fn image_layers(
-    frame: Div,
     image: Arc<RenderImage>,
     blurred: Option<Arc<RenderImage>>,
     radius: f32,
-) -> Div {
-    frame
-        .when_some(blurred, |d, blurred| {
-            d.child(
-                img(blurred)
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .aspect_ratio(1.)
-                    .rounded(rems(radius))
-                    .object_fit(ObjectFit::Fill),
-            )
-        })
-        .child(
-            img(image)
-                .absolute()
-                .inset_0()
-                .size_full()
-                .aspect_ratio(1.)
-                .rounded(rems(radius))
-                .object_fit(ObjectFit::Contain),
-        )
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, (), window, _| {
+            let image_size = image.size(0);
+            let ratio = image_size.width.0 as f32 / image_size.height.0 as f32;
+            let frame_ratio = bounds.size.width / bounds.size.height;
+            let radius = window.rem_size() * radius;
+            let paint = |window: &mut Window, image, fitted, radius: Pixels| {
+                if let Err(error) =
+                    window.paint_image(bounds, fitted, radius.into(), 0., image, 0, false)
+                {
+                    eprintln!("Could not paint detail artwork: {error}");
+                }
+            };
+            if (ratio / frame_ratio - 1.).abs() < 0.02 {
+                let fitted = ObjectFit::Cover.get_bounds(bounds, image_size);
+                paint(window, image, fitted, radius);
+                return;
+            }
+
+            if let Some(blurred) = blurred {
+                let blur_size = blurred.size(0);
+                let mut fitted = ObjectFit::Cover.get_bounds(bounds, blur_size);
+                if blur_size.width.0.min(blur_size.height.0) > 2 {
+                    // Sample inside the small texture so atlas filtering cannot darken its edges.
+                    fitted = fitted.dilate(fitted.size.width / blur_size.width.0 as f32);
+                }
+                paint(window, blurred, fitted, radius);
+                window.paint_quad(
+                    PaintQuad::new(bounds)
+                        .corner_radii(radius)
+                        .background(rgba(0x00000040)),
+                );
+            }
+            let fitted = ObjectFit::Contain.get_bounds(bounds, image_size);
+            let inset = fitted.origin - bounds.origin;
+            // Round only as much as needed to keep the image inside the frame corners.
+            let image_radius = (radius - inset.x.max(inset.y)).max(px(0.));
+            paint(window, image, fitted, image_radius);
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
 }
 
 fn panel() -> Div {
@@ -320,6 +343,9 @@ fn paragraph(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 fn review_paragraph(text: String) -> Div {
+    paragraph(wrap_review_text(&text)).w_full().min_w_0()
+}
+fn wrap_review_text(text: &str) -> String {
     let mut wrapped = String::with_capacity(text.len());
     for word in text.split_inclusive(char::is_whitespace) {
         if word.graphemes(true).count() > 40 {
@@ -333,7 +359,7 @@ fn review_paragraph(text: String) -> Div {
             wrapped.push_str(word);
         }
     }
-    paragraph(wrapped).w_full().min_w_0()
+    wrapped
 }
 fn bubble() -> Div {
     pill()
@@ -1018,7 +1044,7 @@ impl DetailsPage {
         let previous = (self.selected + count - 1) % count;
         let next = (self.selected + 1) % count;
         let viewer = gallery_frame()
-            .when_some(image, |d, image| image_layers(d, image, blurred, 1.2))
+            .when_some(image, |d, image| d.child(image_layers(image, blurred, 1.2)))
             .when(waiting, |d| {
                 d.child(
                     div()
@@ -1101,28 +1127,7 @@ impl DetailsPage {
                                     .hover(|s| s.opacity(1.))
                                     .when_some(self.images.get(url).cloned(), |d, image| {
                                         let blurred = self.image_blurs.get(url).cloned();
-                                        d.when_some(blurred, |d, blurred| {
-                                            d.child(
-                                                img(blurred)
-                                                    .absolute()
-                                                    .top_0()
-                                                    .left_0()
-                                                    .w(rems(7.))
-                                                    .h(rems(4.))
-                                                    .rounded(rems(0.7))
-                                                    .object_fit(ObjectFit::Fill),
-                                            )
-                                        })
-                                        .child(
-                                            img(image)
-                                                .absolute()
-                                                .top_0()
-                                                .left_0()
-                                                .w(rems(7.))
-                                                .h(rems(4.))
-                                                .rounded(rems(0.7))
-                                                .object_fit(ObjectFit::Contain),
-                                        )
+                                        d.child(image_layers(image, blurred, 0.7))
                                     })
                                     .when(item.video, |d| {
                                         d.child(

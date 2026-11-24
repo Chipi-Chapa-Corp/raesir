@@ -239,6 +239,7 @@ impl Manager {
         if data[count].as_u64() == Some(0) {
             return Vec::new();
         }
+        let page = listing.url(id);
         let url = format!(
             "{SITE}/apiv11/{}/{id}/{endpoint}?_nPerpage=10",
             listing.model()
@@ -253,7 +254,12 @@ impl Manager {
                         .take(10)
                         .filter_map(|row| {
                             let title = string(&row["_sName"]).to_owned();
-                            let mut text = providers::plain_text(string(&row["_sText"]));
+                            let source = string(&row["_sText"]);
+                            let (mut text, links) = if updates {
+                                (providers::plain_text(source), Vec::new())
+                            } else {
+                                crate::details::comments::formatted_text(source, &page)
+                            };
                             for change in row["_aChangeLog"].as_array().into_iter().flatten() {
                                 if let Some(line) = change["text"].as_str() {
                                     if !text.is_empty() {
@@ -273,6 +279,7 @@ impl Manager {
                                 author: author.into(),
                                 date: date(&row["_tsDateAdded"]),
                                 text,
+                                links,
                             })
                         })
                         .collect(),

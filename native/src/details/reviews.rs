@@ -791,7 +791,7 @@ impl DetailsPage {
                         .iter()
                         .take(self.reviews_visible)
                         .enumerate()
-                        .map(|(i, r)| self.review_card(r, format!("store-{i}"), false, cx)),
+                        .map(|(i, r)| self.review_card(r, format!("store-{i}"), false, None, cx)),
                 )
                 .when(matching.len() > self.reviews_visible, |d| {
                     d.child(
@@ -1002,7 +1002,13 @@ impl DetailsPage {
                     .take(visible)
                     .enumerate()
                     .map(|(i, r)| {
-                        self.review_card(r, format!("{source}-{index}-{i}-{}", r.id), recent, cx)
+                        self.review_card(
+                            r,
+                            format!("{source}-{index}-{i}-{}", r.id),
+                            recent,
+                            None,
+                            cx,
+                        )
                     }),
             )
             .when(!column.loading && (count > visible || column.more), |d| {
@@ -1045,6 +1051,7 @@ impl DetailsPage {
         review: &Review,
         key: String,
         compact: bool,
+        comment_links: Option<&[raesir_backend::details::comments::CommentLink]>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let expanded = self.review_state.expanded.contains(&key);
@@ -1071,26 +1078,44 @@ impl DetailsPage {
         let author = review.display_author().to_owned();
         let url = (!review.steam_id.is_empty())
             .then(|| format!("https://steamcommunity.com/profiles/{}/", review.steam_id));
-        let full_text = if review.title.is_empty() {
+        let title_len = if review.title.is_empty() {
+            0
+        } else {
+            review.title.len() + 1
+        };
+        let mut preview = if title_len == 0 {
             review.text.clone()
         } else {
             format!("{}\n{}", review.title, review.text)
         };
         let limit = if compact { 220 } else { 650 };
-        let long = full_text.graphemes(true).count() > limit;
-        let preview = if long && !expanded {
-            format!(
-                "{}…",
-                full_text
-                    .graphemes(true)
-                    .take(limit)
-                    .collect::<String>()
-                    .trim_end()
-            )
+        let cutoff = preview
+            .grapheme_indices(true)
+            .nth(limit)
+            .map(|(index, _)| index);
+        let long = cutoff.is_some();
+        let visible_len = if let Some(cutoff) = cutoff.filter(|_| !expanded) {
+            let len = preview[..cutoff].trim_end().len();
+            preview.truncate(len);
+            preview.push('…');
+            len
         } else {
-            full_text
+            preview.len()
         };
-        let body = review_paragraph(preview).max_w_full().flex_none();
+        let body = if let Some(formatted) = comment_links {
+            let links = raesir_backend::details::comments::links(&review.text, formatted);
+            let visible_links = links
+                .into_iter()
+                .take_while(|link| title_len + link.range.end <= visible_len)
+                .map(|mut link| {
+                    link.range = title_len + link.range.start..title_len + link.range.end;
+                    link
+                });
+            super::mod_view::comment_paragraph(&preview, visible_links)
+        } else {
+            review_paragraph(preview)
+        };
+        let body = body.w_full().min_w_0().max_w_full().flex_none();
         panel()
             .id(SharedString::from(format!("review-card-{key}")))
             .w_full()

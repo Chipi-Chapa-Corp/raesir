@@ -1,5 +1,5 @@
 use super::*;
-use raesir_backend::details::ModPost;
+use raesir_backend::details::{ModPost, comments::CommentLink};
 
 impl DetailsPage {
     pub(super) fn mod_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -194,6 +194,7 @@ impl DetailsPage {
                     },
                     format!("mod-comment-{i}"),
                     false,
+                    Some(&post.links),
                     cx,
                 )
             }))
@@ -235,4 +236,95 @@ impl DetailsPage {
 
 fn mod_row() -> Div {
     div().flex().flex_wrap().items_center().gap(rems(0.65))
+}
+
+pub(super) fn comment_paragraph(preview: &str, links: impl Iterator<Item = CommentLink>) -> Div {
+    let mut text = String::with_capacity(preview.len());
+    let mut wrapped_links = Vec::new();
+    let mut offset = 0;
+    for link in links {
+        text.push_str(&wrap_review_text(&preview[offset..link.range.start]));
+        let start = text.len();
+        text.push_str(&wrap_review_text(&preview[link.range.clone()]));
+        wrapped_links.push(CommentLink {
+            range: start..text.len(),
+            url: link.url,
+        });
+        offset = link.range.end;
+    }
+    text.push_str(&wrap_review_text(&preview[offset..]));
+    if wrapped_links.is_empty() {
+        return paragraph(text);
+    }
+    let style = HighlightStyle {
+        color: Some(rgb_to_hsla(rgb(0x9fd8ff))),
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let highlights = wrapped_links.iter().map(|link| (link.range.clone(), style));
+    let text = StyledText::new(text).with_highlights(highlights);
+    let layout = text.layout().clone();
+    let links = Rc::new(wrapped_links);
+    div()
+        .text_size(rems(1.125))
+        .line_height(rems(1.75))
+        .whitespace_normal()
+        .child(
+            div()
+                .id("comment-text")
+                // Keep an independent text layout for byte-range hit testing.
+                .child(InteractiveText::new("comment-ranges", text))
+                .cursor_with({
+                    let layout = layout.clone();
+                    let links = links.clone();
+                    move |position, _| {
+                        let index = layout.index_for_position(position).ok()?;
+                        links
+                            .iter()
+                            .any(|link| link.range.contains(&index))
+                            .then_some(CursorStyle::PointingHand)
+                    }
+                })
+                .on_click(move |event, _, cx| {
+                    let ClickEvent::Mouse(event) = event else {
+                        return;
+                    };
+                    if let (Ok(start), Ok(end)) = (
+                        layout.index_for_position(event.down.position),
+                        layout.index_for_position(event.up.position),
+                    ) && let Some(link) = links
+                        .iter()
+                        .find(|link| link.range.contains(&start) && link.range.contains(&end))
+                    {
+                        open_comment_link(&link.url, cx);
+                    }
+                }),
+        )
+}
+
+fn open_comment_link(url: &str, cx: &mut App) {
+    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_some() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::path::Path::new("/.flatpak-info").is_file() {
+        let url = url.to_owned();
+        cx.spawn(async move |cx| {
+            let Ok(uri) = ashpd::Uri::parse(&url) else {
+                return;
+            };
+            let result = ashpd::desktop::open_uri::OpenFileRequest::default()
+                .send_uri(&uri)
+                .await;
+            if matches!(result, Err(ashpd::Error::PortalNotFound(_))) {
+                cx.update(|cx| cx.open_url(&url));
+            }
+        })
+        .detach();
+        return;
+    }
+    cx.open_url(url);
 }

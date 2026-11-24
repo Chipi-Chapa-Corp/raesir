@@ -297,10 +297,10 @@ fn workshop_detail_page(
     let comments = doc
         .select(&selector(".commentthread_comment"))
         .filter_map(|node| {
-            let text = node
+            let (text, links) = node
                 .select(&selector(".commentthread_comment_text"))
                 .next()
-                .map(|body| providers::plain_text(&body.inner_html()))?;
+                .map(|body| crate::details::comments::formatted_text(&body.inner_html(), page))?;
             if text.is_empty() {
                 return None;
             }
@@ -321,6 +321,7 @@ fn workshop_detail_page(
                 author,
                 date,
                 text,
+                links,
                 ..Default::default()
             })
         })
@@ -449,7 +450,7 @@ mod tests {
             <div class="highlight_strip_screenshot"><img src="https://images.steamusercontent.com/example?w=64"></div>
             <div class="commentthread_comment">
                 <a class="commentthread_author_link">A player</a>
-                <div class="commentthread_comment_text">Nice map!</div>
+                <div class="commentthread_comment_text">Nice map! See <a href="/sharedfiles/filedetails/?id=91">this guide</a>.</div>
             </div>"#;
         let page = "https://steamcommunity.com/sharedfiles/filedetails/?id=90";
         assert!(workshop_detail_page(html, page, 570, 90).is_err());
@@ -466,7 +467,13 @@ mod tests {
         assert_eq!(metadata.views, Some(1234));
         assert_eq!(metadata.downloads, None);
         assert_eq!(metadata.comments[0].author, "A player");
-        assert_eq!(metadata.comments[0].text, "Nice map!");
+        let comment = &metadata.comments[0];
+        assert_eq!(comment.text, "Nice map! See this guide.");
+        assert_eq!(&comment.text[comment.links[0].range.clone()], "this guide");
+        assert_eq!(
+            comment.links[0].url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=91"
+        );
 
         let changelog = workshop_changelog(
             r#"<div class="changeLogCtn"><div class="changelog author"><a>Creator</a></div>

@@ -11,6 +11,7 @@ use std::{
     sync::LazyLock,
     time::Duration,
 };
+pub mod comments;
 pub mod media;
 mod providers;
 pub(crate) use providers::{ea_cover, epic_cover, steam_parent, steam_product};
@@ -70,6 +71,8 @@ pub struct ModPost {
     pub author: String,
     pub date: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<comments::CommentLink>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

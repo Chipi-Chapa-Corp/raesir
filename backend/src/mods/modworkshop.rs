@@ -170,9 +170,13 @@ impl Manager {
                             .ok()?
                             .iter()
                             .filter_map(|row| {
-                                let text = providers::plain_text(row["content"].as_str()?);
+                                let (text, links) = crate::details::comments::markdown_text(
+                                    row["content"].as_str()?,
+                                    &package.page,
+                                );
                                 (!text.is_empty()).then(|| ModPost {
                                     text,
+                                    links,
                                     author: row["user"]["name"].as_str().unwrap_or_default().into(),
                                     date: display_date(
                                         row["created_at"].as_str().unwrap_or_default(),

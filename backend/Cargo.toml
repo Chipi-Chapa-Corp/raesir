@@ -26,6 +26,7 @@ prost = "0.14"
 shlex = "1"
 scraper = "0.27"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+linkify = "0.11"
 bbscope = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
