@@ -14,9 +14,6 @@ impl DetailsPage {
         let action = browser
             .as_ref()
             .and_then(|browser| browser.read(cx).mod_action(&context.id, installed, cx));
-        let game_folder = browser
-            .as_ref()
-            .and_then(|browser| raesir_backend::mods::local_game_folder(browser.read(cx).game()));
         let version = if installed && !context.version.is_empty() {
             context.version.as_str()
         } else {
@@ -121,18 +118,6 @@ impl DetailsPage {
                 format!("{unavailable} Follow the mod's manual installation instructions."),
             ));
         }
-        if let Some(path) = game_folder {
-            controls = controls.child(text_button("mod-game-folder", "Open game folder").on_click(
-                move |_, _, cx| {
-                    if std::env::var_os("RAESIR_DISABLE_ACTIONS").is_none() {
-                        #[cfg(windows)]
-                        cx.open_url(&path.to_string_lossy());
-                        #[cfg(not(windows))]
-                        cx.reveal_path(&path);
-                    }
-                },
-            ));
-        }
         let mut facts = Vec::new();
         if !version.is_empty() {
             facts.push(format!("Version {version}"));
@@ -165,7 +150,7 @@ impl DetailsPage {
                         .into_any_element()
                 }),
                 format: ArtFormat::Landscape(ratio.unwrap_or(16. / 9.)),
-                loading: self.loading,
+                fixed_cover: self.loading,
             });
         } else if !facts.is_empty() {
             metadata = metadata
@@ -186,7 +171,7 @@ impl DetailsPage {
                 poster,
                 metadata: Some(metadata.into_any_element()),
                 format: ArtFormat::Portrait(ratio.unwrap_or(2. / 3.).clamp(2. / 3., 1.)),
-                loading: self.loading,
+                fixed_cover: self.loading,
             }
             .into_any_element()
         }

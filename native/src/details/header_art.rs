@@ -15,7 +15,9 @@ pub(super) struct HeaderArt {
     pub poster: Option<Poster>,
     pub metadata: Option<AnyElement>,
     pub format: Format,
-    pub loading: bool,
+    /// Keep the cover at its minimum size while the metadata beside it is a
+    /// placeholder whose height differs from the content that replaces it.
+    pub fixed_cover: bool,
 }
 
 pub(super) struct HeaderArtLayout {
@@ -82,7 +84,7 @@ impl Element for HeaderArt {
                         cx,
                     )
                     .height;
-                if self.loading || pass == 2 {
+                if self.fixed_cover || pass == 2 {
                     break;
                 }
                 let next_width = cover_width(metadata_height);
@@ -93,7 +95,7 @@ impl Element for HeaderArt {
             }
         }
         let mut art_height = art_width / ratio;
-        if !self.loading && matches!(self.format, Format::Landscape(_)) {
+        if !self.fixed_cover && matches!(self.format, Format::Landscape(_)) {
             art_height = art_height.max(metadata_height);
         }
         let mut cover = cover_contents(

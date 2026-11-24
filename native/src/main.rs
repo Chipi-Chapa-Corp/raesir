@@ -28,6 +28,7 @@ mod header;
 mod icons;
 mod library;
 mod nexus_account;
+mod recent;
 mod video;
 mod views;
 use header::{Header, HeaderState, action_button, pill};

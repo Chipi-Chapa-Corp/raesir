@@ -1,4 +1,4 @@
-use crate::library::CompatibilityBadge;
+use crate::{library::CompatibilityBadge, recent::Recent};
 use raesir_backend::{
     actions, artwork, client_control, epic_online,
     model::*,
@@ -15,6 +15,12 @@ use std::{
     },
 };
 
+const REMEMBERED_PAGES: usize = 48;
+const MEDIA_IMAGE_BYTES: usize = 192 * 1024 * 1024;
+
+/// A decoded details image and its blurred backdrop.
+pub type MediaImage = (Arc<gpui::RenderImage>, Option<Arc<gpui::RenderImage>>);
+
 pub struct Backend {
     pub data: PathBuf,
     pub cache: PathBuf,
@@ -23,6 +29,10 @@ pub struct Backend {
     fixture: Option<PathBuf>,
     report: RwLock<Option<Arc<Report>>>,
     achievement_icons: Mutex<HashMap<String, Arc<gpui::RenderImage>>>,
+    // Pages opened this session, so reopening a game renders without skeletons.
+    details_pages: Mutex<Recent<Arc<raesir_backend::details::Details>>>,
+    stats_pages: Mutex<Recent<Arc<raesir_backend::player_stats::PlayerStats>>>,
+    media_images: Mutex<Recent<MediaImage>>,
     operation: Mutex<()>,
     cleanup: Mutex<()>,
     ui: OnceLock<Mutex<serde_json::Map<String, serde_json::Value>>>,
@@ -75,6 +85,15 @@ struct SteamJob {
     started: std::time::Instant,
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Details are cached per localized title, like the on-disk details cache.
+fn page_key(game: &LibraryGame) -> String {
+    format!("{}\n{}", game.key, game.title)
+}
+
 fn merge_download_progress(live: Option<Progress>, disk: Progress) -> Progress {
     let mut progress = live.unwrap_or_else(|| disk.clone());
     // Completion also requires Steam's committed manifest and payload.
@@ -111,6 +130,9 @@ impl Backend {
             fixture: std::env::var_os("RAESIR_LIBRARY_FIXTURE").map(PathBuf::from),
             report: RwLock::new(None),
             achievement_icons: Mutex::new(HashMap::new()),
+            details_pages: Mutex::new(Recent::new(REMEMBERED_PAGES)),
+            stats_pages: Mutex::new(Recent::new(REMEMBERED_PAGES)),
+            media_images: Mutex::new(Recent::new(MEDIA_IMAGE_BYTES)),
             operation: Mutex::new(()),
             cleanup: Mutex::new(()),
             ui: OnceLock::new(),
@@ -1357,6 +1379,53 @@ impl Backend {
 
     pub fn cached_details(&self, game: &LibraryGame) -> Option<raesir_backend::details::Details> {
         raesir_backend::details::cached(game, &self.cache.join("details"))
+    }
+
+    pub fn remembered_details(
+        &self,
+        game: &LibraryGame,
+    ) -> Option<Arc<raesir_backend::details::Details>> {
+        lock(&self.details_pages).get(&page_key(game))
+    }
+
+    pub fn remember_details(
+        &self,
+        game: &LibraryGame,
+        details: raesir_backend::details::Details,
+    ) -> Arc<raesir_backend::details::Details> {
+        let details = Arc::new(details);
+        lock(&self.details_pages).insert(page_key(game), details.clone(), 1);
+        details
+    }
+
+    pub fn remembered_stats(
+        &self,
+        game: &LibraryGame,
+    ) -> Option<Arc<raesir_backend::player_stats::PlayerStats>> {
+        lock(&self.stats_pages).get(&page_key(game))
+    }
+
+    pub fn remember_stats(
+        &self,
+        game: &LibraryGame,
+        stats: raesir_backend::player_stats::PlayerStats,
+    ) -> Arc<raesir_backend::player_stats::PlayerStats> {
+        let stats = Arc::new(stats);
+        lock(&self.stats_pages).insert(page_key(game), stats.clone(), 1);
+        stats
+    }
+
+    pub fn remembered_media(&self, url: &str) -> Option<MediaImage> {
+        lock(&self.media_images).get(url)
+    }
+
+    pub fn remember_media(&self, url: String, image: MediaImage) {
+        let bytes = [Some(&image.0), image.1.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|image| image.as_bytes(0).map_or(0, <[u8]>::len))
+            .sum();
+        lock(&self.media_images).insert(url, image, bytes);
     }
 
     pub fn refresh_cached_review_authors(

@@ -9,6 +9,42 @@ fn hours(seconds: u64) -> String {
         format!("Played {n:.1} hours")
     }
 }
+/// Mirrors the achievements panel row for row so loading does not change its height.
+fn stats_skeleton() -> Div {
+    let playtime = div()
+        .rounded(rems(0.35))
+        .bg(rgba(0xffffff20))
+        .text_color(gpui::transparent_black())
+        .child(hours(36_000));
+    stats_panel()
+        .child(div().w_full().flex().whitespace_nowrap().child(playtime))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(rems(0.65))
+                .w_full()
+                .child(skeleton_block(2.7, 2.7).flex_none())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(rems(0.05))
+                        .child(skeleton_line(0.42))
+                        .child(skeleton_line(0.9)),
+                ),
+        )
+        .child(
+            div()
+                .h(rems(2.7))
+                .flex()
+                .gap(rems(0.4))
+                .overflow_hidden()
+                .children((0..8).map(|_| skeleton_block(2.7, 2.7).flex_none())),
+        )
+}
 fn stats_panel() -> Div {
     panel()
         .flex_1()
@@ -210,17 +246,17 @@ impl Render for AchievementTooltip {
     }
 }
 impl DetailsPage {
-    fn publish_stats(&mut self, stats: PlayerStats, loading: bool, cx: &mut Context<Self>) {
+    fn publish_stats(&mut self, stats: Arc<PlayerStats>, loading: bool, cx: &mut Context<Self>) {
         let loading_changed = self.stats_loading != loading;
         self.stats_loading = loading;
-        if self.stats.as_deref() != Some(&stats) {
+        if self.stats.as_deref() != Some(&*stats) {
             self.set_stats(stats, cx);
         } else if loading_changed {
             cx.notify();
         }
     }
 
-    fn set_stats(&mut self, stats: PlayerStats, cx: &mut Context<Self>) {
+    fn set_stats(&mut self, stats: Arc<PlayerStats>, cx: &mut Context<Self>) {
         let top = self.achievement_rows.logical_scroll_top();
         let anchor = self
             .stats
@@ -258,42 +294,51 @@ impl DetailsPage {
                 offset_in_item: top.offset_in_item,
             });
         }
-        self.stats = Some(Arc::new(stats));
+        self.stats = Some(stats);
         cx.notify();
     }
     pub(super) fn load_stats(&mut self, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
         let game = self.game.clone();
+        // Stats seen earlier this session render immediately; the refresh still runs.
+        let remembered = backend.remembered_stats(&game);
+        if let Some(stats) = &remembered {
+            let loading =
+                self.game.store == "xbox" && !stats.account.is_empty() && !stats.has_data();
+            self.publish_stats(stats.clone(), loading, cx);
+        }
         self.stats_task = Some(cx.spawn(async move |this, cx| {
-            let cached = cx
-                .background_executor()
-                .spawn({
-                    let backend = backend.clone();
-                    let game = game.clone();
-                    async move {
-                        let stats = backend.player_stats(&game, false);
-                        backend.warm_achievement_icons(&stats);
-                        stats
-                    }
-                })
-                .await;
-            if this
-                .update(cx, |this, cx| {
-                    let loading = this.game.store == "xbox"
-                        && !cached.account.is_empty()
-                        && !cached.has_data();
-                    this.publish_stats(cached, loading, cx);
-                })
-                .is_err()
-            {
-                return;
+            if remembered.is_none() {
+                let cached = cx
+                    .background_executor()
+                    .spawn({
+                        let backend = backend.clone();
+                        let game = game.clone();
+                        async move {
+                            let stats = backend.player_stats(&game, false);
+                            backend.warm_achievement_icons(&stats);
+                            backend.remember_stats(&game, stats)
+                        }
+                    })
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        let loading = this.game.store == "xbox"
+                            && !cached.account.is_empty()
+                            && !cached.has_data();
+                        this.publish_stats(cached, loading, cx);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
             }
             let stats = cx
                 .background_executor()
                 .spawn(async move {
                     let stats = backend.player_stats(&game, true);
                     backend.warm_achievement_icons(&stats);
-                    stats
+                    backend.remember_stats(&game, stats)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -310,32 +355,12 @@ impl DetailsPage {
     }
     pub(super) fn stats_block(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.stats_loading {
-            return Some(
-                stats_panel()
-                    .child(skeleton_block(8.75, 1.1).my(rems(0.25)))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(rems(0.65))
-                            .w_full()
-                            .child(skeleton_block(2.75, 2.75).flex_none())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(skeleton_lines(&[0.42, 0.95, 0.75])),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .h(rems(2.7))
-                            .flex()
-                            .gap(rems(0.4))
-                            .overflow_hidden()
-                            .children((0..8).map(|_| skeleton_block(2.7, 2.7).flex_none())),
-                    )
-                    .into_any_element(),
-            );
+            // Most Steam games show an achievements panel; other stores rarely
+            // have stats, so reserving space there would collapse on load.
+            if self.game.store != "steam" && self.stats.is_none() {
+                return None;
+            }
+            return Some(stats_skeleton().into_any_element());
         }
         let stats = self.stats.clone()?;
         if stats.achievements.is_empty() {
@@ -494,7 +519,7 @@ impl DetailsPage {
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.hidden_achievements_expanded = !this.hidden_achievements_expanded;
-                        this.set_stats((*stats).clone(), cx);
+                        this.set_stats(stats.clone(), cx);
                     })),
                 )
                 .into_any_element();

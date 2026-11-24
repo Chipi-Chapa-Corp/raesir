@@ -224,6 +224,22 @@ impl DetailsPage {
     }
 }
 
+/// Viewer images may resolve to a larger file than the gallery image for one URL.
+fn media_key(url: &str, full_size: bool) -> String {
+    if full_size {
+        format!("viewer\n{url}")
+    } else {
+        url.to_owned()
+    }
+}
+
+/// Cached details younger than six hours with complete store metadata skip the refresh.
+fn details_fresh(data: &Details, game: &LibraryGame) -> bool {
+    raesir_backend::util::unix_now().saturating_sub(data.updated) < 21600
+        && (data.description.is_empty() || data.description_html.is_some())
+        && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft") || data.store_url.is_some())
+}
+
 fn header_frame() -> Div {
     div()
         .relative()
@@ -619,48 +635,67 @@ impl DetailsPage {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
-        self.loading = true;
         self.error = None;
         let backend = self.backend.clone();
         let game = self.game.clone();
+        // A page opened earlier this session renders on its first frame.
+        let remembered = backend.remembered_details(&game);
+        if let Some(data) = &remembered {
+            self.load_background(data, cx);
+            self.data = Some(data.clone());
+        }
+        self.loading = remembered
+            .as_ref()
+            .is_none_or(|data| !details_fresh(data, &game));
         self.task = Some(cx.spawn(async move |this, cx| {
-            let cached = cx
-                .background_executor()
-                .spawn({
-                    let backend = backend.clone();
-                    let game = game.clone();
-                    async move { backend.cached_details(&game) }
-                })
-                .await;
-            let fresh = cached.as_ref().is_some_and(|v| {
-                raesir_backend::util::unix_now().saturating_sub(v.updated) < 21600
-                    && (v.description.is_empty() || v.description_html.is_some())
-                    && (!matches!(game.store.as_str(), "epic" | "ea" | "ubisoft")
-                        || v.store_url.is_some())
-            });
+            let cached = match remembered {
+                Some(data) => Some(data),
+                None => {
+                    let cached = cx
+                        .background_executor()
+                        .spawn({
+                            let backend = backend.clone();
+                            let game = game.clone();
+                            async move {
+                                let data = backend.cached_details(&game)?;
+                                Some(backend.remember_details(&game, data))
+                            }
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if let Some(data) = &cached {
+                            this.load_background(data, cx);
+                            this.data = Some(data.clone());
+                        }
+                        this.loading = cached
+                            .as_ref()
+                            .is_none_or(|data| !details_fresh(data, &this.game));
+                        cx.notify();
+                    })
+                    .ok();
+                    cached
+                }
+            };
+            let fresh = cached
+                .as_ref()
+                .is_some_and(|data| details_fresh(data, &game));
             let needs_author_names = cached
                 .as_ref()
                 .and_then(|data| data.steam_reviews.as_ref())
                 .is_some_and(|pages| pages.needs_author_names());
-            this.update(cx, |this, cx| {
-                if let Some(data) = cached {
-                    this.load_background(&data, cx);
-                    this.data = Some(Arc::new(data));
-                }
-                this.loading = !fresh;
-                cx.notify();
-            })
-            .ok();
             if fresh {
                 if needs_author_names {
                     let details = cx
                         .background_executor()
-                        .spawn(async move { backend.refresh_cached_review_authors(&game) })
+                        .spawn(async move {
+                            let details = backend.refresh_cached_review_authors(&game)?;
+                            Some(backend.remember_details(&game, details))
+                        })
                         .await;
                     if let Some(details) = details {
                         this.update(cx, |this, cx| {
                             this.apply_review_author_names(&details);
-                            this.data = Some(Arc::new(details));
+                            this.data = Some(details);
                             cx.notify();
                         })
                         .ok();
@@ -670,7 +705,10 @@ impl DetailsPage {
             }
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.details(&game) })
+                .spawn(async move {
+                    let data = backend.details(&game)?;
+                    Ok::<_, String>(backend.remember_details(&game, data))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.loading = false;
@@ -689,7 +727,7 @@ impl DetailsPage {
                             this.fullscreen = false;
                         }
                         this.animations.clear();
-                        this.data = Some(Arc::new(data));
+                        this.data = Some(data);
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -752,6 +790,13 @@ impl DetailsPage {
             self.images.insert(url.to_owned(), image);
             return;
         }
+        if let Some((image, blurred)) = self.backend.remembered_media(&media_key(url, full_size)) {
+            if let Some(blurred) = blurred {
+                self.image_blurs.insert(url.to_owned(), blurred);
+            }
+            self.images.insert(url.to_owned(), image);
+            return;
+        }
         if self.pending.contains(url) || self.failed.contains(url) || self.pending.len() >= 3 {
             return;
         }
@@ -793,6 +838,10 @@ impl DetailsPage {
                     }
                     let image = Arc::new(RenderImage::new(vec![image_codec::Frame::new(pixels)]));
                     let blurred = crate::artwork::blurred_render(&image);
+                    backend.remember_media(
+                        media_key(&request, full_size),
+                        (image.clone(), blurred.clone()),
+                    );
                     Ok::<_, String>((image, blurred))
                 })
                 .await;
@@ -1423,7 +1472,8 @@ impl DetailsPage {
             poster: self.header_image(),
             metadata: Some(meta.w_full().into_any_element()),
             format: ArtFormat::Game,
-            loading: metadata_loading || self.stats_loading,
+            // Placeholders match the loaded header height, so the cover sizes from them.
+            fixed_cover: false,
         }
     }
 }
