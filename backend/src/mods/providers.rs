@@ -61,6 +61,8 @@ pub(super) fn http() -> Result<&'static reqwest::blocking::Client, String> {
     crate::http::shared(&CLIENT)
 }
 
+pub(super) const CATALOG_TTL: Duration = Duration::from_secs(7 * 86400);
+
 impl Manager {
     pub(super) fn provider_json(&self, url: &str, refresh: bool) -> Result<Value, String> {
         self.provider_json_inner(url, refresh, true, || read_json(|| Ok(http()?.get(url))))
@@ -73,6 +75,17 @@ impl Manager {
     pub(super) fn provider_json_inner(
         &self,
         key: &str,
+        refresh: bool,
+        stale: bool,
+        fetch: impl FnOnce() -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        self.provider_json_ttl(key, Duration::from_secs(1800), refresh, stale, fetch)
+    }
+
+    pub(super) fn provider_json_ttl(
+        &self,
+        key: &str,
+        ttl: Duration,
         refresh: bool,
         stale: bool,
         fetch: impl FnOnce() -> Result<Value, String>,
@@ -90,7 +103,7 @@ impl Manager {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(1800));
+            .is_some_and(|age| age < ttl);
         if !refresh
             && fresh
             && let Some(value) = cached()

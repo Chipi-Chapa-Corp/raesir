@@ -4,10 +4,11 @@ pub(super) fn wargaming(
     client: &Client,
     game: &LibraryGame,
     out: &mut Details,
+    with_reviews: bool,
 ) -> Result<(), String> {
     let mut supplied = false;
     if let Some(id) = crate::adapters::wargaming_steam_app(&game.id) {
-        match steam(client, id, out, true) {
+        match steam(client, id, out, with_reviews) {
             Ok(_) => {
                 supplied = true;
                 out.sources =
@@ -87,6 +88,50 @@ pub(crate) fn steam_parent(id: &str, product: Option<&Value>) -> Option<String> 
     (parent != id && parent != "0").then_some(parent)
 }
 
+pub(super) fn steam_reviews(client: &Client, id: &str, out: &mut Details) {
+    let query = reviews::Query::default();
+    let (main, recent) = std::thread::scope(|scope| {
+        let recent = scope.spawn(|| reviews::fetch_page(client, id, &query, true, "*"));
+        (
+            reviews::fetch_page(client, id, &query, false, "*"),
+            recent
+                .join()
+                .unwrap_or_else(|_| Err("Recent reviews could not be loaded".into())),
+        )
+    });
+    let mut pages = reviews::SteamReviews {
+        appid: id.into(),
+        ..Default::default()
+    };
+    match main {
+        Ok(page) => {
+            out.review_summary = page.summary.clone();
+            if let Some(score) = page.score {
+                out.scores.retain(|s| !s.starts_with("Steam players "));
+                out.scores.insert(0, format!("Steam players {score:.1}/5"));
+            }
+            pages.main = page;
+        }
+        Err(error) => {
+            pages.main.error = Some(error.clone());
+            out.warnings.push(error);
+        }
+    }
+    match recent {
+        Ok(page) => pages.recent = page,
+        Err(error) => {
+            pages.recent.error = Some(error.clone());
+            out.warnings.push(error);
+        }
+    }
+    reviews::resolve_page_authors(client, &mut [&mut pages.main, &mut pages.recent]);
+    if pages.main.error.is_none() {
+        out.reviews = pages.main.reviews.clone();
+    }
+    out.review_source = "Steam players".into();
+    out.steam_reviews = Some(pages);
+}
+
 pub(super) fn steam(
     client: &Client,
     id: &str,
@@ -98,46 +143,7 @@ pub(super) fn steam(
     out.store_url = Some(format!("https://store.steampowered.com/app/{id}/"));
     out.sources.push("Steam".into());
     if with_reviews {
-        let query = reviews::Query::default();
-        let (main, recent) = std::thread::scope(|scope| {
-            let recent = scope.spawn(|| reviews::fetch_page(client, id, &query, true, "*"));
-            (
-                reviews::fetch_page(client, id, &query, false, "*"),
-                recent
-                    .join()
-                    .unwrap_or_else(|_| Err("Recent reviews could not be loaded".into())),
-            )
-        });
-        let mut pages = reviews::SteamReviews {
-            appid: id.into(),
-            ..Default::default()
-        };
-        match main {
-            Ok(page) => {
-                out.review_summary = page.summary.clone();
-                if let Some(score) = page.score {
-                    out.scores.insert(0, format!("Steam players {score:.1}/5"));
-                }
-                pages.main = page;
-            }
-            Err(error) => {
-                pages.main.error = Some(error.clone());
-                out.warnings.push(error);
-            }
-        }
-        match recent {
-            Ok(page) => pages.recent = page,
-            Err(error) => {
-                pages.recent.error = Some(error.clone());
-                out.warnings.push(error);
-            }
-        }
-        reviews::resolve_page_authors(client, &mut [&mut pages.main, &mut pages.recent]);
-        if pages.main.error.is_none() {
-            out.reviews = pages.main.reviews.clone();
-        }
-        out.review_source = "Steam players".into();
-        out.steam_reviews = Some(pages);
+        steam_reviews(client, id, out);
     }
     Ok(steam_parent(id, Some(&data)))
 }
@@ -171,8 +177,9 @@ fn parse_steam(data: &Value, out: &mut Details) {
     }
     for movie in array(data, "movies") {
         let url = [
-            text(movie, "hls_h264"),
+            // One DASH manifest starts faster than HLS, which fetches every variant playlist.
             text(movie, "dash_h264"),
+            text(movie, "hls_h264"),
             text(&movie["mp4"], "480"),
             text(&movie["webm"], "480"),
         ]

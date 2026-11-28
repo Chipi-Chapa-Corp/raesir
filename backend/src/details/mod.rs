@@ -344,13 +344,18 @@ pub fn refresh_cached_review_authors(game: &LibraryGame, root: &Path) -> Option<
     Some(details)
 }
 
-fn store_details(client: &Client, game: &LibraryGame, details: &mut Details) -> Result<(), String> {
+fn store_details(
+    client: &Client,
+    game: &LibraryGame,
+    details: &mut Details,
+    with_reviews: bool,
+) -> Result<(), String> {
     match game.store.as_str() {
         "epic" => providers::epic(client, game, details),
         "ea" => providers::ea(client, game, details),
         "ubisoft" => providers::ubisoft(client, game, details),
         "xbox" => providers::xbox(client, game, details),
-        "wargaming" => providers::wargaming(client, game, details),
+        "wargaming" => providers::wargaming(client, game, details, with_reviews),
         _ => Err("This store does not supply game details yet.".into()),
     }
 }
@@ -444,45 +449,13 @@ pub(crate) fn store_screenshot(client: &Client, game: &LibraryGame) -> Option<St
     {
         providers::steam(client, id, &mut details, false).ok()?;
     } else {
-        store_details(client, game, &mut details).ok()?;
+        store_details(client, game, &mut details, false).ok()?;
     }
     details.first_screenshot().map(|media| media.url.clone())
 }
 
-pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
-    if crate::http::network_disabled() {
-        return Err("Game details are offline. Cached information is still available.".into());
-    }
-    let client = http()?;
-    let mut details = Details {
-        key: game.key.clone(),
-        title: game.title.clone(),
-        ..Default::default()
-    };
-    let mut parent = None;
-    let result = if game.store == "steam" {
-        parent = providers::steam_parent(&game.id, None);
-        providers::steam(client, &game.id, &mut details, true).map(|discovered_parent| {
-            parent = discovered_parent.or(parent.take());
-        })
-    } else {
-        store_details(client, game, &mut details)
-    };
-    details.developers.retain(|s| !s.trim().is_empty());
-    details.publishers.retain(|s| !s.trim().is_empty());
-    if let Err(error) = result {
-        details.warnings.push(error);
-    }
-    if game.store != "steam" && details.has_metadata_gaps() {
-        parent = matching_steam_app(client, &game.title);
-    }
-    if let Some(id) = parent.filter(|_| details.has_metadata_gaps()) {
-        let mut original = Details::default();
-        if providers::steam(client, &id, &mut original, details.reviews.is_empty()).is_ok() {
-            details.inherit_missing(original, game.store == "steam");
-        }
-    }
-    if details.description.is_empty()
+fn has_any_content(details: &Details) -> bool {
+    !(details.description.is_empty()
         && details.media.is_empty()
         && details.requirements.is_empty()
         && details.reviews.is_empty()
@@ -491,14 +464,10 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
         && details.genres.is_empty()
         && details.released.is_empty()
         && details.age_rating.is_empty()
-        && details.scores.is_empty()
-    {
-        return Err(details
-            .warnings
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "No game details were found for this edition.".into()));
-    }
+        && details.scores.is_empty())
+}
+
+fn finalize_media_and_reviews(details: &mut Details) {
     let mut seen = std::collections::HashSet::new();
     details
         .media
@@ -514,6 +483,93 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
     });
     details.media.truncate(24);
     details.reviews.truncate(20);
+}
+
+/// Phase 1: fetch primary store metadata quickly without waiting for reviews or
+/// secondary fallback searches, so the details header, description, and media
+/// render immediately.
+pub fn fetch_core(game: &LibraryGame, root: &Path) -> Result<(Details, Option<String>), String> {
+    if crate::http::network_disabled() {
+        return Err("Game details are offline. Cached information is still available.".into());
+    }
+    let client = http()?;
+    let mut details = Details {
+        key: game.key.clone(),
+        title: game.title.clone(),
+        ..Default::default()
+    };
+    let mut parent = None;
+    let result = if game.store == "steam" {
+        parent = providers::steam_parent(&game.id, None);
+        providers::steam(client, &game.id, &mut details, false).map(|discovered_parent| {
+            parent = discovered_parent.or(parent.take());
+        })
+    } else {
+        store_details(client, game, &mut details, false)
+    };
+    details.developers.retain(|s| !s.trim().is_empty());
+    details.publishers.retain(|s| !s.trim().is_empty());
+    if let Err(error) = result {
+        details.warnings.push(error);
+    }
+    if !has_any_content(&details) {
+        return Err(details
+            .warnings
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "No game details were found for this edition.".into()));
+    }
+    // Keep any previously cached reviews visible while Phase 2 refreshes them.
+    if details.reviews.is_empty()
+        && let Some(previous) = cached(game, root)
+        && !previous.reviews.is_empty()
+    {
+        details.reviews = previous.reviews;
+        details.review_summary = previous.review_summary;
+        details.review_source = previous.review_source;
+        details.steam_reviews = previous.steam_reviews;
+    }
+    finalize_media_and_reviews(&mut details);
+    details.normalize();
+    Ok((details, parent))
+}
+
+/// Phase 2: fetch reviews, reviewer names, and secondary Steam fallback metadata,
+/// then persist the completed details record to disk.
+pub fn enrich(
+    game: &LibraryGame,
+    mut details: Details,
+    mut parent: Option<String>,
+    root: &Path,
+) -> Result<Details, String> {
+    if crate::http::network_disabled() {
+        return Err("Game details are offline. Cached information is still available.".into());
+    }
+    let client = http()?;
+    if game.store == "steam" {
+        providers::steam_reviews(client, &game.id, &mut details);
+    } else if game.store == "wargaming"
+        && let Some(id) = crate::adapters::wargaming_steam_app(&game.id)
+    {
+        providers::steam_reviews(client, id, &mut details);
+    }
+    if game.store != "steam" && details.has_metadata_gaps() {
+        parent = matching_steam_app(client, &game.title);
+    }
+    if let Some(id) = parent.filter(|_| details.has_metadata_gaps()) {
+        let mut original = Details::default();
+        if providers::steam(client, &id, &mut original, details.reviews.is_empty()).is_ok() {
+            details.inherit_missing(original, game.store == "steam");
+        }
+    }
+    if !has_any_content(&details) {
+        return Err(details
+            .warnings
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "No game details were found for this edition.".into()));
+    }
+    finalize_media_and_reviews(&mut details);
     if let Some(pages) = details.steam_reviews.as_mut()
         && pages.needs_author_names()
         && let Some(previous) = cached(game, root).and_then(|data| data.steam_reviews)
@@ -530,6 +586,29 @@ pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     crate::storage::write_json(&path(game, root), &details)?;
     Ok(details)
+}
+
+pub fn fetch(game: &LibraryGame, root: &Path) -> Result<Details, String> {
+    match fetch_core(game, root) {
+        Ok((core, parent)) => enrich(game, core, parent, root),
+        Err(core_error) => {
+            if crate::http::network_disabled() {
+                return Err(core_error);
+            }
+            // Parent-only Steam editions (e.g. Unstable branches) have no own store
+            // page and rely entirely on parent inheritance in Phase 2.
+            let parent = (game.store == "steam")
+                .then(|| providers::steam_parent(&game.id, None))
+                .flatten();
+            let details = Details {
+                key: game.key.clone(),
+                title: game.title.clone(),
+                warnings: vec![core_error],
+                ..Default::default()
+            };
+            enrich(game, details, parent, root)
+        }
+    }
 }
 fn direct_video(media: &Media) -> bool {
     media.video && !media.url.contains("youtube.com/") && !media.url.contains("youtu.be/")

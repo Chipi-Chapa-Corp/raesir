@@ -303,6 +303,16 @@ pub fn mark_tested_titles(report: &mut Report) {
     let Some(client) = Client::discover() else {
         return;
     };
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Some((fetched, value)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && fetched.elapsed() < std::time::Duration::from_secs(300)
+    {
+        apply_tested_titles(report, value);
+        return;
+    }
     let mut command = client.command();
     command.args(["--json", "titles"]);
     if let Ok(value) = account::query(
@@ -311,6 +321,8 @@ pub fn mark_tested_titles(report: &mut Report) {
         "Ferestre compatibility data could not be read",
     ) {
         apply_tested_titles(report, &value);
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((std::time::Instant::now(), value));
     }
 }
 

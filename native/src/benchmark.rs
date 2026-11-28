@@ -64,7 +64,7 @@ pub fn start(window: &Window, cx: &mut Context<Launcher>) {
                 this.update_in(cx, |this, window, cx| {
                     catalog_games = this.games.len();
                     visible_games = this.visible.len();
-                    max_decoded_posters = max_decoded_posters.max(this.games.iter().filter(|g| g.poster.is_some()).count());
+                    max_decoded_posters = max_decoded_posters.max(this.games.iter().filter(|g| g.card_poster.is_some() || g.poster.is_some()).count());
                     let art = &this.artwork_cache;
                     artwork_stats = json!({"memory_hits":art.memory_hits,"disk_hits":art.disk_hits,"downloads":art.downloads,
                         "peak_downloads":art.peak_downloads,"peak_disk_loads":art.peak_disk_loads,"cancelled_jobs":art.cancelled_jobs});

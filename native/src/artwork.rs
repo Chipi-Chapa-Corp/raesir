@@ -43,7 +43,7 @@ pub struct Job {
 
 #[derive(Clone)]
 pub(crate) struct Ready {
-    pub poster: Arc<RenderImage>,
+    pub poster: Option<Arc<RenderImage>>,
     pub title: Option<String>,
     pub background: Arc<RenderImage>,
     pub card: Arc<RenderImage>,
@@ -51,8 +51,9 @@ pub(crate) struct Ready {
 
 impl Ready {
     fn bytes(&self) -> usize {
-        [&self.poster, &self.background, &self.card]
-            .into_iter()
+        self.poster
+            .iter()
+            .chain([&self.background, &self.card])
             .map(|image| image.as_bytes(0).map_or(0, <[u8]>::len))
             .sum()
     }
@@ -108,8 +109,10 @@ impl Cache {
     }
     fn retire(&mut self, ready: Ready) {
         self.bytes -= ready.bytes();
-        self.retired
-            .extend([ready.poster, ready.card, ready.background]);
+        if let Some(poster) = ready.poster {
+            self.retired.push(poster);
+        }
+        self.retired.extend([ready.card, ready.background]);
     }
     pub(crate) fn release_textures(&mut self, window: &mut Window) {
         self.retired.retain(|image| {
@@ -197,7 +200,7 @@ pub fn maintain(this: &mut Launcher, window: &mut Window, cx: &mut Context<Launc
             .or_insert(first);
     }
     for (index, game) in this.games.iter_mut().enumerate() {
-        if !keep.contains(&index) && game.poster.is_some() {
+        if !keep.contains(&index) && (game.card_poster.is_some() || game.poster.is_some()) {
             game.poster = None;
             game.card_poster = None;
             game.background = None;
@@ -298,7 +301,9 @@ fn request_prioritized(
     cx: &mut Context<Launcher>,
 ) {
     let game = &this.games[index];
-    if this.closing || game.poster.is_some() || this.artwork_pending.contains_key(&game.source.key)
+    if this.closing
+        || game.card_poster.is_some()
+        || this.artwork_pending.contains_key(&game.source.key)
     {
         return;
     }
@@ -377,33 +382,24 @@ fn request_prioritized(
     // GPUI's shared executor. Cached cards have a separate worker lane.
     let worker_source = source.clone();
     let worker_cancel = cancel.clone();
-    if std::thread::Builder::new()
-        .name("raesir-artwork".into())
-        .spawn(move || {
-            let result = if lane == Lane::Disk {
-                load_cached(&backend.cache, &worker_source, CardShape::Source)
-                    .map(|ready| (ready, None))
-            } else {
-                prepare(&backend, &worker_source, CardShape::Source, &worker_cancel)
-            };
-            match result {
-                Ok((ready, persist)) => {
-                    let _ = send.send(Ok(ready));
-                    if let Some(persist) = persist {
-                        queue_persist(persist);
-                    }
-                }
-                Err(error) => {
-                    let _ = send.send(Err(error));
+    spawn_worker(lane, move || {
+        let result = if lane == Lane::Disk {
+            load_cached_grid(&backend.cache, &worker_source, CardShape::Source)
+        } else {
+            prepare(&backend, &worker_source, CardShape::Source, &worker_cancel)
+        };
+        match result {
+            Ok((ready, persist)) => {
+                let _ = send.send(Ok(ready));
+                if let Some(persist) = persist {
+                    queue_persist(persist);
                 }
             }
-        })
-        .is_err()
-    {
-        this.artwork_pending.remove(&game_key);
-        this.artwork_attempted.remove(&game_key);
-        return;
-    }
+            Err(error) => {
+                let _ = send.send(Err(error));
+            }
+        }
+    });
     cx.spawn(async move |this, cx| {
         let result = receive.await;
         this.update(cx, |this, cx| {
@@ -427,7 +423,9 @@ fn request_prioritized(
                 }
             } else if lane == Lane::Disk {
                 // A damaged processed cache can be rebuilt without a retry loop.
-                let _ = fs::remove_file(paths(&this.backend.cache, &cache_key).1);
+                let (_, card_path) = paths(&this.backend.cache, &cache_key);
+                let _ = fs::remove_file(card_path);
+                let _ = fs::remove_file(fast_card_path(&this.backend.cache, &cache_key));
                 this.artwork_attempted.remove(&game_key);
             }
             cx.notify();
@@ -439,7 +437,9 @@ fn request_prioritized(
 
 fn apply(this: &mut Launcher, index: usize, ready: Ready, cx: &mut Context<Launcher>) {
     let game = &mut this.games[index];
-    game.poster = Some(ready.poster.clone());
+    if let Some(poster) = ready.poster.clone() {
+        game.poster = Some(poster);
+    }
     game.card_poster = Some(ready.card);
     if !game.background_checked || game.background.is_none() {
         game.background = Some(ready.background.clone());
@@ -456,9 +456,11 @@ fn apply(this: &mut Launcher, index: usize, ready: Ready, cx: &mut Context<Launc
                 .ok();
         });
     }
-    if let Some(page) = &this.details {
+    if let Some(page) = &this.details
+        && let Some(poster) = ready.poster
+    {
         page.update(cx, |page, cx| {
-            page.update_cover(&game.source.key, ready.poster, ready.background, cx)
+            page.update_cover(&game.source.key, poster, ready.background, cx)
         });
     }
 }
@@ -487,16 +489,52 @@ fn paths(cache: &Path, key: &str) -> (PathBuf, PathBuf) {
         root.join(format!("{key}-v7-card.png")),
     )
 }
+fn fast_card_path(cache: &Path, key: &str) -> PathBuf {
+    cache.join("thumbnails").join(format!("{key}-v8.card"))
+}
+fn is_fresh_community(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(86_400))
+}
 fn prepared(cache: &Path, key: &str, community: bool) -> bool {
+    let fast = fast_card_path(cache, key);
+    if fast.is_file() && (!community || is_fresh_community(&fast)) {
+        return true;
+    }
     let (poster, card) = paths(cache, key);
-    poster.is_file()
-        && card.is_file()
-        && (!community
-            || fs::metadata(&poster)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age < std::time::Duration::from_secs(86_400)))
+    poster.is_file() && card.is_file() && (!community || is_fresh_community(&poster))
+}
+fn spawn_worker(lane: Lane, job: impl FnOnce() + Send + 'static) {
+    type JobFn = Box<dyn FnOnce() + Send + 'static>;
+    fn make_pool(name: &'static str, threads: usize) -> mpsc::Sender<JobFn> {
+        let (send, receive) = mpsc::channel::<JobFn>();
+        let receive = Arc::new(Mutex::new(receive));
+        for index in 0..threads {
+            let receive = receive.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("{name}-{index}"))
+                .spawn(move || {
+                    loop {
+                        let next = receive.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok(job) = next else { break };
+                        job();
+                    }
+                });
+        }
+        send
+    }
+    static DISK_POOL: LazyLock<mpsc::Sender<JobFn>> =
+        LazyLock::new(|| make_pool("raesir-art-disk", DISK_LOADS));
+    static DOWNLOAD_POOL: LazyLock<mpsc::Sender<JobFn>> =
+        LazyLock::new(|| make_pool("raesir-art-dl", 16));
+    let pool = match lane {
+        Lane::Disk => &*DISK_POOL,
+        Lane::Download => &*DOWNLOAD_POOL,
+    };
+    let _ = pool.send(Box::new(job));
 }
 fn render(mut pixels: image_codec::RgbaImage) -> Arc<RenderImage> {
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -504,6 +542,92 @@ fn render(mut pixels: image_codec::RgbaImage) -> Arc<RenderImage> {
     }
     Arc::new(RenderImage::new(vec![image_codec::Frame::new(pixels)]))
 }
+fn render_bgra(width: u32, height: u32, bytes: Vec<u8>) -> Option<Arc<RenderImage>> {
+    let image = image_codec::RgbaImage::from_raw(width, height, bytes)?;
+    Some(Arc::new(RenderImage::new(vec![image_codec::Frame::new(
+        image,
+    )])))
+}
+const FAST_CARD_MAGIC: &[u8; 4] = b"RSR8";
+
+fn encode_fast_card(
+    card: &RenderImage,
+    background: &RenderImage,
+    title: Option<&str>,
+) -> Option<Vec<u8>> {
+    let card_size = card.size(0);
+    let bg_size = background.size(0);
+    let (cw, ch) = (
+        u16::try_from(card_size.width.0).ok()?,
+        u16::try_from(card_size.height.0).ok()?,
+    );
+    let (bw, bh) = (
+        u16::try_from(bg_size.width.0).ok()?,
+        u16::try_from(bg_size.height.0).ok()?,
+    );
+    let card_bytes = card.as_bytes(0)?;
+    let bg_bytes = background.as_bytes(0)?;
+    let title_bytes = title.unwrap_or("").as_bytes();
+    let title_len = u16::try_from(title_bytes.len()).ok()?;
+    let mut raw = Vec::with_capacity(card_bytes.len() + bg_bytes.len());
+    raw.extend_from_slice(card_bytes);
+    raw.extend_from_slice(bg_bytes);
+    let (codec, payload) = raesir_backend::util::compress_fast(&raw);
+    let mut out = Vec::with_capacity(15 + title_bytes.len() + payload.len());
+    out.extend_from_slice(FAST_CARD_MAGIC);
+    out.push(codec);
+    out.extend_from_slice(&cw.to_le_bytes());
+    out.extend_from_slice(&ch.to_le_bytes());
+    out.extend_from_slice(&bw.to_le_bytes());
+    out.extend_from_slice(&bh.to_le_bytes());
+    out.extend_from_slice(&title_len.to_le_bytes());
+    out.extend_from_slice(title_bytes);
+    out.extend_from_slice(&payload);
+    Some(out)
+}
+
+fn decode_fast_card(bytes: &[u8]) -> Option<(Arc<RenderImage>, Arc<RenderImage>, Option<String>)> {
+    if bytes.len() < 15 || &bytes[0..4] != FAST_CARD_MAGIC {
+        return None;
+    }
+    let codec = bytes[4];
+    let cw = u16::from_le_bytes([bytes[5], bytes[6]]) as usize;
+    let ch = u16::from_le_bytes([bytes[7], bytes[8]]) as usize;
+    let bw = u16::from_le_bytes([bytes[9], bytes[10]]) as usize;
+    let bh = u16::from_le_bytes([bytes[11], bytes[12]]) as usize;
+    let title_len = u16::from_le_bytes([bytes[13], bytes[14]]) as usize;
+    let header_end = 15usize.checked_add(title_len)?;
+    if bytes.len() < header_end || cw == 0 || ch == 0 || bw == 0 || bh == 0 {
+        return None;
+    }
+    let title_str = std::str::from_utf8(&bytes[15..header_end]).ok()?;
+    let title = (!title_str.is_empty()).then(|| title_str.to_owned());
+    let card_len = cw.checked_mul(ch)?.checked_mul(4)?;
+    let bg_len = bw.checked_mul(bh)?.checked_mul(4)?;
+    let total_len = card_len.checked_add(bg_len)?;
+    let mut raw = raesir_backend::util::decompress_fast(codec, &bytes[header_end..], total_len)?;
+    let bg_bytes = raw.split_off(card_len);
+    let card = render_bgra(cw as u32, ch as u32, raw)?;
+    let background = render_bgra(bw as u32, bh as u32, bg_bytes)?;
+    Some((card, background, title))
+}
+
+fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or("No thumbnail directory")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    temp.write_all(bytes).map_err(|e| e.to_string())?;
+    temp.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn load_poster(cache: &Path, game: &LibraryGame) -> Option<Arc<RenderImage>> {
+    let key = key(game, CardShape::Source);
+    let (poster, _) = paths(cache, &key);
+    let image = image_codec::open(&poster).ok()?;
+    Some(render(image.to_rgba8()))
+}
+
 fn ready(
     image: image_codec::DynamicImage,
     card: image_codec::RgbaImage,
@@ -511,18 +635,77 @@ fn ready(
 ) -> Ready {
     let background = crate::backdrop::preview(&image);
     Ready {
-        poster: render(image.to_rgba8()),
+        poster: Some(render(image.to_rgba8())),
         card: render(card),
         background,
         title,
     }
 }
-fn load_cached(cache: &Path, game: &LibraryGame, shape: CardShape) -> Result<Ready, String> {
+fn load_cached_grid(
+    cache: &Path,
+    game: &LibraryGame,
+    shape: CardShape,
+) -> Result<(Ready, Option<Persist>), String> {
     let key = key(game, shape);
-    if !prepared(cache, &key, raesir_backend::artwork::fallback_applies(game)) {
+    let community = raesir_backend::artwork::fallback_applies(game);
+    if !prepared(cache, &key, community) {
         return Err("Thumbnail needs refreshing".into());
     }
-    let (poster, card) = paths(cache, &key);
+    let fast_path = fast_card_path(cache, &key);
+    if fast_path.is_file()
+        && (!community || is_fresh_community(&fast_path))
+        && let Ok(bytes) = fs::read(&fast_path)
+        && let Some((card, background, title)) = decode_fast_card(&bytes)
+    {
+        return Ok((
+            Ready {
+                poster: None,
+                card,
+                background,
+                title,
+            },
+            None,
+        ));
+    }
+    // Upgrade legacy PNG + JPEG cache once and persist the fast binary card.
+    let loaded = load_cached_legacy(cache, &key)?;
+    let persist = Persist::fast_only(fast_path, loaded.card.clone(), loaded.background.clone(), loaded.title.clone());
+    Ok((
+        Ready {
+            poster: None,
+            card: loaded.card,
+            background: loaded.background,
+            title: loaded.title,
+        },
+        Some(persist),
+    ))
+}
+fn load_cached(cache: &Path, game: &LibraryGame, shape: CardShape) -> Result<Ready, String> {
+    let key = key(game, shape);
+    let community = raesir_backend::artwork::fallback_applies(game);
+    if !prepared(cache, &key, community) {
+        return Err("Thumbnail needs refreshing".into());
+    }
+    let fast_path = fast_card_path(cache, &key);
+    if fast_path.is_file()
+        && (!community || is_fresh_community(&fast_path))
+        && let Ok(bytes) = fs::read(&fast_path)
+        && let Some((card, background, title)) = decode_fast_card(&bytes)
+    {
+        let (poster_path, _) = paths(cache, &key);
+        if let Ok(image) = image_codec::open(&poster_path) {
+            return Ok(Ready {
+                poster: Some(render(image.to_rgba8())),
+                card,
+                background,
+                title,
+            });
+        }
+    }
+    load_cached_legacy(cache, &key)
+}
+fn load_cached_legacy(cache: &Path, key: &str) -> Result<Ready, String> {
+    let (poster, card) = paths(cache, key);
     let image = image_codec::open(&poster).map_err(|e| e.to_string())?;
     let card = image_codec::open(card)
         .map_err(|e| e.to_string())?
@@ -538,39 +721,46 @@ fn atomic_image(
     image: &image_codec::DynamicImage,
     format: image_codec::ImageFormat,
 ) -> Result<(), String> {
-    let parent = path.parent().ok_or("No thumbnail directory")?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let mut bytes = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut bytes, format)
         .map_err(|e| e.to_string())?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    temp.write_all(bytes.get_ref()).map_err(|e| e.to_string())?;
-    temp.persist(path).map_err(|e| e.to_string())?;
-    Ok(())
+    atomic_bytes(path, bytes.get_ref())
 }
 
 struct Persist {
-    poster: PathBuf,
-    card_path: PathBuf,
-    image: image_codec::DynamicImage,
-    card: image_codec::RgbaImage,
+    poster: Option<(PathBuf, image_codec::DynamicImage)>,
+    fast_path: PathBuf,
+    card: Arc<RenderImage>,
+    background: Arc<RenderImage>,
     title: Option<String>,
 }
 impl Persist {
+    fn fast_only(
+        fast_path: PathBuf,
+        card: Arc<RenderImage>,
+        background: Arc<RenderImage>,
+        title: Option<String>,
+    ) -> Self {
+        Self {
+            poster: None,
+            fast_path,
+            card,
+            background,
+            title,
+        }
+    }
     fn write(self) {
-        let _ = atomic_image(
-            &self.poster,
-            &image_codec::DynamicImage::ImageRgb8(self.image.to_rgb8()),
-            image_codec::ImageFormat::Jpeg,
-        );
-        let _ = atomic_image(
-            &self.card_path,
-            &image_codec::DynamicImage::ImageRgba8(self.card),
-            image_codec::ImageFormat::Png,
-        );
-        let _ =
-            raesir_backend::storage::write_json(&self.poster.with_extension("json"), &self.title);
+        if let Some((poster_path, image)) = self.poster {
+            let _ = atomic_image(
+                &poster_path,
+                &image_codec::DynamicImage::ImageRgb8(image.to_rgb8()),
+                image_codec::ImageFormat::Jpeg,
+            );
+        }
+        if let Some(encoded) = encode_fast_card(&self.card, &self.background, self.title.as_deref()) {
+            let _ = atomic_bytes(&self.fast_path, &encoded);
+        }
     }
 }
 fn queue_persist(job: Persist) {
@@ -623,15 +813,17 @@ fn prepare(
     }
     // Apply the fade to the visible crop so the card never clips it.
     let card = card_pixels(&fit_card_image(&image, shape));
-    let (poster, card_path) = paths(&backend.cache, &key(game, shape));
-    let ready = ready(image.clone(), card.clone(), art.title.clone());
+    let cache_key = key(game, shape);
+    let (poster, _) = paths(&backend.cache, &cache_key);
+    let fast_path = fast_card_path(&backend.cache, &cache_key);
+    let ready = ready(image.clone(), card, art.title.clone());
     Ok((
-        ready,
+        ready.clone(),
         Some(Persist {
-            poster,
-            card_path,
-            image,
-            card,
+            poster: Some((poster, image)),
+            fast_path,
+            card: ready.card,
+            background: ready.background,
             title: art.title,
         }),
     ))
@@ -732,7 +924,7 @@ mod tests {
             image_codec::Rgba([10, 30, 90, 255]),
         ));
         Ready {
-            poster: image.clone(),
+            poster: Some(image.clone()),
             card: image.clone(),
             background: image,
             title: None,
@@ -840,5 +1032,36 @@ mod tests {
             .unwrap();
         assert!(!prepared(dir.path(), &new_key, true));
         assert!(prepared(dir.path(), &new_key, false));
+    }
+
+    #[test]
+    fn fast_binary_card_roundtrips_pixels_backdrop_and_title_without_jpeg_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = raesir_backend::catalog::entry("steam", "77", "77", vec![], "fixture");
+        let pixels = image_codec::DynamicImage::ImageRgba8(image_codec::RgbaImage::from_pixel(
+            64,
+            96,
+            image_codec::Rgba([40, 120, 200, 255]),
+        ));
+        let card = card_pixels(&pixels.to_rgba8());
+        let expected = ready(pixels, card, Some("Resolved Title".into()));
+        let fast_path = fast_card_path(dir.path(), &key(&game, CardShape::Source));
+        Persist::fast_only(
+            fast_path.clone(),
+            expected.card.clone(),
+            expected.background.clone(),
+            expected.title.clone(),
+        )
+        .write();
+        assert!(fast_path.is_file());
+        let (loaded, upgrade) = load_cached_grid(dir.path(), &game, CardShape::Source).unwrap();
+        assert!(upgrade.is_none());
+        assert!(loaded.poster.is_none());
+        assert_eq!(loaded.title.as_deref(), Some("Resolved Title"));
+        assert_eq!(loaded.card.as_bytes(0), expected.card.as_bytes(0));
+        assert_eq!(
+            loaded.background.as_bytes(0),
+            expected.background.as_bytes(0)
+        );
     }
 }

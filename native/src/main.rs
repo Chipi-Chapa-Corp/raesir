@@ -1222,7 +1222,7 @@ fn main() {
             println!(
                 "{stage}: {:.2} ms, {:?}",
                 start.elapsed().as_secs_f64() * 1000.,
-                ready.poster.size(0)
+                ready.poster.as_ref().unwrap_or(&ready.card).size(0)
             );
         }
         return;

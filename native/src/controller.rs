@@ -86,7 +86,17 @@ impl Launcher {
         self.starting = false;
         self.load_error = None;
         self.game_menu = None;
-        self.artwork_attempted.clear();
+        let unchanged_covers: std::collections::HashSet<&str> = self
+            .games
+            .iter()
+            .filter(|game| {
+                old.get(&game.source.key)
+                    .is_some_and(|previous| previous.source.cover == game.source.cover)
+            })
+            .map(|game| game.source.key.as_str())
+            .collect();
+        self.artwork_attempted
+            .retain(|key| unchanged_covers.contains(key.as_str()));
         self.filter(cx);
         if top.item_ix > 0
             && let Some(anchor) = anchor
@@ -240,32 +250,30 @@ impl Launcher {
                         return;
                     }
                     let pass = backend.clone();
-                    match cx
+                    let owned = backend.clone();
+                    let pass_task = cx
                         .background_executor()
-                        .spawn(async move { pass.refresh_game_pass(full) })
-                        .await
-                    {
-                        Ok(Some(report)) => {
-                            this.update(cx, |this, cx| this.apply_report(report, cx))
-                                .ok();
-                        }
+                        .spawn(async move { pass.refresh_game_pass(full) });
+                    let owned_task = cx
+                        .background_executor()
+                        .spawn(async move { owned.ownership() });
+                    let (pass_result, owned_result) = futures::join!(pass_task, owned_task);
+                    let mut latest = None;
+                    match pass_result {
+                        Ok(Some(report)) => latest = Some(report),
                         Err(e) => {
                             this.update(cx, |this, cx| this.notice(e, cx)).ok();
                         }
                         _ => {}
                     }
-                    let owned = backend.clone();
-                    match cx
-                        .background_executor()
-                        .spawn(async move { owned.ownership() })
-                        .await
-                    {
-                        Ok(Some(report)) => {
-                            this.update(cx, |this, cx| this.apply_report(report, cx))
-                                .ok();
-                        }
+                    match owned_result {
+                        Ok(Some(report)) => latest = Some(report),
                         Err(e) if full => error = Some(e),
                         _ => {}
+                    }
+                    if let Some(report) = latest {
+                        this.update(cx, |this, cx| this.apply_report(report, cx))
+                            .ok();
                     }
                     if full {
                         for profile in backend.epic_profiles() {

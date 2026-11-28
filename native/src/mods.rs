@@ -244,7 +244,7 @@ impl ModBrowser {
             .iter()
             .find(|r| r.id == id)
             .and_then(|r| self.thumbnails.cache.peek(r.artwork_key()))
-            .map(|r| r.poster)
+            .map(|r| r.poster.unwrap_or(r.card))
     }
 
     pub(crate) fn mod_version(&self, id: &str) -> Option<String> {

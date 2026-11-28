@@ -2,7 +2,15 @@ use crate::{details, storage};
 use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, io::Read as _, path::Path, sync::LazyLock, time::Duration};
+use std::{
+    collections::HashMap,
+    io::Read as _,
+    path::Path,
+    sync::{LazyLock, Mutex},
+    time::Duration,
+};
+
+static INDEX_LOCK: Mutex<()> = Mutex::new(());
 
 pub mod reviews;
 
@@ -82,6 +90,7 @@ pub fn xbox_edition(cache: &Path, product_id: &str, title: &str) -> Option<Steam
                         result: found,
                     },
                 );
+                update_xbox_index(cache, title, found);
             }
         }
     }
@@ -144,8 +153,26 @@ pub fn review_count(cache: &Path, app_id: u32) -> Option<u64> {
     load_rating(cache, app_id, true)?.total
 }
 
+fn index_is_current(dir: &Path, index: &Path) -> bool {
+    let Ok(index_mtime) = std::fs::metadata(index).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let Ok(dir_mtime) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
+        return true;
+    };
+    index_mtime >= dir_mtime
+}
+
 pub fn cached_ratings(cache: &Path) -> HashMap<u32, Tier> {
-    std::fs::read_dir(cache.join("protondb"))
+    let dir = cache.join("protondb");
+    let index = dir.join("index.json");
+    if index_is_current(&dir, &index)
+        && let Ok(bytes) = std::fs::read(&index)
+        && let Ok(map) = serde_json::from_slice::<HashMap<u32, Tier>>(&bytes)
+    {
+        return map;
+    }
+    let map: HashMap<u32, Tier> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
         .filter_map(|entry| {
@@ -156,7 +183,83 @@ pub fn cached_ratings(cache: &Path) -> HashMap<u32, Tier> {
             let id = path.file_stem()?.to_str()?.parse().ok()?;
             Some((id, read_rating(&path)?.tier?))
         })
+        .collect();
+    if !map.is_empty() {
+        let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = storage::write_json(&index, &map);
+    }
+    map
+}
+
+pub fn cached_xbox_editions(
+    cache: &Path,
+    ratings: &HashMap<u32, Tier>,
+) -> HashMap<String, SteamEdition> {
+    let dir = cache.join("xbox-steam-editions");
+    let index = dir.join("index.json");
+    let matches = if index_is_current(&dir, &index)
+        && let Ok(bytes) = std::fs::read(&index)
+        && let Ok(map) = serde_json::from_slice::<HashMap<String, StoreMatch>>(&bytes)
+    {
+        map
+    } else {
+        let map: HashMap<String, StoreMatch> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                if path.extension()? != "json" || path.file_name()? == "index.json" {
+                    return None;
+                }
+                let bytes = std::fs::read(&path).ok()?;
+                let entry: EditionMatch = serde_json::from_slice(&bytes).ok()?;
+                Some((entry.title, entry.result))
+            })
+            .collect();
+        if !map.is_empty() {
+            let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = storage::write_json(&index, &map);
+        }
+        map
+    };
+    matches
+        .into_iter()
+        .map(|(title, result)| {
+            let edition = match result {
+                StoreMatch::Missing => SteamEdition::Missing,
+                StoreMatch::App(id) => SteamEdition::Listed(ratings.get(&id).copied()),
+            };
+            (title, edition)
+        })
         .collect()
+}
+
+fn update_rating_index(cache: &Path, app_id: u32, tier: Option<Tier>) {
+    let index = cache.join("protondb").join("index.json");
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map: HashMap<u32, Tier> = std::fs::read(&index)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let changed = match tier {
+        Some(tier) => map.insert(app_id, tier) != Some(tier),
+        None => map.remove(&app_id).is_some(),
+    };
+    if changed {
+        let _ = storage::write_json(&index, &map);
+    }
+}
+
+fn update_xbox_index(cache: &Path, title: &str, result: StoreMatch) {
+    let index = cache.join("xbox-steam-editions").join("index.json");
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map: HashMap<String, StoreMatch> = std::fs::read(&index)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    if map.insert(title.to_owned(), result) != Some(result) {
+        let _ = storage::write_json(&index, &map);
+    }
 }
 
 fn read_rating(path: &Path) -> Option<Rating> {
@@ -178,6 +281,7 @@ fn load_rating(cache: &Path, app_id: u32, require_count: bool) -> Option<Rating>
     match fetch(app_id, now) {
         Some(rating) => {
             let _ = storage::write_json(&path, &rating);
+            update_rating_index(cache, app_id, rating.tier);
             Some(rating)
         }
         None => previous,
@@ -272,4 +376,59 @@ fn failed_or_incomplete_steam_searches_do_not_claim_the_edition_is_missing() {
     for response in [json!({}), json!({"total": 10, "items": []})] {
         assert_eq!(match_store_search(&response, "Retro Classics"), None);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn consolidated_indexes_load_cached_protondb_and_xbox_editions() {
+    let dir = tempfile::tempdir().unwrap();
+    storage::write_json(
+        &dir.path().join("protondb/42.json"),
+        &Rating {
+            checked: 100,
+            tier: Some(Tier::Platinum),
+            total: Some(50),
+        },
+    )
+    .unwrap();
+    storage::write_json(
+        &dir.path().join("xbox-steam-editions/9MT5NJ5W7B8Z.json"),
+        &EditionMatch {
+            checked: 100,
+            title: "Fixture Game".into(),
+            result: StoreMatch::App(42),
+        },
+    )
+    .unwrap();
+    let ratings = cached_ratings(dir.path());
+    assert_eq!(ratings.get(&42), Some(&Tier::Platinum));
+    assert!(dir.path().join("protondb/index.json").is_file());
+
+    let editions = cached_xbox_editions(dir.path(), &ratings);
+    assert_eq!(
+        editions.get("Fixture Game"),
+        Some(&SteamEdition::Listed(Some(Tier::Platinum)))
+    );
+    assert!(dir.path().join("xbox-steam-editions/index.json").is_file());
+
+    // Subsequent calls read directly from index.json even without individual files.
+    std::fs::remove_file(dir.path().join("protondb/42.json")).unwrap();
+    std::fs::remove_file(dir.path().join("xbox-steam-editions/9MT5NJ5W7B8Z.json")).unwrap();
+    // Touch index.json so its mtime is >= the directory mtime after removing the entries.
+    let now = std::time::SystemTime::now() + Duration::from_secs(2);
+    for idx in ["protondb/index.json", "xbox-steam-editions/index.json"] {
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join(idx))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(now))
+            .unwrap();
+    }
+    let ratings2 = cached_ratings(dir.path());
+    assert_eq!(ratings2.get(&42), Some(&Tier::Platinum));
+    let editions2 = cached_xbox_editions(dir.path(), &ratings2);
+    assert_eq!(
+        editions2.get("Fixture Game"),
+        Some(&SteamEdition::Listed(Some(Tier::Platinum)))
+    );
 }

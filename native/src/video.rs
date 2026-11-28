@@ -444,6 +444,9 @@ fn run(
                 ("network-timeout", "10"),
                 ("sw-fast", "yes"),
                 ("hwdec", "auto-safe"),
+                // Frames are rendered at 960x540, so 720p is the largest useful variant;
+                // 1080p only doubles the download before the first frame.
+                ("hls-bitrate", "3000000"),
             ] {
                 (api.option)(
                     handle,

@@ -66,129 +66,180 @@ impl ModBrowser {
         let order = self.order;
         let executor = cx.background_executor().clone();
         self.catalog_task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            enum ProviderReply {
+                Nexus(SearchResult<Snapshot>),
+                GameBanana(SearchResult<u64>),
+                ModWorkshop(SearchResult<u64>),
+                Workshop(Result<CatalogPage, String>),
+            }
+
             if debounce {
                 executor.timer(Duration::from_millis(320)).await;
             }
-            let nexus_job = executor.spawn({
-                let (backend, game, query) = (backend.clone(), game.clone(), query.clone());
-                async move {
-                    fetch(
-                        nexus,
-                        pages.nexus,
-                        refresh,
-                        || backend.nexus_catalog(&game, refresh),
-                        |snapshot, offset| {
-                            if installed_only {
-                                Ok(CatalogPage::default())
+            let (tx, mut rx) = futures::channel::mpsc::unbounded::<ProviderReply>();
+            if pages.nexus.is_some() {
+                let (tx, backend, game, query) =
+                    (tx.clone(), backend.clone(), game.clone(), query.clone());
+                executor
+                    .spawn(async move {
+                        let reply = fetch(
+                            nexus,
+                            pages.nexus,
+                            refresh,
+                            || backend.nexus_catalog(&game, refresh),
+                            |snapshot, offset| {
+                                if installed_only {
+                                    Ok(CatalogPage::default())
+                                } else {
+                                    backend.nexus_page(
+                                        &snapshot.community,
+                                        &query,
+                                        offset,
+                                        order,
+                                        refresh,
+                                    )
+                                }
+                            },
+                        );
+                        let _ = tx.unbounded_send(ProviderReply::Nexus(reply));
+                    })
+                    .detach();
+            }
+            if pages.gamebanana.is_some() {
+                let (tx, backend, game, query) =
+                    (tx.clone(), backend.clone(), game.clone(), query.clone());
+                executor
+                    .spawn(async move {
+                        let reply = fetch(
+                            gamebanana,
+                            pages.gamebanana,
+                            refresh,
+                            || backend.gamebanana_game(&game, refresh),
+                            |id, page| backend.gamebanana_page(*id, &query, page, order, refresh),
+                        );
+                        let _ = tx.unbounded_send(ProviderReply::GameBanana(reply));
+                    })
+                    .detach();
+            }
+            if pages.modworkshop.is_some() {
+                let (tx, backend, game, query) =
+                    (tx.clone(), backend.clone(), game.clone(), query.clone());
+                executor
+                    .spawn(async move {
+                        let reply = fetch(
+                            modworkshop,
+                            pages.modworkshop,
+                            refresh,
+                            || backend.modworkshop_game(&game, refresh),
+                            |id, page| backend.modworkshop_page(*id, &query, page, order, refresh),
+                        );
+                        let _ = tx.unbounded_send(ProviderReply::ModWorkshop(reply));
+                    })
+                    .detach();
+            }
+            if let Some(page) = pages.workshop {
+                let tx = tx.clone();
+                executor
+                    .spawn(async move {
+                        let reply = backend.workshop_page(&game, &query, page, order, refresh);
+                        let _ = tx.unbounded_send(ProviderReply::Workshop(reply));
+                    })
+                    .detach();
+            }
+            drop(tx);
+
+            let mut cleared = !reset;
+            let mut request_query = Some(request_query);
+            while let Some(reply) = rx.next().await {
+                let alive = this.update(cx, |this, cx| {
+                    let old_scroll = this.scroll.0.borrow().base_handle.offset();
+                    let was_reset = !cleared;
+                    let discovery = &mut this.discovery;
+                    if !cleared {
+                        discovery.packages.clear();
+                        if let Some(query) = request_query.take() {
+                            discovery.query = query;
+                        }
+                        discovery.warnings.clear();
+                        cleared = true;
+                    }
+                    let warnings = &mut discovery.warnings;
+                    let incoming_page = match reply {
+                        ProviderReply::Nexus(reply) => {
+                            let page = if this.nexus_revision == nexus_revision {
+                                reply.apply(&mut discovery.nexus, "Nexus Mods", warnings)
                             } else {
-                                backend.nexus_page(
-                                    &snapshot.community,
-                                    &query,
-                                    offset,
-                                    order,
-                                    refresh,
-                                )
-                            }
-                        },
-                    )
-                }
-            });
-            let gamebanana_job = executor.spawn({
-                let (backend, game, query) = (backend.clone(), game.clone(), query.clone());
-                async move {
-                    fetch(
-                        gamebanana,
-                        pages.gamebanana,
-                        refresh,
-                        || backend.gamebanana_game(&game, refresh),
-                        |id, page| backend.gamebanana_page(*id, &query, page, order, refresh),
-                    )
-                }
-            });
-            let modworkshop_job = executor.spawn({
-                let (backend, game, query) = (backend.clone(), game.clone(), query.clone());
-                async move {
-                    fetch(
-                        modworkshop,
-                        pages.modworkshop,
-                        refresh,
-                        || backend.modworkshop_game(&game, refresh),
-                        |id, page| backend.modworkshop_page(*id, &query, page, order, refresh),
-                    )
-                }
-            });
-            let workshop_job = executor.spawn(async move {
-                pages.workshop.map_or_else(
-                    || Ok(CatalogPage::default()),
-                    |page| backend.workshop_page(&game, &query, page, order, refresh),
-                )
-            });
-            let (nexus, gamebanana, modworkshop, workshop) =
-                futures::join!(nexus_job, gamebanana_job, modworkshop_job, workshop_job);
-            this.update(cx, |this, cx| {
-                this.catalog_task = None;
-                let old_scroll = this.scroll.0.borrow().base_handle.offset();
-                let discovery = &mut this.discovery;
-                if reset {
-                    discovery.packages.clear();
-                    discovery.query = request_query;
-                    discovery.warnings.clear();
-                }
-                let warnings = &mut discovery.warnings;
-                // Install and import operations can replace the installed Nexus profile
-                // while this background request is running.
-                let nexus = if this.nexus_revision == nexus_revision {
-                    nexus.apply(&mut discovery.nexus, "Nexus Mods", warnings)
-                } else {
-                    nexus.apply(&mut None, "Nexus Mods", warnings)
-                };
-                let gamebanana =
-                    gamebanana.apply(&mut discovery.gamebanana, "GameBanana", warnings);
-                let modworkshop =
-                    modworkshop.apply(&mut discovery.modworkshop, "ModWorkshop", warnings);
-                let workshop = page_or_warn(workshop, "Steam Workshop", warnings);
-                discovery.next = Pages {
-                    nexus: next_page(pages.nexus, nexus.next, discovery.next.nexus),
-                    gamebanana: next_page(
-                        pages.gamebanana,
-                        gamebanana.next,
-                        discovery.next.gamebanana,
-                    ),
-                    modworkshop: next_page(
-                        pages.modworkshop,
-                        modworkshop.next,
-                        discovery.next.modworkshop,
-                    ),
-                    workshop: next_page(pages.workshop, workshop.next, discovery.next.workshop),
-                };
-                warnings.sort();
-                warnings.dedup();
-                let mut incoming = [
-                    nexus.packages.into_iter(),
-                    gamebanana.packages.into_iter(),
-                    modworkshop.packages.into_iter(),
-                    workshop.packages.into_iter(),
-                ];
-                let mut listed: HashSet<_> =
-                    discovery.packages.iter().map(|p| p.id.clone()).collect();
-                while incoming.iter().any(|batch| batch.len() > 0) {
+                                reply.apply(&mut None, "Nexus Mods", warnings)
+                            };
+                            discovery.next.nexus =
+                                next_page(pages.nexus, page.next, discovery.next.nexus);
+                            page
+                        }
+                        ProviderReply::GameBanana(reply) => {
+                            let page =
+                                reply.apply(&mut discovery.gamebanana, "GameBanana", warnings);
+                            discovery.next.gamebanana = next_page(
+                                pages.gamebanana,
+                                page.next,
+                                discovery.next.gamebanana,
+                            );
+                            page
+                        }
+                        ProviderReply::ModWorkshop(reply) => {
+                            let page =
+                                reply.apply(&mut discovery.modworkshop, "ModWorkshop", warnings);
+                            discovery.next.modworkshop = next_page(
+                                pages.modworkshop,
+                                page.next,
+                                discovery.next.modworkshop,
+                            );
+                            page
+                        }
+                        ProviderReply::Workshop(reply) => {
+                            let page = page_or_warn(reply, "Steam Workshop", warnings);
+                            discovery.next.workshop =
+                                next_page(pages.workshop, page.next, discovery.next.workshop);
+                            page
+                        }
+                    };
+                    warnings.sort();
+                    warnings.dedup();
+                    let mut listed: HashSet<_> =
+                        discovery.packages.iter().map(|p| p.id.clone()).collect();
                     discovery.packages.extend(
-                        incoming
-                            .iter_mut()
-                            .filter_map(Iterator::next)
+                        incoming_page
+                            .packages
+                            .into_iter()
                             .filter(|p| listed.insert(p.id.clone())),
                     );
+                    if this.can_install_nexus() {
+                        this.owner
+                            .update(cx, |owner, cx| owner.check_nexus_account(cx))
+                            .ok();
+                    }
+                    this.rebuild_rows(cx);
+                    if !was_reset {
+                        let mut scroll = this.scroll.0.borrow_mut();
+                        scroll.deferred_scroll_to_item = None;
+                        scroll.base_handle.set_offset(old_scroll);
+                    }
+                });
+                if alive.is_err() {
+                    return;
                 }
-                if this.can_install_nexus() {
-                    this.owner
-                        .update(cx, |owner, cx| owner.check_nexus_account(cx))
-                        .ok();
-                }
-                this.rebuild_rows(cx);
-                if !reset {
-                    let mut scroll = this.scroll.0.borrow_mut();
-                    scroll.deferred_scroll_to_item = None;
-                    scroll.base_handle.set_offset(old_scroll);
+            }
+            this.update(cx, |this, cx| {
+                this.catalog_task = None;
+                if !cleared {
+                    this.discovery.packages.clear();
+                    if let Some(query) = request_query.take() {
+                        this.discovery.query = query;
+                    }
+                    this.discovery.warnings.clear();
+                    this.rebuild_rows(cx);
+                } else {
+                    cx.notify();
                 }
             })
             .ok();

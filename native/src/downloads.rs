@@ -507,10 +507,13 @@ impl Launcher {
                     .rounded(rems(0.45))
                     .overflow_hidden()
                     .bg(rgba(0xffffff14))
-                    .when_some(game.poster.clone(), |d, poster| {
-                        d.child(img(poster).size_full().object_fit(ObjectFit::Cover))
-                    })
-                    .when(game.poster.is_none(), |d| {
+                    .when_some(
+                        game.poster.clone().or_else(|| game.card_poster.clone()),
+                        |d, poster| {
+                            d.child(img(poster).size_full().object_fit(ObjectFit::Cover))
+                        },
+                    )
+                    .when(game.poster.is_none() && game.card_poster.is_none(), |d| {
                         d.flex()
                             .items_center()
                             .justify_center()

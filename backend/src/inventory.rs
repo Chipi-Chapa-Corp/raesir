@@ -8,18 +8,27 @@ pub fn scan(
 ) -> Report {
     let mut report = steam::scan(options, owned, previous);
     let prefixes = crate::discovery::prefixes(&report);
-    let (epic, warnings) = epic::scan(
-        options,
-        &report,
-        online,
-        previous.map(|r| &r.epic),
-        &prefixes,
-    );
+    let ((epic, epic_warnings), (ea, ea_warnings)) = std::thread::scope(|scope| {
+        let ea = scope.spawn(|| ea::scan(&report, previous.map(|r| &r.ea), &prefixes));
+        let epic = epic::scan(
+            options,
+            &report,
+            online,
+            previous.map(|r| &r.epic),
+            &prefixes,
+        );
+        let ea = ea.join().unwrap_or_else(|_| {
+            (
+                EaReport::default(),
+                vec!["EA library scan stopped unexpectedly.".into()],
+            )
+        });
+        (epic, ea)
+    });
     report.epic = epic;
-    report.warnings.extend(warnings);
-    let (ea, warnings) = ea::scan(&report, previous.map(|r| &r.ea), &prefixes);
+    report.warnings.extend(epic_warnings);
     report.ea = ea;
-    report.warnings.extend(warnings);
+    report.warnings.extend(ea_warnings);
     let (catalog, warnings) = adapters::scan(&report, previous, prefixes);
     report.catalog = catalog;
     crate::catalog::remove_host_mount_aliases(&mut report.catalog);

@@ -19,7 +19,17 @@ impl Manager {
         }
         let query = crate::catalog::encode(&game.title);
         let url = format!("{API}/games?query={query}");
-        let data = self.modworkshop_json(&url, refresh, true)?;
+        let data = self.provider_json_ttl(
+            &url,
+            providers::CATALOG_TTL,
+            refresh,
+            true,
+            || {
+                providers::read_json(|| {
+                    Ok(providers::http()?.get(&url).timeout(Duration::from_secs(10)))
+                })
+            },
+        )?;
         let mut games = records(&data)?.iter().filter(|record| {
             record["name"]
                 .as_str()

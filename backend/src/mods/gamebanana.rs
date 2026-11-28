@@ -69,7 +69,17 @@ impl Manager {
             "{SITE}/apiv11/Util/Search/Results?_sModelName=Game&_sSearchString={}",
             crate::catalog::encode(&game.title)
         );
-        let response = self.gamebanana_json(&url, refresh)?;
+        let response = self.provider_json_ttl(
+            &url,
+            providers::CATALOG_TTL,
+            refresh,
+            true,
+            || {
+                providers::read_json(|| {
+                    Ok(providers::http()?.get(&url).timeout(Duration::from_secs(10)))
+                })
+            },
+        )?;
         let mut matches = records(&response)?.iter().filter(|record| {
             record["_sModelName"] == "Game"
                 && providers::normalized_title(string(&record["_sName"])) == title

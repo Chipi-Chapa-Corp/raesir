@@ -363,6 +363,7 @@ impl Manager {
                 .then_with(|| a.name.cmp(&b.name))
         });
         let packages = Arc::new(packages);
+        let _ = crate::storage::write_json(&self.thunderstore_cache_path(community), &*packages);
         self.catalogs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -375,6 +376,37 @@ impl Manager {
                 },
             );
         Ok((index, packages))
+    }
+
+    fn thunderstore_cache_path(&self, community: &str) -> PathBuf {
+        self.cache
+            .join("thunderstore")
+            .join(format!("{community}.json"))
+    }
+
+    fn cached_thunderstore_packages(&self, community: &str, refresh: bool) -> Option<Arc<Vec<Package>>> {
+        if !refresh
+            && let Some(catalog) = self
+                .catalogs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(community)
+            && catalog.updated.elapsed() < Duration::from_secs(1800)
+        {
+            return Some(catalog.packages.clone());
+        }
+        let path = self.thunderstore_cache_path(community);
+        let fresh = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < Duration::from_secs(1800));
+        if (!refresh && fresh) || crate::http::network_disabled() {
+            let bytes = fs::read(&path).ok()?;
+            let packages: Vec<Package> = serde_json::from_slice(&bytes).ok()?;
+            return Some(Arc::new(packages));
+        }
+        None
     }
 
     fn own_path(&self, community: &str) -> Option<PathBuf> {
@@ -507,14 +539,22 @@ impl Manager {
             (self.stardew_profile_packages()?, Vec::new(), None)
         } else if deadlock::matches(game) {
             (Arc::default(), Vec::new(), None)
+        } else if let Some(packages) = self.cached_thunderstore_packages(community, refresh) {
+            (packages, Vec::new(), None)
         } else {
             match self.catalog(community, refresh) {
                 Ok((_, packages)) => (packages, Vec::new(), None),
-                Err(error) => (
-                    Arc::default(),
-                    vec![format!("Thunderstore could not load: {error}")],
-                    None,
-                ),
+                Err(error) => {
+                    let stale = fs::read(self.thunderstore_cache_path(community))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Vec<Package>>(&bytes).ok())
+                        .map(Arc::new);
+                    (
+                        stale.unwrap_or_default(),
+                        vec![format!("Thunderstore could not load: {error}")],
+                        None,
+                    )
+                }
             }
         };
         warnings.extend(self.update_warnings(game));

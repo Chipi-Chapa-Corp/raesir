@@ -198,6 +198,14 @@ impl Backend {
         report
     }
 
+    fn set_cached(&self, mut report: Report) -> Arc<Report> {
+        report.catalog.retain(raesir_backend::catalog::visible);
+        let mut current = self.report.write().unwrap_or_else(|e| e.into_inner());
+        let report = Arc::new(report);
+        *current = Some(report.clone());
+        report
+    }
+
     pub(crate) fn latest_report(&self) -> Option<Arc<Report>> {
         self.report
             .read()
@@ -206,21 +214,15 @@ impl Backend {
     }
 
     pub fn cached(&self) -> Result<Option<Arc<Report>>, String> {
-        let report = if let Some(path) = &self.fixture {
-            Some(
+        if let Some(path) = &self.fixture {
+            let report: Report =
                 serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?,
-            )
-        } else {
-            storage::cached(&self.data).map(|mut report| {
-                // Volume state can change between sessions while the catalog stays cached.
-                if report.host_os == Os::Linux {
-                    report.volumes = raesir_backend::platform::volumes().0;
-                }
-                report
-            })
-        };
-        Ok(report.map(|r| self.set(r)))
+                    .map_err(|e| e.to_string())?;
+            return Ok(Some(self.set(report)));
+        }
+        // Return the saved snapshot immediately with zero subprocesses for instant
+        // first paint; the background refresh updates live volumes, bridges, and mods.
+        Ok(storage::cached(&self.data).map(|report| self.set_cached(report)))
     }
 
     pub fn scan(&self) -> Result<Arc<Report>, String> {
@@ -1475,6 +1477,33 @@ impl Backend {
         raesir_backend::details::fetch(game, &self.cache.join("details"))
     }
 
+    pub fn details_core(
+        &self,
+        game: &LibraryGame,
+    ) -> Result<(raesir_backend::details::Details, Option<String>), String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return self
+                .cached_details(game)
+                .map(|details| (details, None))
+                .ok_or("No details in this diagnostic profile".into());
+        }
+        raesir_backend::details::fetch_core(game, &self.cache.join("details"))
+    }
+
+    pub fn details_enrich(
+        &self,
+        game: &LibraryGame,
+        details: raesir_backend::details::Details,
+        parent: Option<String>,
+    ) -> Result<raesir_backend::details::Details, String> {
+        self.ready()?;
+        if self.fixture.is_some() {
+            return Ok(details);
+        }
+        raesir_backend::details::enrich(game, details, parent, &self.cache.join("details"))
+    }
+
     pub fn review_page(
         &self,
         appid: &str,
@@ -2047,7 +2076,7 @@ mod tests {
             raesir_backend::catalog::entry("steam", "1", "Cached game", vec![], "fixture");
         game.cover = Some(path.to_string_lossy().into_owned());
         let ready = crate::artwork::load(&backend, &game).unwrap();
-        let image = &ready.poster;
+        let image = ready.poster.as_ref().unwrap();
         assert_eq!(image.frame_count(), 1);
         assert!(!image.as_bytes(0).unwrap().is_empty());
         let again = crate::artwork::load(&backend, &game).unwrap();

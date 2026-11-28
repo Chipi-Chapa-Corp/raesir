@@ -15,6 +15,7 @@ pub struct Ratings {
     cached_by_app: HashMap<u32, Tier>,
     pending: HashSet<u32>,
     xbox_editions: HashMap<String, Option<SteamEdition>>,
+    cached_xbox_editions: HashMap<String, SteamEdition>,
     pending_xbox: HashSet<String>,
     pub scan_offset: usize,
 }
@@ -75,7 +76,11 @@ impl Ratings {
         title: &str,
         host: Os,
     ) -> Option<CompatibilityStatus> {
-        let edition = self.xbox_editions.get(title).copied().flatten();
+        let edition = self
+            .xbox_editions
+            .get(title)
+            .copied()
+            .unwrap_or_else(|| self.cached_xbox_editions.get(title).copied());
         library::xbox_compatibility(game, host, edition)
     }
 
@@ -105,14 +110,17 @@ pub fn load_cached(this: &Launcher, cx: &mut Context<Launcher>) {
         return;
     }
     let backend = this.backend.clone();
-    let task = cx
-        .background_executor()
-        .spawn(async move { protondb::cached_ratings(&backend.cache) });
+    let task = cx.background_executor().spawn(async move {
+        let ratings = protondb::cached_ratings(&backend.cache);
+        let xbox = protondb::cached_xbox_editions(&backend.cache, &ratings);
+        (ratings, xbox)
+    });
     cx.spawn(async move |this, cx| {
-        let ratings = task.await;
+        let (ratings, xbox) = task.await;
         this.update(cx, |this, cx| {
-            if !this.closing && !ratings.is_empty() {
+            if !this.closing && (!ratings.is_empty() || !xbox.is_empty()) {
                 this.compatibility.cached_by_app = ratings;
+                this.compatibility.cached_xbox_editions = xbox;
                 if should_resort_visible(
                     this.active_verification().is_some(),
                     this.rows.logical_scroll_top().item_ix > 0,

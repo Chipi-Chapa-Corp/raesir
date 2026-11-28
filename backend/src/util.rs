@@ -26,6 +26,29 @@ pub fn read_limited_text(reader: impl Read, limit: u64) -> io::Result<Option<Str
     Ok((text.len() as u64 <= limit).then_some(text))
 }
 
+/// Fast compression for local binary caches (zstd level 1 on Linux, raw fallback elsewhere).
+pub fn compress_fast(data: &[u8]) -> (u8, Vec<u8>) {
+    #[cfg(target_os = "linux")]
+    if let Ok(compressed) = zstd::bulk::compress(data, 1)
+        && compressed.len() < data.len()
+    {
+        return (1, compressed);
+    }
+    (0, data.to_vec())
+}
+
+/// Decompresses data produced by [`compress_fast`], rejecting unexpected output lengths.
+pub fn decompress_fast(codec: u8, data: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+    match codec {
+        0 if data.len() == expected_len => Some(data.to_vec()),
+        #[cfg(target_os = "linux")]
+        1 => zstd::bulk::decompress(data, expected_len)
+            .ok()
+            .filter(|out| out.len() == expected_len),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

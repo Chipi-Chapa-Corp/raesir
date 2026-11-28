@@ -96,17 +96,35 @@ impl Manager {
             domain.into()
         } else {
             // Vortex's catalog has names and Nexus domains, without store IDs.
-            let value = self
-                .provider_json_inner(GAME_CATALOG, refresh, true, || {
-                    providers::read_json(|| {
-                        Ok(providers::http()?
-                            .get(GAME_CATALOG)
-                            .timeout(Duration::from_secs(10)))
+            // Cache the parsed catalog in memory and persist for 7 days on disk.
+            static CATALOG_CACHE: std::sync::OnceLock<
+                std::sync::Mutex<Option<(std::time::Instant, Arc<Vec<NexusGame>>)>>,
+            > = std::sync::OnceLock::new();
+            let mem = CATALOG_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+            let catalog = if !refresh
+                && let Some((at, cached)) =
+                    mem.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                && at.elapsed() < Duration::from_secs(1800)
+            {
+                cached.clone()
+            } else {
+                let value = self
+                    .provider_json_ttl(GAME_CATALOG, providers::CATALOG_TTL, refresh, true, || {
+                        providers::read_json(|| {
+                            Ok(providers::http()?
+                                .get(GAME_CATALOG)
+                                .timeout(Duration::from_secs(10)))
+                        })
                     })
-                })
-                .map_err(|error| format!("Could not load the Nexus game catalog: {error}"))?;
-            let catalog: Vec<NexusGame> = serde_json::from_value(value)
-                .map_err(|error| format!("Invalid Nexus game catalog: {error}"))?;
+                    .map_err(|error| format!("Could not load the Nexus game catalog: {error}"))?;
+                let parsed: Arc<Vec<NexusGame>> = Arc::new(
+                    serde_json::from_value(value)
+                        .map_err(|error| format!("Invalid Nexus game catalog: {error}"))?,
+                );
+                *mem.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((std::time::Instant::now(), parsed.clone()));
+                parsed
+            };
             let Some(domain) = game_domain(&catalog, &game.title) else {
                 return Ok(None);
             };

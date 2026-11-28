@@ -64,6 +64,8 @@ pub struct DetailsPage {
     player_events: Option<Subscription>,
     fullscreen: bool,
     scroll: ScrollHandle,
+    scroll_bounds: Rc<Cell<Bounds<Pixels>>>,
+    reviews_bounds: Rc<Cell<Bounds<Pixels>>>,
     media_scroll: ScrollHandle,
     strip_bounds: Rc<Cell<Bounds<Pixels>>>,
     about_expanded: bool,
@@ -133,6 +135,8 @@ impl DetailsPage {
             player_events: None,
             fullscreen: false,
             scroll: ScrollHandle::new(),
+            scroll_bounds: Rc::new(Cell::new(Bounds::default())),
+            reviews_bounds: Rc::new(Cell::new(Bounds::default())),
             media_scroll: ScrollHandle::new(),
             strip_bounds: Rc::new(Cell::new(Bounds::default())),
             about_expanded: false,
@@ -544,6 +548,7 @@ impl Launcher {
         let mut source = game.source.clone();
         source.title.clone_from(&game.title);
         let poster = game.poster.clone();
+        let needs_poster = poster.is_none();
         let background = game.background.clone();
         let backdrop = self.backdrop.clone();
         let backend = self.backend.clone();
@@ -552,11 +557,13 @@ impl Launcher {
         self.hovered = None;
         self.game_menu = None;
         self.menu = false;
-        if let Some(image) = background {
+        if let Some(image) = background.clone() {
             backdrop.update(cx, |backdrop, cx| backdrop.retarget(image, cx));
         }
         let return_focus = self.focus.clone();
         let download_progress = self.display_progress(key);
+        let poster_source = source.clone();
+        let poster_backend = backend.clone();
         let page = cx.new(|cx| {
             DetailsPage::new(
                 source,
@@ -576,6 +583,39 @@ impl Launcher {
             page.load_stats(cx);
             page.check_proton_reviews(cx);
         });
+        if needs_poster {
+            let page_weak = page.downgrade();
+            let game_key = poster_source.key.clone();
+            cx.spawn(async move |this, cx| {
+                let loaded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::artwork::load_poster(&poster_backend.cache, &poster_source)
+                    })
+                    .await;
+                if let Some(poster) = loaded {
+                    this.update(cx, |this, _| {
+                        if let Some(game) = this
+                            .games
+                            .iter_mut()
+                            .find(|game| game.source.key == game_key)
+                        {
+                            game.poster = Some(poster.clone());
+                        }
+                    })
+                    .ok();
+                    page_weak
+                        .update(cx, |page, cx| {
+                            if page.poster.is_none() {
+                                page.set_poster(Some(poster));
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                }
+            })
+            .detach();
+        }
         self.details = Some(page);
         cx.notify();
     }
@@ -729,38 +769,71 @@ impl DetailsPage {
                 }
                 return;
             }
-            let result = cx
+            // Phase 1: fetch primary store metadata first so description, media,
+            // and requirements render quickly without waiting for reviews or fallbacks.
+            let core_result = cx
                 .background_executor()
-                .spawn(async move {
-                    let data = backend.details(&game)?;
-                    Ok::<_, String>(backend.remember_details(&game, data))
+                .spawn({
+                    let backend = backend.clone();
+                    let game = game.clone();
+                    async move { backend.details_core(&game) }
                 })
                 .await;
+            let result = match core_result {
+                Ok((core, parent)) => {
+                    let preview = Arc::new(core.clone());
+                    this.update(cx, |this, cx| {
+                        this.loading = false;
+                        this.apply_details(preview, cx);
+                    })
+                    .ok();
+                    // Phase 2: fetch reviews, author names, and fallback metadata in background.
+                    cx.background_executor()
+                        .spawn(async move {
+                            let data = backend.details_enrich(&game, core, parent)?;
+                            Ok::<_, String>(backend.remember_details(&game, data))
+                        })
+                        .await
+                }
+                Err(_) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            let data = backend.details(&game)?;
+                            Ok::<_, String>(backend.remember_details(&game, data))
+                        })
+                        .await
+                }
+            };
             this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(data) => {
-                        this.load_background(&data, cx);
-                        let selected = this
-                            .data
-                            .as_ref()
-                            .and_then(|d| d.media.get(this.selected))
-                            .and_then(|media| data.media.iter().position(|m| m.url == media.url));
-                        this.selected = selected.unwrap_or(0);
-                        if selected.is_none() {
-                            this.player = None;
-                            this.player_events = None;
-                            this.fullscreen = false;
-                        }
-                        this.animations.clear();
-                        this.data = Some(data);
+                    Ok(data) => this.apply_details(data, cx),
+                    Err(error) if this.data.is_none() => {
+                        this.error = Some(error);
+                        cx.notify();
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(_) => cx.notify(),
                 }
-                cx.notify();
             })
             .ok();
         }));
+        cx.notify();
+    }
+    fn apply_details(&mut self, data: Arc<Details>, cx: &mut Context<Self>) {
+        self.load_background(&data, cx);
+        let selected = self
+            .data
+            .as_ref()
+            .and_then(|d| d.media.get(self.selected))
+            .and_then(|media| data.media.iter().position(|m| m.url == media.url));
+        self.selected = selected.unwrap_or(0);
+        if selected.is_none() {
+            self.player = None;
+            self.player_events = None;
+            self.fullscreen = false;
+        }
+        self.animations.clear();
+        self.data = Some(data);
         cx.notify();
     }
     fn load_background(&mut self, data: &Details, cx: &mut Context<Self>) {
@@ -995,6 +1068,20 @@ impl DetailsPage {
             cx.notify();
             this.schedule(window, cx);
         });
+    }
+    fn scroll_to_reviews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reviews = self.reviews_bounds.get();
+        let viewport = self.scroll_bounds.get();
+        if reviews.size.height <= px(0.) || viewport.size.height <= px(0.) {
+            return;
+        }
+        let current = -f32::from(self.scroll.offset().y) as f64;
+        let top_margin = f32::from(window.rem_size()) as f64 * 4.75;
+        let delta = f32::from(reviews.origin.y - viewport.origin.y) as f64 - top_margin;
+        let max = f32::from(self.scroll.max_offset().y) as f64;
+        self.wheel.reset(current);
+        self.wheel.push(delta, Instant::now(), max);
+        self.schedule(window, cx);
     }
     fn gallery(
         &mut self,
@@ -1400,12 +1487,20 @@ impl DetailsPage {
             }
             if let Some(score) = data.score() {
                 let label = data.scores.join(" · ");
+                let can_jump_to_reviews = self.mod_context.is_none() || !data.reviews.is_empty();
                 badges = badges.child(
                     bubble()
                         .id("details-score")
                         .children(
                             (0..5).map(|i| rating_star((score - i as f64).clamp(0., 1.) as f32)),
                         )
+                        .when(can_jump_to_reviews, |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(rgba(0xffffff18)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.scroll_to_reviews(window, cx);
+                                }))
+                        })
                         .tooltip(move |_, cx| cx.new(|_| Tooltip(label.clone())).into()),
                 );
             }
@@ -1718,16 +1813,32 @@ impl Render for DetailsPage {
                 );
             }
             if self.mod_context.is_none() || !data.reviews.is_empty() {
-                body = body.child(self.reviews_content(Some(data), window, cx));
+                let reviews_bounds = self.reviews_bounds.clone();
+                body = body.child(
+                    self.reviews_content(Some(data), window, cx)
+                        .id("details-reviews")
+                        .on_prepaint(move |paint, _, _| reviews_bounds.set(paint.bounds)),
+                );
+            } else {
+                self.reviews_bounds.set(Bounds::default());
             }
         } else if self.loading {
+            self.reviews_bounds.set(Bounds::default());
             body = body.child(content_skeleton());
         } else if self.has_proton_reviews() {
-            body = body.child(self.reviews_content(None, window, cx));
+            let reviews_bounds = self.reviews_bounds.clone();
+            body = body.child(
+                self.reviews_content(None, window, cx)
+                    .id("details-reviews")
+                    .on_prepaint(move |paint, _, _| reviews_bounds.set(paint.bounds)),
+            );
+        } else {
+            self.reviews_bounds.set(Bounds::default());
         }
         let dropdown = self.review_menu(window, cx);
         let achievements = self.achievements_popup(cx);
         let owner = cx.weak_entity();
+        let scroll_bounds = self.scroll_bounds.clone();
         let scroll_input = canvas(
             |_, _, _| (),
             move |bounds, (), window, _| {
@@ -1753,6 +1864,7 @@ impl Render for DetailsPage {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    .on_prepaint(move |paint, _, _| scroll_bounds.set(paint.bounds))
                     .child(body),
             )
             .when(!self.fullscreen, |d| {
