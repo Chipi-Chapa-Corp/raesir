@@ -10,7 +10,7 @@ Additional filter icons:
   adjusted to match the existing symbolic icons.
 - `adwaita/emote-sick.svg`: [GNOME Icon Development Kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit/-/blob/main/icons/emote-sick.svg),
   by Jakub Steiner, CC0-1.0, used for untested Xbox titles without a Steam match.
-- `../../build/icon.svg`: original Raesir E-gamepad application artwork,
+- `../../build/icon.svg`: original Raesir `æ` application artwork,
   distributed under the project’s GPL-3.0-only license. `icon.png` and `icon.ico`
   in the same directory are generated from it.
 

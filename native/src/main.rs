@@ -298,12 +298,16 @@ impl Launcher {
     }
 
     fn matching_games_for_filters(&self) -> Vec<usize> {
-        library::matching_games(
+        let mut matches = library::matching_games(
             &self.games,
             &self.query.trim().to_lowercase(),
             self.saved_filters,
             self.host,
-        )
+        );
+        if self.active_verification().is_some() {
+            library::sort_matches(&mut matches, &self.games, self.host, |_| false);
+        }
+        matches
     }
 
     fn refresh_title_matches(&mut self, cx: &mut Context<Self>) {
@@ -315,8 +319,16 @@ impl Launcher {
             self.matching_games = matching_games;
             self.compatibility.scan_offset = 0;
             compatibility::request_filtered(self, cx);
+            if self.active_verification().is_none()
+                && self.rows.logical_scroll_top().item_ix > 0
+            {
+                let visible =
+                    library::merge_visible_preserving_order(&self.visible, &self.matching_games);
+                self.apply_visible_matches(visible);
+            } else {
+                self.update_visible_matches();
+            }
         }
-        self.update_visible_matches();
         cx.notify();
     }
 
@@ -344,6 +356,10 @@ impl Launcher {
 
     fn update_visible_matches(&mut self) {
         let visible = self.sorted_matches();
+        self.apply_visible_matches(visible);
+    }
+
+    fn apply_visible_matches(&mut self, visible: Vec<usize>) {
         if visible != self.visible {
             let mut scroll = self.rows.logical_scroll_top();
             if scroll.item_ix > 0

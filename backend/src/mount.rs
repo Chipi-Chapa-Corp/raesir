@@ -187,7 +187,7 @@ pub fn validate_volume<'a>(volumes: &'a [Volume], id: &str) -> Result<&'a Volume
     if matches.next().is_some() {
         return Err("Multiple partitions share this filesystem UUID. Identify and mount it through the operating system.".into());
     }
-    if !volume.mountpoints.is_empty() {
+    if volume.is_mounted() {
         return Err("This partition is already mounted. Rescan to read it.".into());
     }
     if mount_options(&volume.filesystem).is_none() {
@@ -309,6 +309,9 @@ mod tests {
         volume.mountpoints.push("/mnt/test".into());
         assert!(validate_volume(&[volume.clone()], "disk").is_err());
         volume.mountpoints.clear();
+        volume.mounted = true;
+        assert!(validate_volume(&[volume.clone()], "disk").is_err());
+        volume.mounted = false;
         volume.filesystem = "crypto_LUKS".into();
         assert!(validate_volume(&[volume], "disk").is_err());
     }

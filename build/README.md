@@ -81,7 +81,7 @@ for Nexus API requests. Release builds use the registered sign-in flow.
 Linux builds use Secret Service for the account credential and require the D-Bus
 development package (`libdbus-1-dev` on Debian/Ubuntu, `dbus-devel` on Fedora).
 
-`build/icon.svg` is the canonical original Raesir E-gamepad artwork.
+`build/icon.svg` is the canonical original Raesir `æ` artwork.
 The native window and Flatpak raster icon use `build/icon.png`. Windows executables,
 Explorer, taskbar entries, shortcuts, and the installer use `build/icon.ico`,
 which includes 16–256 px images. The Windows resource also supplies the application

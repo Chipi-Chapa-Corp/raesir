@@ -33,6 +33,7 @@ struct Row {
     installed: bool,
     search: String,
     remote: bool,
+    local_tail: bool,
     icon: String,
     source: String,
 }
@@ -560,12 +561,13 @@ impl ModBrowser {
         }
         let mut local = local.into_iter();
         let remote = &self.discovery.packages;
+        let has_remote = !remote.is_empty();
         let catalog = remote
             .iter()
             .flat_map(|package| {
-                [(package, true)]
+                [(package, true, false)]
                     .into_iter()
-                    .chain(local.next().map(|package| (package, false)))
+                    .chain(local.next().map(|package| (package, false, false)))
             })
             .collect::<Vec<_>>();
         let remote_ids = remote
@@ -575,14 +577,15 @@ impl ModBrowser {
         let mut listed = HashSet::new();
         let mut rows = catalog
             .into_iter()
-            .chain(local.map(|package| (package, false)))
-            .filter(|(package, remote)| {
+            .chain(local.map(|package| (package, false, has_remote)))
+            .filter(|(package, remote, _)| {
                 (*remote || !remote_ids.contains(package.id.as_str()))
                     && listed.insert(package.id.as_str())
             })
-            .map(|(p, remote)| Row {
+            .map(|(p, remote, local_tail)| Row {
                 search: String::new(),
                 remote,
+                local_tail,
                 icon: p.icon.clone(),
                 id: p.id.clone(),
                 title: p.name.replace('_', " "),
@@ -638,6 +641,7 @@ impl ModBrowser {
                     Row {
                         search: String::new(),
                         remote: false,
+                        local_tail: false,
                         icon: String::new(),
                         id: m.id.clone(),
                         title: m.name.replace('_', " "),
@@ -664,12 +668,21 @@ impl ModBrowser {
     }
 
     fn filter_rows(&mut self, cx: &mut Context<Self>) {
+        // Defer un-interleaved local packages while more remote pages exist so
+        // loading the next remote page appends cleanly instead of inserting
+        // between already-visible local rows.
+        let defer_local_tail = self.source_filter.is_none()
+            && self.filter == 0
+            && self.query.is_empty()
+            && !self.discovery.packages.is_empty()
+            && self.discovery.has_more();
         self.rows = self
             .all_rows
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                self.source_filter.is_none_or(|source| r.source == source)
+                !(defer_local_tail && r.local_tail)
+                    && self.source_filter.is_none_or(|source| r.source == source)
                     && (self.filter == 0
                         || self.filter == 1 && r.installed
                         || self.filter == 2 && !r.installed && self.can_manage_mod(&r.id))

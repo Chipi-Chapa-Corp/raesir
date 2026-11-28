@@ -271,19 +271,27 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
     fn visit(value: &Value, output: &mut Vec<Volume>) {
         let filesystem = value["fstype"].as_str().unwrap_or("");
         let partition_type = value["parttype"].as_str().unwrap_or("");
-        // Windows RE uses a designated GPT type or MBR type 0x27.
-        let recovery = partition_type.eq_ignore_ascii_case("de94bba4-06d1-4d40-a16a-bfd50179d6ac")
-            || partition_type.eq_ignore_ascii_case("0x27");
+        // Windows RE uses a designated GPT type or MBR type 0x27; Linux XBOOTLDR
+        // (/boot) uses bc13c2ff-59e6-4262-a352-b275fd6f7172.
+        let system_partition = partition_type
+            .eq_ignore_ascii_case("de94bba4-06d1-4d40-a16a-bfd50179d6ac")
+            || partition_type.eq_ignore_ascii_case("0x27")
+            || partition_type.eq_ignore_ascii_case("bc13c2ff-59e6-4262-a352-b275fd6f7172");
         if ["ntfs", "btrfs", "ext4", "crypto_LUKS", "BitLocker"]
             .iter()
             .any(|s| s.eq_ignore_ascii_case(filesystem))
-            && !recovery
+            && !system_partition
         {
-            let mountpoints = value["mountpoints"]
+            let raw_mountpoints: Vec<&str> = value["mountpoints"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
+                .filter(|p| p.starts_with('/'))
+                .collect();
+            let mounted = !raw_mountpoints.is_empty();
+            let mountpoints = raw_mountpoints
+                .into_iter()
                 .filter(|p| Path::new(p).is_dir())
                 .map(String::from)
                 .collect();
@@ -302,6 +310,7 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
                     .as_u64()
                     .or_else(|| value["size"].as_str()?.parse().ok()),
                 mountpoints,
+                mounted,
                 ..Volume::default()
             };
             // Btrfs reports the same filesystem UUID on every member, but
@@ -320,6 +329,7 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
                         .and_then(|(total, size)| total.checked_add(size));
                 }
                 pool.label = pool.label.take().or(volume.label);
+                pool.mounted |= volume.mounted;
                 pool.mountpoints.extend(volume.mountpoints);
             } else {
                 output.push(volume);
@@ -346,10 +356,12 @@ pub fn parse_lsblk(data: &Value) -> Vec<Volume> {
             .map(|p| os_at(Path::new(p)))
             .find(|os| *os != Os::Unknown)
             .unwrap_or(Os::Unknown);
-        volume.note = if volume.mountpoints.is_empty() {
-            unreadable_note(Os::Linux, &volume.filesystem, false)
-        } else {
+        volume.note = if !volume.mountpoints.is_empty() {
             "Readable mount points will be checked for Steam libraries.".into()
+        } else if volume.mounted {
+            "Mounted on the host outside this sandbox.".into()
+        } else {
+            unreadable_note(Os::Linux, &volume.filesystem, false)
         };
     }
     result
@@ -497,20 +509,42 @@ mod tests {
     }
 
     #[test]
-    fn linux_discovery_identifies_data_partitions_and_excludes_windows_recovery() {
+    fn linux_discovery_identifies_data_partitions_and_excludes_system_partitions() {
         let data = serde_json::json!({"blockdevices":[
             {"path":"/dev/test1","fstype":"ntfs","label":"Games","size":602825523200_u64},
             {"path":"/dev/test2","fstype":"ntfs","parttype":"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"},
             {"path":"/dev/test3","fstype":"ntfs","parttype":"0x27"},
-            {"path":"/dev/test4","fstype":"ntfs","size":"1073741824"}
+            {"path":"/dev/test4","fstype":"ext4","parttype":"BC13C2FF-59E6-4262-A352-B275FD6F7172","mountpoints":["/boot"]},
+            {"path":"/dev/test5","fstype":"ntfs","size":"1073741824"}
         ]});
         let volumes = parse_lsblk(&data);
         assert_eq!(volumes.len(), 2);
         assert_eq!(volumes[0].device, "/dev/test1");
         assert_eq!(volumes[0].label.as_deref(), Some("Games"));
         assert_eq!(volumes[0].size_bytes, Some(602825523200));
-        assert_eq!(volumes[1].device, "/dev/test4");
+        assert_eq!(volumes[1].device, "/dev/test5");
         assert_eq!(volumes[1].size_bytes, Some(1073741824));
+    }
+
+    #[test]
+    fn host_mounted_partition_hidden_from_sandbox_stays_marked_mounted() {
+        let data = serde_json::json!({"blockdevices":[
+            {"path":"/dev/test1","fstype":"ext4","uuid":"boot-like","mountpoints":["/raesir-nonexistent-host-mount"]},
+            {"path":"/dev/test2","fstype":"btrfs","uuid":"pool-hidden","size":1024,"mountpoints":[null]},
+            {"path":"/dev/test3","fstype":"btrfs","uuid":"pool-hidden","size":2048,"mountpoints":["/raesir-nonexistent-pool-mount"]}
+        ]});
+        let volumes = parse_lsblk(&data);
+        assert_eq!(volumes.len(), 2);
+        for volume in &volumes {
+            assert!(volume.mountpoints.is_empty());
+            assert!(volume.mounted);
+            assert!(volume.is_mounted());
+            assert!(
+                crate::mount::validate_volume(&volumes, &volume.id)
+                    .unwrap_err()
+                    .contains("already mounted")
+            );
+        }
     }
 
     #[test]

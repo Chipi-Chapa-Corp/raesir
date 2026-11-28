@@ -263,7 +263,7 @@ impl Backend {
         volumes
             .iter()
             .filter(|volume| {
-                volume.mountpoints.is_empty()
+                !volume.is_mounted()
                     && rememberable_partition(&volume.id)
                     && choices.get(&volume.id) == Some(&PartitionChoice::Mount)
                     && !self

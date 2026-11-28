@@ -24,6 +24,10 @@ impl Discovery {
     pub(super) fn nexus(&self) -> Option<&Snapshot> {
         self.nexus.as_ref().and_then(Option::as_ref)
     }
+
+    pub(super) fn has_more(&self) -> bool {
+        self.next != Pages::default()
+    }
 }
 
 impl ModBrowser {

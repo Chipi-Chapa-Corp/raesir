@@ -92,6 +92,14 @@ impl Ratings {
     }
 }
 
+pub(crate) fn should_resort_visible(
+    active_verification: bool,
+    scrolled: bool,
+    initial_cache: bool,
+) -> bool {
+    active_verification || (initial_cache && !scrolled)
+}
+
 pub fn load_cached(this: &Launcher, cx: &mut Context<Launcher>) {
     if this.host != Os::Linux {
         return;
@@ -105,7 +113,13 @@ pub fn load_cached(this: &Launcher, cx: &mut Context<Launcher>) {
         this.update(cx, |this, cx| {
             if !this.closing && !ratings.is_empty() {
                 this.compatibility.cached_by_app = ratings;
-                this.update_visible_matches();
+                if should_resort_visible(
+                    this.active_verification().is_some(),
+                    this.rows.logical_scroll_top().item_ix > 0,
+                    true,
+                ) {
+                    this.update_visible_matches();
+                }
                 cx.notify();
             }
         })
@@ -160,7 +174,13 @@ fn request_steam(this: &mut Launcher, id: u32, cx: &mut Context<Launcher>) {
         this.update(cx, |this, cx| {
             this.compatibility.pending.remove(&id);
             this.compatibility.by_app.insert(id, result);
-            this.update_visible_matches();
+            if should_resort_visible(
+                this.active_verification().is_some(),
+                this.rows.logical_scroll_top().item_ix > 0,
+                false,
+            ) {
+                this.update_visible_matches();
+            }
             if let Some(page) = &this.details
                 && app_id(page.read(cx).game()) == Some(id)
             {
@@ -208,7 +228,13 @@ fn request_xbox(
             if let Some(page) = &this.details {
                 page.update(cx, |page, cx| page.update_compatibility(this, cx));
             }
-            if edition.is_some() {
+            if edition.is_some()
+                && should_resort_visible(
+                    this.active_verification().is_some(),
+                    this.rows.logical_scroll_top().item_ix > 0,
+                    false,
+                )
+            {
                 this.update_visible_matches();
             }
             request_filtered(this, cx);
@@ -217,4 +243,19 @@ fn request_xbox(
         .ok();
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lazy_compatibility_loads_never_reshuffle_unfiltered_grid() {
+        assert!(!should_resort_visible(false, false, false));
+        assert!(!should_resort_visible(false, true, false));
+        assert!(should_resort_visible(false, false, true));
+        assert!(!should_resort_visible(false, true, true));
+        assert!(should_resort_visible(true, false, false));
+        assert!(should_resort_visible(true, true, false));
+    }
 }

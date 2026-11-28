@@ -75,8 +75,17 @@ pub struct Volume {
     #[serde(default)]
     pub size_bytes: Option<u64>,
     pub mountpoints: Vec<String>,
+    /// True when the host reports a mount even if it is not visible inside a sandbox.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mounted: bool,
     pub os: Os,
     pub note: String,
+}
+
+impl Volume {
+    pub fn is_mounted(&self) -> bool {
+        self.mounted || !self.mountpoints.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

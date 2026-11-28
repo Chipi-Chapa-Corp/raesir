@@ -4,7 +4,7 @@ use crate::{
     header::pill,
     library::FerestreSetup,
 };
-use raesir_backend::model::Os;
+use raesir_backend::model::{Os, Volume};
 use gpui::{prelude::*, *};
 
 mod card;
@@ -192,7 +192,7 @@ impl Launcher {
                 r.volumes
                     .iter()
                     .filter(|v| {
-                        v.mountpoints.is_empty()
+                        !v.is_mounted()
                             && ["ntfs", "ext4", "btrfs", "linux"]
                                 .contains(&v.filesystem.to_lowercase().as_str())
                             && !self.ignored_partitions.contains(&v.id)
@@ -268,43 +268,16 @@ impl Launcher {
             .children(volumes.into_iter().map(|volume| {
                 let id = volume.id.clone();
                 let ntfs = volume.filesystem.eq_ignore_ascii_case("ntfs");
-                let pool = !volume.additional_devices.is_empty();
                 let os = if volume.os == Os::Windows || ntfs {
                     "windows"
                 } else {
                     "linux"
                 };
-                let title = volume.label.as_deref().unwrap_or(match volume.os {
-                    _ if pool => "Btrfs pool",
-                    Os::Windows => "Windows partition",
-                    Os::Linux => "Linux partition",
-                    Os::Unknown if ntfs => "NTFS partition",
-                    Os::Unknown => "Linux filesystem",
-                });
                 let can_mount = self.host == Os::Linux
                     && raesir_backend::mount::mount_options(&volume.filesystem).is_some();
+                let (title, metadata) = volume_banner_text(volume, can_mount);
                 let failure = mount_failures.get(&id).cloned()
                     .filter(|_| partition_choices.get(&id) == Some(&PartitionChoice::Mount));
-                let mut metadata = if pool {
-                    Some(format!("{} devices", volume.additional_devices.len() + 1))
-                } else if can_mount {
-                    volume.label.as_ref().map(|_| volume.device.clone())
-                } else {
-                    Some(volume.note.clone())
-                };
-                if let Some(text) = metadata.as_mut()
-                    && let Some(bytes) = volume.size_bytes
-                {
-                    let (size, unit) = if bytes >= 1 << 30 {
-                        (bytes as f64 / (1_u64 << 30) as f64, "GiB")
-                    } else {
-                        (bytes as f64 / (1_u64 << 20) as f64, "MiB")
-                    };
-                    text.push_str(&format!(" · {size:.1} {unit}"));
-                    if pool {
-                        text.push_str(" raw");
-                    }
-                }
                 pill()
                     .rounded(rems(1.))
                     .px(rems(1.))
@@ -315,7 +288,7 @@ impl Launcher {
                         div().flex().flex_1().min_w_0().items_center().gap(rems(0.8))
                             .child(crate::icons::system_icon(os).size(rems(1.55)))
                             .child(div().min_w_0().flex().flex_col().gap(rems(0.15)).py(rems(0.35))
-                                .child(div().text_size(rems(1.125)).child(title.to_owned()))
+                                .child(div().text_size(rems(1.125)).child(title))
                                 .when_some(metadata, |d, text| d.child(
                                     div().text_size(rems(0.95)).text_color(rgb(0xb2c7bc)).whitespace_normal().child(text)
                                 ))
@@ -677,5 +650,96 @@ impl Launcher {
                 )
         })
         .into_any_element()
+    }
+}
+
+fn volume_banner_text(volume: &Volume, can_mount: bool) -> (String, Option<String>) {
+    let ntfs = volume.filesystem.eq_ignore_ascii_case("ntfs");
+    let pool = !volume.additional_devices.is_empty();
+    let title = volume.label.as_deref().unwrap_or(match volume.os {
+        _ if pool => "Btrfs pool",
+        Os::Windows => "Windows partition",
+        Os::Linux => "Linux partition",
+        Os::Unknown if ntfs => "NTFS partition",
+        Os::Unknown => "Linux filesystem",
+    });
+    let mut metadata = if pool {
+        Some(format!("{} devices", volume.additional_devices.len() + 1))
+    } else if can_mount {
+        Some(volume.device.clone()).filter(|device| !device.is_empty())
+    } else {
+        Some(volume.note.clone()).filter(|note| !note.is_empty())
+    };
+    if let Some(bytes) = volume.size_bytes {
+        let (size, unit) = if bytes >= 1 << 30 {
+            (bytes as f64 / (1_u64 << 30) as f64, "GiB")
+        } else {
+            (bytes as f64 / (1_u64 << 20) as f64, "MiB")
+        };
+        let suffix = if pool {
+            format!("{size:.1} {unit} raw")
+        } else {
+            format!("{size:.1} {unit}")
+        };
+        match metadata.as_mut() {
+            Some(text) => text.push_str(&format!(" · {suffix}")),
+            None => metadata = Some(suffix),
+        }
+    }
+    (title.to_owned(), metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Volume, volume_banner_text};
+
+    #[test]
+    fn unlabeled_mountable_partition_shows_device_and_size() {
+        let volume = Volume {
+            device: "/dev/nvme0n1p3".into(),
+            filesystem: "ntfs".into(),
+            size_bytes: Some(300 * (1_u64 << 30)),
+            ..Volume::default()
+        };
+        let (title, metadata) = volume_banner_text(&volume, true);
+        assert_eq!(title, "NTFS partition");
+        assert_eq!(metadata.as_deref(), Some("/dev/nvme0n1p3 · 300.0 GiB"));
+
+        let ext4 = Volume {
+            device: "/dev/sda2".into(),
+            filesystem: "ext4".into(),
+            size_bytes: Some(2 * (1_u64 << 30)),
+            ..Volume::default()
+        };
+        let (title, metadata) = volume_banner_text(&ext4, true);
+        assert_eq!(title, "Linux filesystem");
+        assert_eq!(metadata.as_deref(), Some("/dev/sda2 · 2.0 GiB"));
+    }
+
+    #[test]
+    fn labeled_and_pool_banners_keep_existing_formatting() {
+        let labeled = Volume {
+            device: "/dev/nvme0n1p3".into(),
+            filesystem: "ntfs".into(),
+            label: Some("Games".into()),
+            size_bytes: Some(500 * (1_u64 << 20)),
+            ..Volume::default()
+        };
+        assert_eq!(
+            volume_banner_text(&labeled, true),
+            ("Games".into(), Some("/dev/nvme0n1p3 · 500.0 MiB".into()))
+        );
+
+        let pool = Volume {
+            device: "/dev/nvme0n1p6".into(),
+            additional_devices: vec!["/dev/nvme0n1p7".into()],
+            filesystem: "btrfs".into(),
+            size_bytes: Some(650 * (1_u64 << 30)),
+            ..Volume::default()
+        };
+        assert_eq!(
+            volume_banner_text(&pool, true),
+            ("Btrfs pool".into(), Some("2 devices · 650.0 GiB raw".into()))
+        );
     }
 }

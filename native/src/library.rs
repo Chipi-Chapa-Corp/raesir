@@ -299,6 +299,25 @@ pub(crate) fn sort_matches(
     });
 }
 
+pub(crate) fn merge_visible_preserving_order(
+    current: &[usize],
+    updated_matches: &[usize],
+) -> Vec<usize> {
+    let allowed: std::collections::HashSet<usize> = updated_matches.iter().copied().collect();
+    let mut kept = std::collections::HashSet::with_capacity(updated_matches.len());
+    let mut merged: Vec<usize> = current
+        .iter()
+        .copied()
+        .filter(|index| allowed.contains(index) && kept.insert(*index))
+        .collect();
+    for &index in updated_matches {
+        if kept.insert(index) {
+            merged.push(index);
+        }
+    }
+    merged
+}
+
 pub fn matching_games(
     games: &[Game],
     query: &str,
@@ -534,6 +553,14 @@ mod tests {
         let mut indices = [0, 1, 2, 3, 4, 5];
         sort_matches(&mut indices, &games, local, |game| game.title == "Verified");
         assert_eq!(indices, [4, 5, 3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn merge_visible_preserving_order_keeps_existing_positions_and_appends_new() {
+        assert_eq!(
+            merge_visible_preserving_order(&[4, 2, 5, 1], &[1, 2, 3, 5, 6]),
+            vec![2, 5, 1, 3, 6]
+        );
     }
 
     #[test]
